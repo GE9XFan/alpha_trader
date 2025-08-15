@@ -1,0 +1,17 @@
+{
+  "direct_rsi": {
+    "keys": [
+      "Meta Data",
+      "Technical Analysis: RSI"
+    ],
+    "sample": "{'Meta Data': {'1: Symbol': 'AAPL', '2: Indicator': 'Relative Strength Index (RSI)', '3: Last Refreshed': '2025-08-15', '4: Interval': 'daily', '5: Time Period': 14, '6: Series Type': 'close', '7: Time Zone': 'US/Eastern Time'}, 'Technical Analysis: RSI': {'2025-08-15': {'RSI': '71.1501'}, '2025-08-14': {'RSI': '73.4846'}, '2025-08-13': {'RSI': '74.5342'}, '2025-08-12': {'RSI': '72.0543'}, '2025-08-11': {'RSI': '70.2486'}, '2025-08-08': {'RSI': '73.6623'}, '2025-08-07': {'RSI': '66.2258'}, '2025..."
+  },
+  "scheduler_rsi": {
+    "keys": [
+      "endpoint",
+      "message",
+      "data"
+    ],
+    "sample": "{'endpoint': 'Realtime Options', 'message': 'success', 'data': [{'contractID': 'AAPL250815C00090000', 'symbol': 'AAPL', 'expiration': '2025-08-15', 'strike': '90.00', 'type': 'call', 'last': '144.15', 'mark': '141.97', 'bid': '140.70', 'bid_size': '100', 'ask': '143.25', 'ask_size': '100', 'volume': '1', 'open_interest': '6', 'date': '2025-08-15', 'implied_volatility': '8.46833', 'delta': '0.99072', 'gamma': '0.00024', 'theta': '-1.29196', 'vega': '0.00303', 'rho': '0.00240'}, {'contractID': 'AA..."
+  }
+}

@@ -1,0 +1,128 @@
+{
+  "timestamp": "2025-08-15T19:43:21.308833",
+  "bugs_found": [],
+  "unexpected_behaviors": [
+    "Scheduler response differs from direct call",
+    "Tokens didn't decrease: 20.0 \u2192 20.0",
+    "Tokens didn't decrease: 20.0 \u2192 20.0",
+    "Tokens didn't decrease: 18.182525829412043 \u2192 19.714604168897495",
+    "Tokens didn't decrease: 19.715473329182714 \u2192 20.0"
+  ],
+  "scheduler_stats": {
+    "tasks_scheduled": 45,
+    "tasks_executed": 3,
+    "tasks_failed": 0,
+    "tasks_rate_limited": 0,
+    "tasks_dropped": 0,
+    "moc_window_activations": 0,
+    "last_execution_time": 0.3960340420017019,
+    "average_execution_time": 0.11437732273992153,
+    "tasks_by_tier": {
+      "tier_a": 29,
+      "tier_b": 16,
+      "tier_c": 0,
+      "other": 0
+    },
+    "tasks_by_type": {
+      "options_with_greeks": 11,
+      "rsi": 7,
+      "macd": 4,
+      "bbands": 4,
+      "vwap": 4,
+      "atr": 4,
+      "adx": 4,
+      "indicators_bundle": 7
+    },
+    "tasks_by_status": {
+      "PENDING": 0,
+      "RUNNING": 0,
+      "COMPLETED": 0,
+      "FAILED": 0,
+      "CANCELLED": 0,
+      "RATE_LIMITED": 0
+    },
+    "current_state": {
+      "total_tasks": 45,
+      "queue_size": 45,
+      "active_tasks": 0,
+      "is_running": true,
+      "market_hours": false,
+      "moc_window": false
+    },
+    "task_distribution": {
+      "by_status": {
+        "PENDING": 42,
+        "COMPLETED": 3
+      },
+      "by_tier": {
+        "tier_a": 29,
+        "tier_b": 16
+      },
+      "by_api_type": {
+        "options_with_greeks": 11,
+        "rsi": 7,
+        "macd": 4,
+        "bbands": 4,
+        "vwap": 4,
+        "atr": 4,
+        "adx": 4,
+        "indicators_bundle": 7
+      }
+    }
+  },
+  "rate_limiter_stats": {
+    "total_requests": 20,
+    "successful_acquisitions": 20,
+    "failed_acquisitions": 0,
+    "tokens_exhausted_count": 0,
+    "total_wait_time": 0.0002234169514849782,
+    "max_wait_time": 0.0,
+    "requests_by_priority": {
+      "TIER_B": 18,
+      "TIER_A": 2
+    },
+    "requests_by_symbol": {
+      "AAPL": 16,
+      "SPY": 2,
+      "MSFT": 2
+    },
+    "requests_by_tier": {
+      "tier_b": 18,
+      "tier_a": 2
+    },
+    "requests_by_api_type": {
+      "get_rsi": 4,
+      "RSI": 4,
+      "get_realtime_options": 6,
+      "REALTIME_OPTIONS": 6
+    },
+    "last_rate_limit_hit": null,
+    "token_starvation_events": 0,
+    "queue_overflows": 0,
+    "total_tokens_consumed": 20,
+    "start_time": 752549.963350625,
+    "circuit_breaker_activations": 0,
+    "moc_window_requests": 0,
+    "alerts_sent": {},
+    "queue_timeouts": 0,
+    "retry_attempts": 0,
+    "validation_failures": 0,
+    "tier_a_requests": 2,
+    "tier_a_wait_time": 3.208394628018141e-05,
+    "tier_b_requests": 18,
+    "tier_b_wait_time": 0.0001913330052047968,
+    "tier_c_requests": 0,
+    "tier_c_wait_time": 0.0,
+    "other_requests": 0,
+    "other_wait_time": 0.0,
+    "current_rpm": 20.0,
+    "available_tokens": 20.0,
+    "max_tokens": 20,
+    "queue_size": 0,
+    "uptime_seconds": 3.887571290950291,
+    "market_period": "AFTER_HOURS",
+    "is_moc_window": false,
+    "success_rate": 1.0,
+    "avg_wait_time": 1.117084757424891e-05
+  }
+}

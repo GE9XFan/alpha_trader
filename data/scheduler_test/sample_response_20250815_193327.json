@@ -1,0 +1,10 @@
+{
+  "SPY_OPTIONS": {
+    "keys": [
+      "endpoint",
+      "message",
+      "data"
+    ],
+    "sample_size": 3831858
+  }
+}
