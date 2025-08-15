@@ -1,0 +1,14 @@
+environment:
+  name: development
+  debug: true
+  testing: true
+  overrides:
+    apis:
+      ibkr:
+        trading_mode: paper
+    risk:
+      circuit_breakers:
+        daily_loss:
+          threshold: 0.05
+    logging:
+      level: DEBUG

@@ -1,0 +1,48 @@
+logging:
+  version: 1
+  disable_existing_loggers: false
+  formatters:
+    standard:
+      format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    detailed:
+      format: '%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d -
+        %(message)s'
+  handlers:
+    console:
+      class: logging.StreamHandler
+      level: INFO
+      formatter: standard
+      stream: ext://sys.stdout
+    file:
+      class: logging.handlers.RotatingFileHandler
+      level: DEBUG
+      formatter: detailed
+      filename: logs/trading_system.log
+      maxBytes: 10485760
+      backupCount: 5
+    error_file:
+      class: logging.handlers.RotatingFileHandler
+      level: ERROR
+      formatter: detailed
+      filename: logs/errors.log
+      maxBytes: 10485760
+      backupCount: 5
+  loggers:
+    src:
+      level: DEBUG
+      handlers:
+      - console
+      - file
+      propagate: false
+    trading:
+      level: INFO
+      handlers:
+      - console
+      - file
+      - error_file
+      propagate: false
+  root:
+    level: INFO
+    handlers:
+    - console
+    - file

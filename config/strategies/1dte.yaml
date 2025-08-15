@@ -1,0 +1,43 @@
+strategy:
+  name: One DTE Strategy
+  enabled: true
+  description: Trades options expiring next day
+confidence:
+  minimum: 0.7
+  ml_weight: 0.35
+  indicators_weight: 0.35
+  greeks_weight: 0.3
+timing:
+  entry_window:
+    start: 09:45
+    end: '15:00'
+  hold_overnight: true
+position_limits:
+  max_concurrent: 5
+  max_per_symbol: 2
+  min_premium: 0.3
+  max_premium: 15.0
+  max_contracts: 15
+entry_rules:
+  rsi:
+    enabled: true
+    min_value: 25
+    max_value: 75
+    weight: 0.15
+  delta:
+    enabled: true
+    min_abs_value: 0.2
+    max_abs_value: 0.8
+    weight: 0.2
+  gamma:
+    enabled: true
+    max_value: 0.25
+    weight: 0.15
+  theta_decay:
+    enabled: true
+    min_ratio: 0.02
+    weight: 0.15
+exit_rules:
+  stop_loss: 0.3
+  take_profit: 0.6
+  overnight_hedge: true

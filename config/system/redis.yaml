@@ -1,0 +1,17 @@
+redis:
+  host: ${REDIS_HOST}
+  port: 6379
+  password: ${REDIS_PASSWORD}
+  db: 0
+  decode_responses: true
+  max_connections: 50
+  socket_timeout: 5
+  socket_connect_timeout: 5
+  socket_keepalive: true
+  health_check_interval: 30
+  retry_on_timeout: true
+cache:
+  default_ttl: 300
+  max_ttl: 86400
+  key_prefix: 'trading:'
+  serializer: json

@@ -1,0 +1,19 @@
+position_limits:
+  greeks:
+    max_delta: 0.8
+    min_delta: 0.2
+    max_gamma: 0.2
+    max_vega: 200
+    min_theta_ratio: 0.02
+  sizing:
+    max_position_size: 0.05
+    max_contract_value: 1000
+    min_contract_value: 50
+    max_contracts_per_trade: 20
+  entry_checks:
+  - delta_within_range
+  - gamma_below_limit
+  - theta_decay_sufficient
+  - spread_acceptable
+  - volume_sufficient
+  - capital_available

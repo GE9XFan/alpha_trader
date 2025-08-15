@@ -1,0 +1,12 @@
+slippage:
+  model: linear
+  base_slippage_bps: 5
+  factors:
+    spread: 0.5
+    volatility: 0.1
+    size: 0.05
+    time_of_day: 0.02
+  max_acceptable_slippage_bps: 20
+  tracking:
+    enabled: true
+    alert_threshold_bps: 15

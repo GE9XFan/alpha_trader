@@ -1,0 +1,35 @@
+validation:
+  price_data:
+    max_price_change_pct: 20
+    min_price: 0.01
+    max_price: 100000
+    required_fields:
+    - open
+    - high
+    - low
+    - close
+    - volume
+  greeks:
+    delta:
+      min: -1.0
+      max: 1.0
+    gamma:
+      min: 0.0
+      max: 1.0
+    theta:
+      calls_max: 0.0
+      puts_min: 0.0
+    vega:
+      min: 0.0
+      max: null
+    max_age_seconds: 30
+    required_fields:
+    - delta
+    - gamma
+    - theta
+    - vega
+  indicators:
+    rsi:
+      min: 0
+      max: 100
+    max_age_seconds: 300

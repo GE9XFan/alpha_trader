@@ -1,0 +1,39 @@
+features:
+  price_features:
+  - returns_1m
+  - returns_5m
+  - returns_15m
+  - volatility_5m
+  - volatility_15m
+  - high_low_ratio
+  - close_open_ratio
+  volume_features:
+  - volume_ratio
+  - volume_momentum
+  - buy_sell_imbalance
+  greeks_features:
+  - delta
+  - gamma
+  - theta
+  - vega
+  - delta_change
+  - gamma_change
+  - theta_decay_rate
+  indicator_features:
+  - rsi
+  - macd_signal
+  - macd_histogram
+  - bb_position
+  - bb_width
+  - atr
+  - adx
+  - vwap_distance
+  market_features:
+  - spy_correlation
+  - sector_momentum
+  - vix_level
+  - market_breadth
+  scaling:
+    method: standard
+    clip_outliers: true
+    outlier_threshold: 3.0

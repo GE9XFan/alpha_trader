@@ -1,0 +1,39 @@
+strategy:
+  name: 14-Day Swing Strategy
+  enabled: true
+  description: Longer-term options trades (1-14 days)
+confidence:
+  minimum: 0.65
+  ml_weight: 0.3
+  indicators_weight: 0.4
+  greeks_weight: 0.3
+timing:
+  entry_window:
+    start: 09:30
+    end: '16:00'
+  min_hold_days: 1
+  max_hold_days: 14
+position_limits:
+  max_concurrent: 10
+  max_per_symbol: 3
+  min_premium: 1.0
+  max_premium: 50.0
+  max_contracts: 20
+entry_rules:
+  trend_alignment:
+    enabled: true
+    weight: 0.25
+  support_resistance:
+    enabled: true
+    weight: 0.2
+  volume_analysis:
+    enabled: true
+    weight: 0.15
+exit_rules:
+  stop_loss: 0.2
+  take_profit: 0.8
+  time_decay_exit: true
+  roll_conditions:
+    enabled: true
+    min_profit: 0.3
+    days_before_expiry: 2

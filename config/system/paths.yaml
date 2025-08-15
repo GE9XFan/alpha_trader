@@ -1,0 +1,9 @@
+paths:
+  data_dir: ./data
+  cache_dir: ./data/cache
+  raw_data_dir: ./data/raw
+  processed_data_dir: ./data/processed
+  models_dir: ./models
+  logs_dir: ./logs
+  reports_dir: ./reports
+  backups_dir: ./backups

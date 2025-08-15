@@ -1,0 +1,34 @@
+trading_hours:
+  regular_session:
+    start: 09:30
+    end: '16:00'
+    timezone: America/New_York
+  extended_hours:
+    pre_market:
+      enabled: false
+      start: 04:00
+      end: 09:30
+    after_hours:
+      enabled: false
+      start: '16:00'
+      end: '20:00'
+  no_trade_windows:
+  - name: First 15 minutes
+    start: 09:30
+    end: 09:45
+    strategies_affected:
+    - 0dte
+    - 1dte
+  - name: Last 30 minutes (except MOC)
+    start: '15:30'
+    end: '16:00'
+    strategies_affected:
+    - 0dte
+    exceptions:
+    - moc_imbalance
+  holidays:
+    check_enabled: true
+    source: NYSE
+    early_close_days:
+    - Christmas Eve
+    - Thanksgiving Friday

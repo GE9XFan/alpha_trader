@@ -1,0 +1,27 @@
+circuit_breakers:
+  daily_loss:
+    enabled: true
+    threshold: 0.02
+    action: halt_new_trades
+    notification: immediate
+  weekly_loss:
+    enabled: true
+    threshold: 0.05
+    action: reduce_position_sizes
+    notification: immediate
+  drawdown:
+    enabled: true
+    threshold: 0.1
+    action: emergency_shutdown
+    notification: immediate
+  rapid_losses:
+    enabled: true
+    losses_count: 5
+    time_window_minutes: 60
+    action: pause_trading
+    pause_duration_minutes: 30
+  vix_spike:
+    enabled: true
+    threshold: 40
+    action: close_all_positions
+    notification: immediate
