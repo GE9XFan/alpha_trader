@@ -192,7 +192,7 @@ ALPHA_VANTAGE_APIS = [
         'params': {
             'function': 'AD',
             'symbol': 'AAPL',
-            'interval': 'daily'
+            'interval': 'daily',
         }
     },
     {
@@ -226,7 +226,7 @@ ALPHA_VANTAGE_APIS = [
             'RANGE': '6month',              # Relative period!
             'INTERVAL': 'DAILY',
             'OHLC': 'close',
-            'WINDOW_SIZE': '20',
+            'WINDOW_SIZE': '50',
             'CALCULATIONS': 'MEAN,MEDIAN,CUMULATIVE_RETURN,VARIANCE,STDDEV,COVARIANCE,CORRELATION',
         }
     },
@@ -282,13 +282,6 @@ ALPHA_VANTAGE_APIS = [
         }
     },
     {
-        'name': 'listing_status',
-        'params': {
-            'function': 'LISTING_STATUS'
-            # No symbol needed - returns all listings
-        }
-    },
-    {
         'name': 'earnings_estimates',
         'params': {
             'function': 'EARNINGS_ESTIMATES',
@@ -299,7 +292,6 @@ ALPHA_VANTAGE_APIS = [
         'name': 'earnings_calendar',
         'params': {
             'function': 'EARNINGS_CALENDAR',
-            'horizon': '3month'  # or '12month'
         }
     },
     {
@@ -413,7 +405,12 @@ class ComprehensiveAPITester:
             try:
                 # Make API call
                 response = requests.get(self.base_url, params=params, timeout=30)
-                data = response.json()
+                if api_name == 'earnings_calendar':
+                    # Just save the raw text as-is
+                    data = {'csv_response': response.text}
+                else:
+                    # Normal JSON parsing
+                     data = response.json()
                 
                 # Check for errors
                 if "Error Message" in data:

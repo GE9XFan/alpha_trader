@@ -1,0 +1,430 @@
+{
+  "metadata": "Top gainers, losers, and most actively traded US tickers",
+  "last_updated": "2025-08-14 16:16:00 US/Eastern",
+  "top_gainers": [
+    {
+      "ticker": "BENFW",
+      "price": "0.0204",
+      "change_amount": "0.0121",
+      "change_percentage": "145.7831%",
+      "volume": "4086684"
+    },
+    {
+      "ticker": "ONMD",
+      "price": "0.9585",
+      "change_amount": "0.4785",
+      "change_percentage": "99.6875%",
+      "volume": "315657778"
+    },
+    {
+      "ticker": "ONMDW",
+      "price": "0.0325",
+      "change_amount": "0.0155",
+      "change_percentage": "91.1765%",
+      "volume": "436000"
+    },
+    {
+      "ticker": "AERTW",
+      "price": "0.0495",
+      "change_amount": "0.0235",
+      "change_percentage": "90.3846%",
+      "volume": "342405"
+    },
+    {
+      "ticker": "TPIC",
+      "price": "0.2963",
+      "change_amount": "0.1403",
+      "change_percentage": "89.9359%",
+      "volume": "646676090"
+    },
+    {
+      "ticker": "TRIB",
+      "price": "1.91",
+      "change_amount": "0.89",
+      "change_percentage": "87.2549%",
+      "volume": "207036116"
+    },
+    {
+      "ticker": "SNOA",
+      "price": "5.27",
+      "change_amount": "2.19",
+      "change_percentage": "71.1039%",
+      "volume": "69507363"
+    },
+    {
+      "ticker": "ACONW",
+      "price": "0.05",
+      "change_amount": "0.0204",
+      "change_percentage": "68.9189%",
+      "volume": "11321"
+    },
+    {
+      "ticker": "OPTXW",
+      "price": "0.1",
+      "change_amount": "0.0379",
+      "change_percentage": "61.0306%",
+      "volume": "5596"
+    },
+    {
+      "ticker": "WULF",
+      "price": "8.71",
+      "change_amount": "3.25",
+      "change_percentage": "59.5238%",
+      "volume": "286497968"
+    },
+    {
+      "ticker": "MLECW",
+      "price": "0.0179",
+      "change_amount": "0.0065",
+      "change_percentage": "57.0175%",
+      "volume": "1176"
+    },
+    {
+      "ticker": "XPON",
+      "price": "2.02",
+      "change_amount": "0.71",
+      "change_percentage": "54.1985%",
+      "volume": "386278256"
+    },
+    {
+      "ticker": "AERT",
+      "price": "1.1",
+      "change_amount": "0.375",
+      "change_percentage": "51.7241%",
+      "volume": "131447544"
+    },
+    {
+      "ticker": "HPKEW",
+      "price": "0.018",
+      "change_amount": "0.006",
+      "change_percentage": "50.0%",
+      "volume": "26618"
+    },
+    {
+      "ticker": "CURIW",
+      "price": "0.0296",
+      "change_amount": "0.0093",
+      "change_percentage": "45.8128%",
+      "volume": "85888"
+    },
+    {
+      "ticker": "JFBRW",
+      "price": "0.0336",
+      "change_amount": "0.0105",
+      "change_percentage": "45.4545%",
+      "volume": "8715"
+    },
+    {
+      "ticker": "NOEMR",
+      "price": "0.281",
+      "change_amount": "0.0851",
+      "change_percentage": "43.4405%",
+      "volume": "6007"
+    },
+    {
+      "ticker": "NHICW",
+      "price": "0.32",
+      "change_amount": "0.095",
+      "change_percentage": "42.2222%",
+      "volume": "109"
+    },
+    {
+      "ticker": "BKTI",
+      "price": "61.62",
+      "change_amount": "18.18",
+      "change_percentage": "41.8508%",
+      "volume": "500504"
+    },
+    {
+      "ticker": "PRENW",
+      "price": "0.03",
+      "change_amount": "0.0088",
+      "change_percentage": "41.5094%",
+      "volume": "22536"
+    }
+  ],
+  "top_losers": [
+    {
+      "ticker": "HUBCZ",
+      "price": "0.0035",
+      "change_amount": "-0.0054",
+      "change_percentage": "-60.6742%",
+      "volume": "7002"
+    },
+    {
+      "ticker": "SES+",
+      "price": "0.1231",
+      "change_amount": "-0.1269",
+      "change_percentage": "-50.76%",
+      "volume": "91229"
+    },
+    {
+      "ticker": "NXLIW",
+      "price": "0.008",
+      "change_amount": "-0.0081",
+      "change_percentage": "-50.3106%",
+      "volume": "8766"
+    },
+    {
+      "ticker": "BNAIW",
+      "price": "0.0173",
+      "change_amount": "-0.0165",
+      "change_percentage": "-48.8166%",
+      "volume": "1010"
+    },
+    {
+      "ticker": "BSLKW",
+      "price": "0.057",
+      "change_amount": "-0.052",
+      "change_percentage": "-47.7064%",
+      "volume": "796833"
+    },
+    {
+      "ticker": "SCNX",
+      "price": "1.21",
+      "change_amount": "-1.01",
+      "change_percentage": "-45.4955%",
+      "volume": "2870140"
+    },
+    {
+      "ticker": "BSLK",
+      "price": "8.5",
+      "change_amount": "-5.82",
+      "change_percentage": "-40.6425%",
+      "volume": "5290858"
+    },
+    {
+      "ticker": "ABPWW",
+      "price": "0.0301",
+      "change_amount": "-0.0202",
+      "change_percentage": "-40.159%",
+      "volume": "30000"
+    },
+    {
+      "ticker": "MB",
+      "price": "4.4",
+      "change_amount": "-2.91",
+      "change_percentage": "-39.8085%",
+      "volume": "247467"
+    },
+    {
+      "ticker": "GWH+",
+      "price": "0.0412",
+      "change_amount": "-0.024",
+      "change_percentage": "-36.8098%",
+      "volume": "2506"
+    },
+    {
+      "ticker": "MPU",
+      "price": "2.24",
+      "change_amount": "-1.23",
+      "change_percentage": "-35.4467%",
+      "volume": "3325723"
+    },
+    {
+      "ticker": "EVEX+",
+      "price": "0.43",
+      "change_amount": "-0.2301",
+      "change_percentage": "-34.8584%",
+      "volume": "157455"
+    },
+    {
+      "ticker": "NIXXW",
+      "price": "0.033",
+      "change_amount": "-0.0165",
+      "change_percentage": "-33.3333%",
+      "volume": "200"
+    },
+    {
+      "ticker": "CRWG",
+      "price": "7.8829",
+      "change_amount": "-3.6791",
+      "change_percentage": "-31.8206%",
+      "volume": "760379"
+    },
+    {
+      "ticker": "CHSN",
+      "price": "0.0522",
+      "change_amount": "-0.0243",
+      "change_percentage": "-31.7647%",
+      "volume": "55318312"
+    },
+    {
+      "ticker": "GGROW",
+      "price": "0.0206",
+      "change_amount": "-0.0095",
+      "change_percentage": "-31.5615%",
+      "volume": "36247"
+    },
+    {
+      "ticker": "ISSC",
+      "price": "13.51",
+      "change_amount": "-6.22",
+      "change_percentage": "-31.5256%",
+      "volume": "3459025"
+    },
+    {
+      "ticker": "CRWU",
+      "price": "14.67",
+      "change_amount": "-6.53",
+      "change_percentage": "-30.8019%",
+      "volume": "392032"
+    },
+    {
+      "ticker": "LEXXW",
+      "price": "0.0901",
+      "change_amount": "-0.0399",
+      "change_percentage": "-30.6923%",
+      "volume": "2151"
+    },
+    {
+      "ticker": "ORGNW",
+      "price": "0.0402",
+      "change_amount": "-0.0178",
+      "change_percentage": "-30.6897%",
+      "volume": "41808"
+    }
+  ],
+  "most_actively_traded": [
+    {
+      "ticker": "TPIC",
+      "price": "0.2963",
+      "change_amount": "0.1403",
+      "change_percentage": "89.9359%",
+      "volume": "646676090"
+    },
+    {
+      "ticker": "XPON",
+      "price": "2.02",
+      "change_amount": "0.71",
+      "change_percentage": "54.1985%",
+      "volume": "386278256"
+    },
+    {
+      "ticker": "OPEN",
+      "price": "3.04",
+      "change_amount": "0.62",
+      "change_percentage": "25.6198%",
+      "volume": "316023990"
+    },
+    {
+      "ticker": "ONMD",
+      "price": "0.9585",
+      "change_amount": "0.4785",
+      "change_percentage": "99.6875%",
+      "volume": "315657778"
+    },
+    {
+      "ticker": "WULF",
+      "price": "8.71",
+      "change_amount": "3.25",
+      "change_percentage": "59.5238%",
+      "volume": "286497968"
+    },
+    {
+      "ticker": "TRIB",
+      "price": "1.91",
+      "change_amount": "0.89",
+      "change_percentage": "87.2549%",
+      "volume": "207036116"
+    },
+    {
+      "ticker": "INTC",
+      "price": "23.86",
+      "change_amount": "1.64",
+      "change_percentage": "7.3807%",
+      "volume": "169158827"
+    },
+    {
+      "ticker": "SOXS",
+      "price": "6.47",
+      "change_amount": "-0.01",
+      "change_percentage": "-0.1543%",
+      "volume": "165725625"
+    },
+    {
+      "ticker": "TLRY",
+      "price": "1.18",
+      "change_amount": "-0.07",
+      "change_percentage": "-5.6%",
+      "volume": "152592907"
+    },
+    {
+      "ticker": "AERT",
+      "price": "1.1",
+      "change_amount": "0.375",
+      "change_percentage": "51.7241%",
+      "volume": "131447544"
+    },
+    {
+      "ticker": "NVDA",
+      "price": "182.02",
+      "change_amount": "0.43",
+      "change_percentage": "0.2368%",
+      "volume": "128747027"
+    },
+    {
+      "ticker": "TSLL",
+      "price": "12.55",
+      "change_amount": "-0.31",
+      "change_percentage": "-2.4106%",
+      "volume": "127597619"
+    },
+    {
+      "ticker": "SQQQ",
+      "price": "17.01",
+      "change_amount": "0.05",
+      "change_percentage": "0.2948%",
+      "volume": "117323399"
+    },
+    {
+      "ticker": "AMCR",
+      "price": "8.755",
+      "change_amount": "-1.185",
+      "change_percentage": "-11.9215%",
+      "volume": "93109082"
+    },
+    {
+      "ticker": "ETHA",
+      "price": "34.37",
+      "change_amount": "-1.53",
+      "change_percentage": "-4.2618%",
+      "volume": "83613188"
+    },
+    {
+      "ticker": "SOXL",
+      "price": "29.34",
+      "change_amount": "0.07",
+      "change_percentage": "0.2392%",
+      "volume": "81660910"
+    },
+    {
+      "ticker": "TSLA",
+      "price": "335.58",
+      "change_amount": "-3.8",
+      "change_percentage": "-1.1197%",
+      "volume": "72986466"
+    },
+    {
+      "ticker": "IBIT",
+      "price": "67.03",
+      "change_amount": "-2.81",
+      "change_percentage": "-4.0235%",
+      "volume": "70308925"
+    },
+    {
+      "ticker": "DNN",
+      "price": "2.03",
+      "change_amount": "0.01",
+      "change_percentage": "0.495%",
+      "volume": "70118608"
+    },
+    {
+      "ticker": "SNOA",
+      "price": "5.27",
+      "change_amount": "2.19",
+      "change_percentage": "71.1039%",
+      "volume": "69507363"
+    }
+  ]
+}
