@@ -86,7 +86,7 @@ def test_base_module():
         
         # Test status
         status = module.get_status()
-        print(f"✓ Status: initialized={status['initialized']}")
+        print(f"✓ Status: initialized={status['status']}")
         
         # Test shutdown
         if module.shutdown():
