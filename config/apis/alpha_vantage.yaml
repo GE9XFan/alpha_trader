@@ -54,3 +54,4 @@ alpha_vantage:
       default_params:
         interval: 5min
         time_period: 14
+    

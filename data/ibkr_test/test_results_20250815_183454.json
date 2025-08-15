@@ -1,0 +1,11 @@
+{
+  "connection": "SUCCESS",
+  "bars_SPY_1 min": "SUBSCRIBED",
+  "bars_SPY_5 secs": "SUBSCRIBED",
+  "bars_QQQ_1 min": "SUBSCRIBED",
+  "bars_QQQ_5 secs": "SUBSCRIBED",
+  "quotes_SPY": "SUBSCRIBED",
+  "quotes_QQQ": "SUBSCRIBED",
+  "moc_subscription": "NOT_ACTIVE",
+  "health_check": "PASSED"
+}

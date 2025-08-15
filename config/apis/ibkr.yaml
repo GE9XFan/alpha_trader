@@ -4,7 +4,7 @@ ibkr:
   account: ${IBKR_ACCOUNT}
   trading_mode: paper
   gateway_host: 127.0.0.1
-  gateway_port: 4001
+  gateway_port: 7497
   client_id: 1
   connection_timeout: 30
   readonly: false
