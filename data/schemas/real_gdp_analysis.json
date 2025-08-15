@@ -1,0 +1,31 @@
+{
+  "api_name": "real_gdp",
+  "timestamp": "2025-08-15T14:33:07.821775",
+  "top_level_keys": [
+    "name",
+    "interval",
+    "unit",
+    "data"
+  ],
+  "field_analysis": {
+    "date": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "2024-01-01",
+      "nullable": false
+    },
+    "value": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "23305.023",
+      "nullable": false
+    }
+  },
+  "record_count": 96,
+  "sample_data": {
+    "date": "2024-01-01",
+    "value": "23305.023"
+  }
+}

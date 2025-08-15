@@ -1,0 +1,53 @@
+{
+  "api_name": "dividends",
+  "timestamp": "2025-08-15T14:33:07.795443",
+  "top_level_keys": [
+    "symbol",
+    "data"
+  ],
+  "field_analysis": {
+    "ex_dividend_date": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "2025-08-11",
+      "nullable": false
+    },
+    "declaration_date": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "2025-07-31",
+      "nullable": false
+    },
+    "record_date": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "2025-08-11",
+      "nullable": false
+    },
+    "payment_date": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "2025-08-14",
+      "nullable": false
+    },
+    "amount": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "0.26",
+      "nullable": false
+    }
+  },
+  "record_count": 54,
+  "sample_data": {
+    "ex_dividend_date": "2025-08-11",
+    "declaration_date": "2025-07-31",
+    "record_date": "2025-08-11",
+    "payment_date": "2025-08-14",
+    "amount": "0.26"
+  }
+}

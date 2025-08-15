@@ -1,0 +1,21 @@
+{
+  "api_name": "adx",
+  "timestamp": "2025-08-15T14:33:07.777171",
+  "top_level_keys": [
+    "Meta Data",
+    "Technical Analysis: ADX"
+  ],
+  "field_analysis": {
+    "ADX": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "30.6512",
+      "nullable": false
+    }
+  },
+  "record_count": 6459,
+  "sample_data": {
+    "ADX": "30.6512"
+  }
+}

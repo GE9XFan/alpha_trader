@@ -1,0 +1,318 @@
+{
+  "api_name": "balance_sheet",
+  "timestamp": "2025-08-15T14:33:07.788075",
+  "top_level_keys": [
+    "symbol",
+    "annualReports",
+    "quarterlyReports"
+  ],
+  "field_analysis": {
+    "fiscalDateEnding": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "2024-09-30",
+      "nullable": false
+    },
+    "reportedCurrency": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "USD",
+      "nullable": false
+    },
+    "totalAssets": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "364980000000",
+      "nullable": false
+    },
+    "totalCurrentAssets": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "152987000000",
+      "nullable": false
+    },
+    "cashAndCashEquivalentsAtCarryingValue": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "29943000000",
+      "nullable": false
+    },
+    "cashAndShortTermInvestments": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "29943000000",
+      "nullable": false
+    },
+    "inventory": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "7286000000",
+      "nullable": false
+    },
+    "currentNetReceivables": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "66243000000",
+      "nullable": false
+    },
+    "totalNonCurrentAssets": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "211993000000",
+      "nullable": false
+    },
+    "propertyPlantEquipment": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "55914000000",
+      "nullable": false
+    },
+    "accumulatedDepreciationAmortizationPPE": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "None",
+      "nullable": false
+    },
+    "intangibleAssets": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "None",
+      "nullable": false
+    },
+    "intangibleAssetsExcludingGoodwill": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "None",
+      "nullable": false
+    },
+    "goodwill": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "None",
+      "nullable": false
+    },
+    "investments": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "None",
+      "nullable": false
+    },
+    "longTermInvestments": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "91479000000",
+      "nullable": false
+    },
+    "shortTermInvestments": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "35228000000",
+      "nullable": false
+    },
+    "otherCurrentAssets": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "14287000000",
+      "nullable": false
+    },
+    "otherNonCurrentAssets": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "None",
+      "nullable": false
+    },
+    "totalLiabilities": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "308030000000",
+      "nullable": false
+    },
+    "totalCurrentLiabilities": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "176392000000",
+      "nullable": false
+    },
+    "currentAccountsPayable": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "68960000000",
+      "nullable": false
+    },
+    "deferredRevenue": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "None",
+      "nullable": false
+    },
+    "currentDebt": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "None",
+      "nullable": false
+    },
+    "shortTermDebt": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "22511000000",
+      "nullable": false
+    },
+    "totalNonCurrentLiabilities": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "131638000000",
+      "nullable": false
+    },
+    "capitalLeaseObligations": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "None",
+      "nullable": false
+    },
+    "longTermDebt": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "85750000000",
+      "nullable": false
+    },
+    "currentLongTermDebt": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "20879000000",
+      "nullable": false
+    },
+    "longTermDebtNoncurrent": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "None",
+      "nullable": false
+    },
+    "shortLongTermDebtTotal": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "119059000000",
+      "nullable": false
+    },
+    "otherCurrentLiabilities": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "50071000000",
+      "nullable": false
+    },
+    "otherNonCurrentLiabilities": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "36634000000",
+      "nullable": false
+    },
+    "totalShareholderEquity": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "56950000000",
+      "nullable": false
+    },
+    "treasuryStock": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "None",
+      "nullable": false
+    },
+    "retainedEarnings": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "-19154000000",
+      "nullable": false
+    },
+    "commonStock": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "83276000000",
+      "nullable": false
+    },
+    "commonStockSharesOutstanding": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "15408095000",
+      "nullable": false
+    }
+  },
+  "record_count": 20,
+  "sample_data": {
+    "fiscalDateEnding": "2024-09-30",
+    "reportedCurrency": "USD",
+    "totalAssets": "364980000000",
+    "totalCurrentAssets": "152987000000",
+    "cashAndCashEquivalentsAtCarryingValue": "29943000000",
+    "cashAndShortTermInvestments": "29943000000",
+    "inventory": "7286000000",
+    "currentNetReceivables": "66243000000",
+    "totalNonCurrentAssets": "211993000000",
+    "propertyPlantEquipment": "55914000000",
+    "accumulatedDepreciationAmortizationPPE": "None",
+    "intangibleAssets": "None",
+    "intangibleAssetsExcludingGoodwill": "None",
+    "goodwill": "None",
+    "investments": "None",
+    "longTermInvestments": "91479000000",
+    "shortTermInvestments": "35228000000",
+    "otherCurrentAssets": "14287000000",
+    "otherNonCurrentAssets": "None",
+    "totalLiabilities": "308030000000",
+    "totalCurrentLiabilities": "176392000000",
+    "currentAccountsPayable": "68960000000",
+    "deferredRevenue": "None",
+    "currentDebt": "None",
+    "shortTermDebt": "22511000000",
+    "totalNonCurrentLiabilities": "131638000000",
+    "capitalLeaseObligations": "None",
+    "longTermDebt": "85750000000",
+    "currentLongTermDebt": "20879000000",
+    "longTermDebtNoncurrent": "None",
+    "shortLongTermDebtTotal": "119059000000",
+    "otherCurrentLiabilities": "50071000000",
+    "otherNonCurrentLiabilities": "36634000000",
+    "totalShareholderEquity": "56950000000",
+    "treasuryStock": "None",
+    "retainedEarnings": "-19154000000",
+    "commonStock": "83276000000",
+    "commonStockSharesOutstanding": "15408095000"
+  }
+}

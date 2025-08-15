@@ -1,0 +1,222 @@
+{
+  "api_name": "income_statement",
+  "timestamp": "2025-08-15T14:33:07.804583",
+  "top_level_keys": [
+    "symbol",
+    "annualReports",
+    "quarterlyReports"
+  ],
+  "field_analysis": {
+    "fiscalDateEnding": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "2024-09-30",
+      "nullable": false
+    },
+    "reportedCurrency": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "USD",
+      "nullable": false
+    },
+    "grossProfit": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "180683000000",
+      "nullable": false
+    },
+    "totalRevenue": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "391035000000",
+      "nullable": false
+    },
+    "costOfRevenue": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "210352000000",
+      "nullable": false
+    },
+    "costofGoodsAndServicesSold": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "210352000000",
+      "nullable": false
+    },
+    "operatingIncome": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "123216000000",
+      "nullable": false
+    },
+    "sellingGeneralAndAdministrative": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "26097000000",
+      "nullable": false
+    },
+    "researchAndDevelopment": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "31370000000",
+      "nullable": false
+    },
+    "operatingExpenses": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "57467000000",
+      "nullable": false
+    },
+    "investmentIncomeNet": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "None",
+      "nullable": false
+    },
+    "netInterestIncome": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "0",
+      "nullable": false
+    },
+    "interestIncome": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "0",
+      "nullable": false
+    },
+    "interestExpense": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "0",
+      "nullable": false
+    },
+    "nonInterestIncome": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "None",
+      "nullable": false
+    },
+    "otherNonOperatingIncome": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "None",
+      "nullable": false
+    },
+    "depreciation": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "None",
+      "nullable": false
+    },
+    "depreciationAndAmortization": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "11445000000",
+      "nullable": false
+    },
+    "incomeBeforeTax": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "123485000000",
+      "nullable": false
+    },
+    "incomeTaxExpense": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "29749000000",
+      "nullable": false
+    },
+    "interestAndDebtExpense": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "None",
+      "nullable": false
+    },
+    "netIncomeFromContinuingOperations": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "93736000000",
+      "nullable": false
+    },
+    "comprehensiveIncomeNetOfTax": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "None",
+      "nullable": false
+    },
+    "ebit": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "123216000000",
+      "nullable": false
+    },
+    "ebitda": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "134661000000",
+      "nullable": false
+    },
+    "netIncome": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "93736000000",
+      "nullable": false
+    }
+  },
+  "record_count": 20,
+  "sample_data": {
+    "fiscalDateEnding": "2024-09-30",
+    "reportedCurrency": "USD",
+    "grossProfit": "180683000000",
+    "totalRevenue": "391035000000",
+    "costOfRevenue": "210352000000",
+    "costofGoodsAndServicesSold": "210352000000",
+    "operatingIncome": "123216000000",
+    "sellingGeneralAndAdministrative": "26097000000",
+    "researchAndDevelopment": "31370000000",
+    "operatingExpenses": "57467000000",
+    "investmentIncomeNet": "None",
+    "netInterestIncome": "0",
+    "interestIncome": "0",
+    "interestExpense": "0",
+    "nonInterestIncome": "None",
+    "otherNonOperatingIncome": "None",
+    "depreciation": "None",
+    "depreciationAndAmortization": "11445000000",
+    "incomeBeforeTax": "123485000000",
+    "incomeTaxExpense": "29749000000",
+    "interestAndDebtExpense": "None",
+    "netIncomeFromContinuingOperations": "93736000000",
+    "comprehensiveIncomeNetOfTax": "None",
+    "ebit": "123216000000",
+    "ebitda": "134661000000",
+    "netIncome": "93736000000"
+  }
+}

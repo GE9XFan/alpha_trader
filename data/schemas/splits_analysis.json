@@ -1,0 +1,29 @@
+{
+  "api_name": "splits",
+  "timestamp": "2025-08-15T14:33:07.829992",
+  "top_level_keys": [
+    "symbol",
+    "data"
+  ],
+  "field_analysis": {
+    "effective_date": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "2020-08-31",
+      "nullable": false
+    },
+    "split_factor": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "4.0000",
+      "nullable": false
+    }
+  },
+  "record_count": 4,
+  "sample_data": {
+    "effective_date": "2020-08-31",
+    "split_factor": "4.0000"
+  }
+}

@@ -1,0 +1,203 @@
+{
+  "api_name": "news_sentiment",
+  "timestamp": "2025-08-15T14:33:07.817752",
+  "top_level_keys": [
+    "items",
+    "sentiment_score_definition",
+    "relevance_score_definition",
+    "feed"
+  ],
+  "field_analysis": {
+    "title": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "Warren Buffett's Top 10 Berkshire Bets Span Apple, Coca-Cola, Finance And Oil - Apple  ( NASDAQ:AAPL",
+      "nullable": false
+    },
+    "url": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "https://www.benzinga.com/trading-ideas/long-ideas/25/08/47161924/warren-buffetts-top-10-berkshire-be",
+      "nullable": false
+    },
+    "time_published": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "20250815T163928",
+      "nullable": false
+    },
+    "authors": {
+      "type": "array",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "['Chris Katje']",
+      "nullable": false
+    },
+    "summary": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "A look at the top 10 stock holdings in Warren Buffett's Berkshire Hathaway portfolio. The top 10 hol",
+      "nullable": false
+    },
+    "banner_image": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "https://cdn.benzinga.com/files/images/story/2025/08/15/Berkshire-Hathaway-Company-And-Warren-Bu.jpeg",
+      "nullable": false
+    },
+    "source": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "Benzinga",
+      "nullable": false
+    },
+    "category_within_source": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "Trading",
+      "nullable": false
+    },
+    "source_domain": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "www.benzinga.com",
+      "nullable": false
+    },
+    "topics": {
+      "type": "array",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "[{'topic': 'Financial Markets', 'relevance_score': '0.999993'}, {'topic': 'Manufacturing', 'relevanc",
+      "nullable": false
+    },
+    "overall_sentiment_score": {
+      "type": "number",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "0.195941",
+      "nullable": false
+    },
+    "overall_sentiment_label": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "Somewhat-Bullish",
+      "nullable": false
+    },
+    "ticker_sentiment": {
+      "type": "array",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "[{'ticker': 'AAPL', 'relevance_score': '0.253866', 'ticker_sentiment_score': '-0.005828', 'ticker_se",
+      "nullable": false
+    }
+  },
+  "record_count": 50,
+  "sample_data": {
+    "title": "Warren Buffett's Top 10 Berkshire Bets Span Apple, Coca-Cola, Finance And Oil - Apple  ( NASDAQ:AAPL ) , American Express  ( NYSE:AXP ) ",
+    "url": "https://www.benzinga.com/trading-ideas/long-ideas/25/08/47161924/warren-buffetts-top-10-berkshire-bets-span-apple-coca-cola-finance-and-oil",
+    "time_published": "20250815T163928",
+    "authors": [
+      "Chris Katje"
+    ],
+    "summary": "A look at the top 10 stock holdings in Warren Buffett's Berkshire Hathaway portfolio. The top 10 holdings have underperformed stock market indexes in 2025. Get the latest proven ETF strategies to target and profit from summer volatility before the next big market swing.",
+    "banner_image": "https://cdn.benzinga.com/files/images/story/2025/08/15/Berkshire-Hathaway-Company-And-Warren-Bu.jpeg?width=1200&height=800&fit=crop",
+    "source": "Benzinga",
+    "category_within_source": "Trading",
+    "source_domain": "www.benzinga.com",
+    "topics": [
+      {
+        "topic": "Financial Markets",
+        "relevance_score": "0.999993"
+      },
+      {
+        "topic": "Manufacturing",
+        "relevance_score": "0.25"
+      },
+      {
+        "topic": "Energy & Transportation",
+        "relevance_score": "0.25"
+      },
+      {
+        "topic": "Technology",
+        "relevance_score": "0.25"
+      },
+      {
+        "topic": "Finance",
+        "relevance_score": "0.25"
+      }
+    ],
+    "overall_sentiment_score": 0.195941,
+    "overall_sentiment_label": "Somewhat-Bullish",
+    "ticker_sentiment": [
+      {
+        "ticker": "AAPL",
+        "relevance_score": "0.253866",
+        "ticker_sentiment_score": "-0.005828",
+        "ticker_sentiment_label": "Neutral"
+      },
+      {
+        "ticker": "BAC",
+        "relevance_score": "0.170878",
+        "ticker_sentiment_score": "0.050859",
+        "ticker_sentiment_label": "Neutral"
+      },
+      {
+        "ticker": "CVX",
+        "relevance_score": "0.170878",
+        "ticker_sentiment_score": "0.187727",
+        "ticker_sentiment_label": "Somewhat-Bullish"
+      },
+      {
+        "ticker": "KO",
+        "relevance_score": "0.170878",
+        "ticker_sentiment_score": "0.259159",
+        "ticker_sentiment_label": "Somewhat-Bullish"
+      },
+      {
+        "ticker": "BRK-A",
+        "relevance_score": "0.719473",
+        "ticker_sentiment_score": "0.159377",
+        "ticker_sentiment_label": "Somewhat-Bullish"
+      },
+      {
+        "ticker": "KHC",
+        "relevance_score": "0.085936",
+        "ticker_sentiment_score": "0.066705",
+        "ticker_sentiment_label": "Neutral"
+      },
+      {
+        "ticker": "MCO",
+        "relevance_score": "0.085936",
+        "ticker_sentiment_score": "0.066705",
+        "ticker_sentiment_label": "Neutral"
+      },
+      {
+        "ticker": "AXP",
+        "relevance_score": "0.085936",
+        "ticker_sentiment_score": "0.066705",
+        "ticker_sentiment_label": "Neutral"
+      },
+      {
+        "ticker": "MSBHF",
+        "relevance_score": "0.170878",
+        "ticker_sentiment_score": "0.354912",
+        "ticker_sentiment_label": "Bullish"
+      },
+      {
+        "ticker": "UNH",
+        "relevance_score": "0.170878",
+        "ticker_sentiment_score": "-0.115818",
+        "ticker_sentiment_label": "Neutral"
+      }
+    ]
+  }
+}

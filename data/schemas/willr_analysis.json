@@ -1,0 +1,21 @@
+{
+  "api_name": "willr",
+  "timestamp": "2025-08-15T14:33:07.835507",
+  "top_level_keys": [
+    "Meta Data",
+    "Technical Analysis: WILLR"
+  ],
+  "field_analysis": {
+    "WILLR": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "-6.9128",
+      "nullable": false
+    }
+  },
+  "record_count": 6473,
+  "sample_data": {
+    "WILLR": "-6.9128"
+  }
+}

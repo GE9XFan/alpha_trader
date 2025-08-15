@@ -1,0 +1,37 @@
+{
+  "api_name": "bbands",
+  "timestamp": "2025-08-15T14:33:07.791202",
+  "top_level_keys": [
+    "Meta Data",
+    "Technical Analysis: BBANDS"
+  ],
+  "field_analysis": {
+    "Real Upper Band": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "234.7656",
+      "nullable": false
+    },
+    "Real Middle Band": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "215.6066",
+      "nullable": false
+    },
+    "Real Lower Band": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "196.4475",
+      "nullable": false
+    }
+  },
+  "record_count": 6467,
+  "sample_data": {
+    "Real Upper Band": "234.7656",
+    "Real Middle Band": "215.6066",
+    "Real Lower Band": "196.4475"
+  }
+}

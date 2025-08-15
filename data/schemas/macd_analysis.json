@@ -1,0 +1,37 @@
+{
+  "api_name": "macd",
+  "timestamp": "2025-08-15T14:33:07.813230",
+  "top_level_keys": [
+    "Meta Data",
+    "Technical Analysis: MACD"
+  ],
+  "field_analysis": {
+    "MACD": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "5.8678",
+      "nullable": false
+    },
+    "MACD_Signal": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "3.4077",
+      "nullable": false
+    },
+    "MACD_Hist": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "2.4600",
+      "nullable": false
+    }
+  },
+  "record_count": 6453,
+  "sample_data": {
+    "MACD": "5.8678",
+    "MACD_Signal": "3.4077",
+    "MACD_Hist": "2.4600"
+  }
+}

@@ -1,0 +1,76 @@
+{
+  "api_name": "insider_transactions",
+  "timestamp": "2025-08-15T14:33:07.810173",
+  "top_level_keys": [
+    "data"
+  ],
+  "field_analysis": {
+    "transaction_date": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "2025-05-12",
+      "nullable": false
+    },
+    "ticker": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "AAPL",
+      "nullable": false
+    },
+    "executive": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "KONDO, CHRIS",
+      "nullable": false
+    },
+    "executive_title": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "Principal Accounting Officer",
+      "nullable": false
+    },
+    "security_type": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "Common Stock",
+      "nullable": false
+    },
+    "acquisition_or_disposal": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "D",
+      "nullable": false
+    },
+    "shares": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "4486.0",
+      "nullable": false
+    },
+    "share_price": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "208.1933",
+      "nullable": false
+    }
+  },
+  "record_count": 7023,
+  "sample_data": {
+    "transaction_date": "2025-05-12",
+    "ticker": "AAPL",
+    "executive": "KONDO, CHRIS",
+    "executive_title": "Principal Accounting Officer",
+    "security_type": "Common Stock",
+    "acquisition_or_disposal": "D",
+    "shares": "4486.0",
+    "share_price": "208.1933"
+  }
+}

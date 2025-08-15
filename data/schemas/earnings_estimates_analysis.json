@@ -1,0 +1,157 @@
+{
+  "api_name": "earnings_estimates",
+  "timestamp": "2025-08-15T14:33:07.796919",
+  "top_level_keys": [
+    "symbol",
+    "estimates"
+  ],
+  "field_analysis": {
+    "date": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "2026-09-30",
+      "nullable": false
+    },
+    "horizon": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "next fiscal year",
+      "nullable": false
+    },
+    "eps_estimate_average": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "7.9458",
+      "nullable": false
+    },
+    "eps_estimate_high": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "9.0000",
+      "nullable": false
+    },
+    "eps_estimate_low": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "7.1300",
+      "nullable": false
+    },
+    "eps_estimate_analyst_count": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "38.0000",
+      "nullable": false
+    },
+    "eps_estimate_average_7_days_ago": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "7.9377",
+      "nullable": false
+    },
+    "eps_estimate_average_30_days_ago": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "7.8137",
+      "nullable": false
+    },
+    "eps_estimate_average_60_days_ago": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "7.8138",
+      "nullable": false
+    },
+    "eps_estimate_average_90_days_ago": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "7.8168",
+      "nullable": false
+    },
+    "eps_estimate_revision_up_trailing_7_days": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "25.0000",
+      "nullable": false
+    },
+    "eps_estimate_revision_down_trailing_7_days": {
+      "type": "nullable",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": null,
+      "nullable": true
+    },
+    "eps_estimate_revision_up_trailing_30_days": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "24.0000",
+      "nullable": false
+    },
+    "eps_estimate_revision_down_trailing_30_days": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "6.0000",
+      "nullable": false
+    },
+    "revenue_estimate_average": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "435742179770.00",
+      "nullable": false
+    },
+    "revenue_estimate_high": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "477463000000.00",
+      "nullable": false
+    },
+    "revenue_estimate_low": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "408100000000.00",
+      "nullable": false
+    },
+    "revenue_estimate_analyst_count": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "37.00",
+      "nullable": false
+    }
+  },
+  "record_count": 36,
+  "sample_data": {
+    "date": "2026-09-30",
+    "horizon": "next fiscal year",
+    "eps_estimate_average": "7.9458",
+    "eps_estimate_high": "9.0000",
+    "eps_estimate_low": "7.1300",
+    "eps_estimate_analyst_count": "38.0000",
+    "eps_estimate_average_7_days_ago": "7.9377",
+    "eps_estimate_average_30_days_ago": "7.8137",
+    "eps_estimate_average_60_days_ago": "7.8138",
+    "eps_estimate_average_90_days_ago": "7.8168",
+    "eps_estimate_revision_up_trailing_7_days": "25.0000",
+    "eps_estimate_revision_down_trailing_7_days": null,
+    "eps_estimate_revision_up_trailing_30_days": "24.0000",
+    "eps_estimate_revision_down_trailing_30_days": "6.0000",
+    "revenue_estimate_average": "435742179770.00",
+    "revenue_estimate_high": "477463000000.00",
+    "revenue_estimate_low": "408100000000.00",
+    "revenue_estimate_analyst_count": "37.00"
+  }
+}

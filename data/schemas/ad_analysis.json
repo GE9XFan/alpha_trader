@@ -1,0 +1,21 @@
+{
+  "api_name": "ad",
+  "timestamp": "2025-08-15T14:33:07.774874",
+  "top_level_keys": [
+    "Meta Data",
+    "Technical Analysis: Chaikin A/D"
+  ],
+  "field_analysis": {
+    "Chaikin A/D": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "81208145299.1829",
+      "nullable": false
+    }
+  },
+  "record_count": 6486,
+  "sample_data": {
+    "Chaikin A/D": "81208145299.1829"
+  }
+}

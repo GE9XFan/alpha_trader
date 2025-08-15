@@ -1,0 +1,21 @@
+{
+  "api_name": "ema",
+  "timestamp": "2025-08-15T14:33:07.798600",
+  "top_level_keys": [
+    "Meta Data",
+    "Technical Analysis: EMA"
+  ],
+  "field_analysis": {
+    "EMA": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "217.9157",
+      "nullable": false
+    }
+  },
+  "record_count": 6467,
+  "sample_data": {
+    "EMA": "217.9157"
+  }
+}

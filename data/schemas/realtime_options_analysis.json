@@ -1,0 +1,174 @@
+{
+  "api_name": "realtime_options",
+  "timestamp": "2025-08-15T14:33:07.825845",
+  "top_level_keys": [
+    "endpoint",
+    "message",
+    "data"
+  ],
+  "field_analysis": {
+    "contractID": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "AAPL250815C00090000",
+      "nullable": false
+    },
+    "symbol": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "AAPL",
+      "nullable": false
+    },
+    "expiration": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "2025-08-15",
+      "nullable": false
+    },
+    "strike": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "90.00",
+      "nullable": false
+    },
+    "type": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "call",
+      "nullable": false
+    },
+    "last": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "144.15",
+      "nullable": false
+    },
+    "mark": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "140.82",
+      "nullable": false
+    },
+    "bid": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "140.15",
+      "nullable": false
+    },
+    "bid_size": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "89",
+      "nullable": false
+    },
+    "ask": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "141.50",
+      "nullable": false
+    },
+    "ask_size": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "112",
+      "nullable": false
+    },
+    "volume": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "1",
+      "nullable": false
+    },
+    "open_interest": {
+      "type": "integer_string",
+      "is_numeric": true,
+      "is_decimal": false,
+      "sample": "6",
+      "nullable": false
+    },
+    "date": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "2025-08-15",
+      "nullable": false
+    },
+    "implied_volatility": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "7.23909",
+      "nullable": false
+    },
+    "delta": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "0.99625",
+      "nullable": false
+    },
+    "gamma": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "0.00013",
+      "nullable": false
+    },
+    "theta": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "-0.49929",
+      "nullable": false
+    },
+    "vega": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "0.00135",
+      "nullable": false
+    },
+    "rho": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "0.00244",
+      "nullable": false
+    }
+  },
+  "record_count": 2482,
+  "sample_data": {
+    "contractID": "AAPL250815C00090000",
+    "symbol": "AAPL",
+    "expiration": "2025-08-15",
+    "strike": "90.00",
+    "type": "call",
+    "last": "144.15",
+    "mark": "140.82",
+    "bid": "140.15",
+    "bid_size": "89",
+    "ask": "141.50",
+    "ask_size": "112",
+    "volume": "1",
+    "open_interest": "6",
+    "date": "2025-08-15",
+    "implied_volatility": "7.23909",
+    "delta": "0.99625",
+    "gamma": "0.00013",
+    "theta": "-0.49929",
+    "vega": "0.00135",
+    "rho": "0.00244"
+  }
+}

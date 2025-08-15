@@ -1,0 +1,21 @@
+{
+  "api_name": "mfi",
+  "timestamp": "2025-08-15T14:33:07.815098",
+  "top_level_keys": [
+    "Meta Data",
+    "Technical Analysis: MFI"
+  ],
+  "field_analysis": {
+    "MFI": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "51.9384",
+      "nullable": false
+    }
+  },
+  "record_count": 6472,
+  "sample_data": {
+    "MFI": "51.9384"
+  }
+}

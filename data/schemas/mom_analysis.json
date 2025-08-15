@@ -1,0 +1,21 @@
+{
+  "api_name": "mom",
+  "timestamp": "2025-08-15T14:33:07.816878",
+  "top_level_keys": [
+    "Meta Data",
+    "Technical Analysis: MOM"
+  ],
+  "field_analysis": {
+    "MOM": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "25.4473",
+      "nullable": false
+    }
+  },
+  "record_count": 6476,
+  "sample_data": {
+    "MOM": "25.4473"
+  }
+}

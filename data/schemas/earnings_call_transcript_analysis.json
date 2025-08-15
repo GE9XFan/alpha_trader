@@ -1,0 +1,46 @@
+{
+  "api_name": "earnings_call_transcript",
+  "timestamp": "2025-08-15T14:33:07.796394",
+  "top_level_keys": [
+    "symbol",
+    "quarter",
+    "transcript"
+  ],
+  "field_analysis": {
+    "speaker": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "Suhasini Chandramouli",
+      "nullable": false
+    },
+    "title": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "Director of Investor Relations",
+      "nullable": false
+    },
+    "content": {
+      "type": "string",
+      "is_numeric": false,
+      "is_decimal": false,
+      "sample": "Good afternoon, and welcome to the Apple Q1 Fiscal Year 2025 Earnings Conference Call. My name is Su",
+      "nullable": false
+    },
+    "sentiment": {
+      "type": "decimal_string",
+      "is_numeric": true,
+      "is_decimal": true,
+      "sample": "0.0",
+      "nullable": false
+    }
+  },
+  "record_count": 83,
+  "sample_data": {
+    "speaker": "Suhasini Chandramouli",
+    "title": "Director of Investor Relations",
+    "content": "Good afternoon, and welcome to the Apple Q1 Fiscal Year 2025 Earnings Conference Call. My name is Suhasini Chandramouli, Director of Investor Relations. Today's call is being recorded. Speaking first today are Apple CEO, Tim Cook, and he will be followed by CFO, Kevan Parekh. After that, we'll open the call to questions from analysts. Please note that some of the information you'll hear during our discussion today will consist of forward-looking statements, including, without limitation, those regarding revenue, gross margin, operating expenses, other income and expense, taxes, capital allocation, and future business outlook, including the potential impact of macroeconomic conditions on the company's business and results of operations. These statements involve risks and uncertainties that may cause actual results or trends to differ materially from our forecast. For more information, please refer to the risk factors discussed in Apple's most recently filed annual report on Form 10-K and the Form 8-K filed with the SEC today along with the associated press release. Apple assumes no obligation to update any forward-looking statements, which speak only as of the date they are made. I'd now like to turn the call over to Tim for introductory remarks.",
+    "sentiment": "0.0"
+  }
+}
