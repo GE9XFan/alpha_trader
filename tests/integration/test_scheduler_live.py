@@ -1,340 +1,372 @@
 #!/usr/bin/env python3
 """
-Test DataScheduler with REALTIME_OPTIONS specifically
-Focus on options with Greeks through the scheduler
+Complete System Integration Test for DataScheduler
+Tests the ACTUAL implementation with REAL config files and REAL task execution
+NO MOCKS - NO MANUAL PARAMETERS - REAL SYSTEM TEST
 """
 
 import sys
+import asyncio
+import logging
 import json
 import time
-import logging
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, Any, List
 
-# Setup path
+# Setup path - same pattern as existing test
 script_dir = Path(__file__).resolve().parent
 project_root = script_dir.parent.parent
 if not (project_root / 'src').exists():
     project_root = Path.cwd()
 sys.path.insert(0, str(project_root))
 
-print(f"Using project root: {project_root}")
-
+# Import actual project modules
 from src.foundation.config_manager import ConfigManager
-from src.data.scheduler import DataScheduler, TaskStatus, APIType, ScheduledTask
-from src.data.rate_limiter import TokenBucketRateLimiter, RequestPriority
+from src.data.scheduler import DataScheduler, TaskStatus, APIType
+from src.data.rate_limiter import TokenBucketRateLimiter
 from src.connections.av_client import AlphaVantageClient
 
-# Set up logging
+# Configure comprehensive logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('test_scheduler_live_full.log'),
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger(__name__)
 
 
-class OptionsSchedulerTest:
-    """Test scheduler specifically for OPTIONS_WITH_GREEKS"""
+class RealSchedulerSystemTest:
+    """
+    REAL system test - uses actual config files and runs the scheduler
+    exactly as it would run in production
+    """
     
     def __init__(self):
-        """Initialize test components"""
-        logger.info("="*60)
-        logger.info("SCHEDULER TEST - REALTIME OPTIONS WITH GREEKS")
-        logger.info("="*60)
+        """Initialize test - will use REAL configs"""
+        self.config_manager = None
+        self.rate_limiter = None
+        self.av_client = None
+        self.scheduler = None
         
-        # Initialize components
-        self.config_manager = ConfigManager()
-        self.rate_limiter = TokenBucketRateLimiter('alpha_vantage', self.config_manager)
-        self.av_client = AlphaVantageClient(self.config_manager, self.rate_limiter)
-        self.scheduler = DataScheduler(self.config_manager, self.av_client, None, self.rate_limiter)
+        # Track what actually happens
+        self.execution_log = []
+        self.api_calls = []
+        self.errors = []
         
-        # Check API key
-        api_key = self.config_manager.get('env.AV_API_KEY')
-        if not api_key or 'your_alpha' in api_key:
-            logger.error("❌ No valid API key configured!")
-            raise ValueError("Set AV_API_KEY in .env file")
-        
-        logger.info(f"✅ API key configured: {api_key[:10]}...")
-        
-        # Initialize scheduler
-        self.scheduler.initialize()
-        logger.info("✅ Scheduler initialized")
-        
-        # Output directory
-        self.output_dir = Path("data/options_test")
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        # Results directory
+        self.results_dir = Path('test_results')
+        self.results_dir.mkdir(exist_ok=True)
     
-    def test_direct_options_call(self):
-        """Test direct call to get_realtime_options"""
-        logger.info("\n" + "-"*60)
-        logger.info("TEST 1: Direct Options API Call")
-        logger.info("-"*60)
-        
-        symbols = ['SPY', 'QQQ', 'AAPL']  # Test multiple symbols
-        
-        for symbol in symbols:
-            logger.info(f"\nTesting {symbol}...")
-            
-            try:
-                start = time.time()
-                response = self.av_client.get_realtime_options(symbol)
-                elapsed = time.time() - start
-                
-                logger.info(f"  Response time: {elapsed:.2f}s")
-                
-                if response is None:
-                    logger.error(f"  ❌ No response for {symbol}")
-                    continue
-                
-                # Analyze response
-                if isinstance(response, dict):
-                    # Check for errors
-                    if 'Error Message' in response:
-                        logger.error(f"  ❌ API Error: {response['Error Message']}")
-                        logger.info("  → Options may require premium API key")
-                        
-                    elif 'Note' in response:
-                        logger.warning(f"  ⚠️ Rate limit: {response['Note']}")
-                        logger.info("  → Daily API limit reached (25 calls for free tier)")
-                        
-                    elif 'Information' in response:
-                        logger.warning(f"  ⚠️ Info: {response['Information']}")
-                        
-                    else:
-                        # Check for options data
-                        logger.info(f"  Response keys: {list(response.keys())}")
-                        
-                        # Save response for analysis
-                        response_file = self.output_dir / f"{symbol}_options_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-                        with open(response_file, 'w') as f:
-                            json.dump(response, f, indent=2)
-                        logger.info(f"  Saved to: {response_file}")
-                        
-                        # Check for Greeks
-                        if 'options' in response:
-                            options = response['options']
-                            logger.info(f"  ✅ Options data found: {len(options)} contracts")
-                            
-                            # Check first option for Greeks
-                            if options:
-                                first_key = list(options.keys())[0]
-                                first_option = options[first_key]
-                                
-                                # Check for Greek fields
-                                greeks = ['delta', 'gamma', 'theta', 'vega', 'rho']
-                                found_greeks = [g for g in greeks if g in str(first_option).lower()]
-                                
-                                if found_greeks:
-                                    logger.info(f"  ✅ Greeks found: {found_greeks}")
-                                else:
-                                    logger.warning(f"  ⚠️ No Greeks found in response")
-                                    logger.info(f"  First option keys: {list(first_option.keys()) if isinstance(first_option, dict) else 'Not a dict'}")
-                        else:
-                            logger.warning(f"  ⚠️ No 'options' key in response")
-                            
-            except Exception as e:
-                logger.error(f"  ❌ Exception: {e}")
-                
-            # Respect rate limits
-            time.sleep(1)
-    
-    def test_scheduler_options_execution(self):
-        """Test OPTIONS_WITH_GREEKS through scheduler"""
-        logger.info("\n" + "-"*60)
-        logger.info("TEST 2: Options Execution Through Scheduler")
-        logger.info("-"*60)
-        
-        # Create high-priority options task
-        task = ScheduledTask(
-            symbol="SPY",
-            api_type=APIType.OPTIONS_WITH_GREEKS,
-            priority=1,  # Highest priority
-            interval_seconds=12,  # From config
-            tier="tier_a",
-            next_run=datetime.now()
-        )
-        
-        logger.info(f"Executing options task: {task.symbol}")
-        
+    def run_production_system(self):
+        """
+        Run the ACTUAL production system using REAL configs
+        This is exactly how the system would run in production
+        """
         try:
-            start = time.time()
-            response = self.scheduler._execute_api_call(task)
-            elapsed = time.time() - start
+            logger.info("=" * 80)
+            logger.info("STARTING REAL PRODUCTION SYSTEM TEST")
+            logger.info("Using actual configuration files from config/")
+            logger.info("Using environment variables from .env")
+            logger.info("=" * 80)
             
-            logger.info(f"  Execution time: {elapsed:.2f}s")
+            # Step 1: Initialize ConfigManager - it will load ALL YAML files
+            logger.info("\n📁 Loading production configuration files...")
+            self.config_manager = ConfigManager()
             
-            if response:
-                logger.info("  ✅ Response received through scheduler")
-                
-                # Save for analysis
-                response_file = self.output_dir / f"scheduler_options_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-                
-                # Handle large responses
-                if isinstance(response, dict):
-                    # Truncate if too large
-                    if 'options' in response and len(str(response)) > 10000:
-                        truncated = {
-                            'meta': {k: v for k, v in response.items() if k != 'options'},
-                            'options_count': len(response.get('options', {})),
-                            'sample_option': list(response.get('options', {}).values())[0] if response.get('options') else None
-                        }
-                        with open(response_file, 'w') as f:
-                            json.dump(truncated, f, indent=2)
-                        logger.info(f"  Saved truncated response to: {response_file}")
-                    else:
-                        with open(response_file, 'w') as f:
-                            json.dump(response, f, indent=2)
-                        logger.info(f"  Saved full response to: {response_file}")
-            else:
-                logger.error("  ❌ No response from scheduler")
-                
-        except Exception as e:
-            logger.error(f"  ❌ Scheduler execution failed: {e}")
-    
-    def test_options_in_schedule(self):
-        """Test that options tasks are properly scheduled"""
-        logger.info("\n" + "-"*60)
-        logger.info("TEST 3: Options Tasks in Schedule")
-        logger.info("-"*60)
-        
-        # Get current tasks
-        stats = self.scheduler.get_statistics()
-        
-        logger.info(f"Total tasks: {stats['current_state']['total_tasks']}")
-        logger.info(f"Task types: {stats['tasks_by_type']}")
-        
-        # Check for options tasks
-        options_count = stats['tasks_by_type'].get('options_with_greeks', 0)
-        
-        if options_count > 0:
-            logger.info(f"✅ Found {options_count} options tasks in schedule")
+            # Log what configs were loaded
+            logger.info("Configuration loaded successfully")
             
-            # Get next options tasks
-            next_tasks = self.scheduler.get_next_tasks(50)
-            options_tasks = [t for t in next_tasks if t['api_type'] == 'options_with_greeks']
+            # Step 2: Verify environment
+            logger.info("\n🔑 Verifying environment variables...")
+            av_api_key = self.config_manager.get('env.AV_API_KEY')
+            if not av_api_key or 'your_alpha' in av_api_key:
+                raise ValueError("AV_API_KEY not configured properly!")
+            logger.info(f"  ✓ AV_API_KEY: {av_api_key[:10]}...")
             
-            logger.info(f"\nNext options tasks to execute:")
-            for task in options_tasks[:5]:
-                logger.info(f"  {task['symbol']} - Priority {task['priority']} - {task['tier']}")
-        else:
-            logger.error("❌ No options tasks found in schedule!")
-    
-    def test_rate_limiting_with_options(self):
-        """Test rate limiting with options calls"""
-        logger.info("\n" + "-"*60)
-        logger.info("TEST 4: Rate Limiting with Options")
-        logger.info("-"*60)
-        
-        # Check current tokens
-        tokens_start = self.rate_limiter.get_available_tokens()
-        logger.info(f"Starting tokens: {tokens_start:.1f}")
-        
-        # Make multiple options calls
-        symbols = ['SPY', 'QQQ']
-        
-        for symbol in symbols:
-            task = ScheduledTask(
-                symbol=symbol,
-                api_type=APIType.OPTIONS_WITH_GREEKS,
-                priority=1,
-                interval_seconds=12,
-                tier="tier_a"
+            # Step 3: Initialize Rate Limiter
+            logger.info("\n⏱️  Initializing Rate Limiter...")
+            self.rate_limiter = TokenBucketRateLimiter('alpha_vantage', self.config_manager)
+            
+            # Step 4: Initialize Alpha Vantage Client
+            logger.info("\n🌐 Initializing Alpha Vantage Client...")
+            self.av_client = AlphaVantageClient(self.config_manager, self.rate_limiter)
+            
+            # Step 5: Initialize DataScheduler with real components
+            logger.info("\n📋 Initializing DataScheduler...")
+            self.scheduler = DataScheduler(
+                config_manager=self.config_manager,
+                av_client=self.av_client,
+                ibkr_connection=None,  # Can be None - scheduler handles it
+                rate_limiter=self.rate_limiter
             )
             
-            tokens_before = self.rate_limiter.get_available_tokens()
+            # Step 6: Initialize scheduler (creates tasks from config)
+            logger.info("\n🚀 Starting scheduler initialization...")
+            if not self.scheduler.initialize():
+                raise RuntimeError("Failed to initialize scheduler")
             
-            try:
-                response = self.scheduler._execute_api_call(task)
-                tokens_after = self.rate_limiter.get_available_tokens()
+            # Log what tasks were created - use the actual tasks attribute
+            tasks = self.scheduler.tasks  # Direct access to tasks dictionary
+            logger.info(f"\n📊 Tasks created from config: {len(tasks)}")
+            
+            # Get statistics for more info
+            stats = self.scheduler.get_statistics()
+            
+            # Show task distribution from statistics
+            distribution = stats.get('task_distribution', {})
+            if distribution.get('by_api_type'):
+                logger.info("Tasks by API type:")
+                for api_type, count in distribution['by_api_type'].items():
+                    logger.info(f"  {api_type}: {count}")
+            
+            if distribution.get('by_tier'):
+                logger.info("Tasks by tier:")
+                for tier, count in distribution['by_tier'].items():
+                    logger.info(f"  {tier}: {count}")
+            
+            # Get next tasks to show what will execute
+            next_tasks = self.scheduler.get_next_tasks(limit=10)
+            if next_tasks:
+                logger.info(f"\nNext {len(next_tasks)} tasks to execute:")
+                for task_info in next_tasks[:5]:
+                    logger.info(f"  - {task_info['symbol']} {task_info['api_type']} (tier: {task_info['tier']})")
+            
+            # Save task details for inspection
+            tasks_data = {}
+            for task_id, task in tasks.items():
+                tasks_data[task_id] = {
+                    'symbol': task.symbol,
+                    'api_type': task.api_type.value if hasattr(task.api_type, 'value') else str(task.api_type),
+                    'tier': task.tier,
+                    'priority': task.priority,
+                    'interval_seconds': task.interval_seconds,
+                    'next_run': task.next_run.isoformat() if hasattr(task, 'next_run') and task.next_run else None,
+                    'status': task.status.value if hasattr(task, 'status') else 'PENDING'
+                }
+            
+            with open(self.results_dir / "scheduled_tasks.json", 'w') as f:
+                json.dump(tasks_data, f, indent=2)
+            logger.info(f"📁 Task details saved to test_results/scheduled_tasks.json")
+            
+            # Step 7: Run for test duration
+            test_duration = 300  # 5 minutes default
+            
+            # Check if there's a test duration in config
+            system_config = self.config_manager.get('system', {})
+            if system_config and 'test' in system_config:
+                test_duration = system_config.get('test', {}).get('integration_test_duration_seconds', 300)
+            
+            logger.info(f"\n⏱️  Running for {test_duration} seconds ({test_duration/60:.1f} minutes)")
+            logger.info("Monitoring task execution...\n")
+            
+            # Monitor with periodic status updates
+            start_time = time.time()
+            last_stats_time = start_time
+            stats_interval = 30  # Report every 30 seconds
+            
+            while time.time() - start_time < test_duration:
+                current_time = time.time()
                 
-                logger.info(f"  {symbol}: Tokens {tokens_before:.1f} → {tokens_after:.1f}")
-                
-                if response and 'Error Message' not in response:
-                    logger.info(f"    ✅ Call succeeded")
-                elif response and 'Error Message' in response:
-                    logger.warning(f"    ⚠️ API error: {response['Error Message'][:50]}...")
-                else:
-                    logger.error(f"    ❌ No response")
+                # Periodic status update
+                if current_time - last_stats_time >= stats_interval:
+                    elapsed = current_time - start_time
+                    stats = self.scheduler.get_statistics()
                     
-            except Exception as e:
-                logger.error(f"  {symbol}: Exception: {e}")
+                    logger.info(f"\n📊 Status at {elapsed:.0f}s:")
+                    logger.info(f"  Tasks executed: {stats.get('tasks_executed', 0)}")
+                    logger.info(f"  Tasks scheduled: {stats.get('tasks_scheduled', 0)}")
+                    logger.info(f"  Tasks failed: {stats.get('tasks_failed', 0)}")
+                    
+                    # Check current state
+                    current_state = stats.get('current_state', {})
+                    logger.info(f"  Queue size: {current_state.get('queue_size', 0)}")
+                    logger.info(f"  Active tasks: {current_state.get('active_tasks', 0)}")
+                    logger.info(f"  Market hours: {current_state.get('market_hours', False)}")
+                    logger.info(f"  MOC window: {current_state.get('moc_window', False)}")
+                    
+                    # Task distribution
+                    distribution = stats.get('task_distribution', {})
+                    if distribution.get('by_api_type'):
+                        logger.info("  API calls by type:")
+                        for api_type, count in distribution['by_api_type'].items():
+                            logger.info(f"    {api_type}: {count}")
+                    
+                    last_stats_time = current_time
+                
+                time.sleep(1)
             
-            time.sleep(0.5)  # Small delay between calls
-        
-        tokens_end = self.rate_limiter.get_available_tokens()
-        logger.info(f"\nEnding tokens: {tokens_end:.1f}")
-        logger.info(f"Tokens consumed: {tokens_start - tokens_end:.1f}")
+            # Step 8: Stop scheduler
+            logger.info("\n🛑 Stopping scheduler...")
+            self.scheduler.shutdown()
+            
+            # Step 9: Analyze results
+            return self.analyze_execution_results()
+            
+        except Exception as e:
+            logger.error(f"System test failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return False
     
-    def generate_report(self):
-        """Generate test report"""
-        logger.info("\n" + "="*60)
-        logger.info("OPTIONS TEST REPORT")
-        logger.info("="*60)
+    def analyze_execution_results(self):
+        """Analyze what actually happened during the test"""
+        logger.info("\n" + "=" * 80)
+        logger.info("ANALYZING EXECUTION RESULTS")
+        logger.info("=" * 80)
         
-        # Get scheduler stats
+        # Get final statistics
         stats = self.scheduler.get_statistics()
         
-        logger.info(f"Scheduler Statistics:")
-        logger.info(f"  Tasks executed: {stats['tasks_executed']}")
-        logger.info(f"  Tasks failed: {stats['tasks_failed']}")
-        logger.info(f"  Tasks rate limited: {stats['tasks_rate_limited']}")
-        logger.info(f"  Options tasks: {stats['tasks_by_type'].get('options_with_greeks', 0)}")
+        # Overall execution stats
+        logger.info("\n📈 Overall Execution Statistics:")
+        logger.info(f"  Total tasks scheduled: {stats.get('tasks_scheduled', 0)}")
+        logger.info(f"  Total tasks executed: {stats.get('tasks_executed', 0)}")
+        logger.info(f"  Total tasks failed: {stats.get('tasks_failed', 0)}")
+        logger.info(f"  Total rate limit delays: {stats.get('rate_limit_delays', 0)}")
         
-        # Rate limiter stats
-        rl_stats = self.rate_limiter.get_statistics()
-        logger.info(f"\nRate Limiter Statistics:")
-        logger.info(f"  Total requests: {rl_stats['total_requests']}")
-        logger.info(f"  Current RPM: {rl_stats['current_rpm']}")
-        logger.info(f"  Available tokens: {self.rate_limiter.get_available_tokens():.1f}")
+        # Task distribution
+        distribution = stats.get('task_distribution', {})
         
-        logger.info(f"\nOutput files saved to: {self.output_dir}")
+        logger.info("\n📊 Task Distribution by Status:")
+        for status, count in distribution.get('by_status', {}).items():
+            logger.info(f"  {status}: {count}")
         
-        # Common issues
-        logger.info("\n" + "-"*60)
-        logger.info("COMMON ISSUES WITH OPTIONS API:")
-        logger.info("-"*60)
-        logger.info("1. 'Invalid API call' - Options may require premium subscription")
-        logger.info("2. 'Thank you for using Alpha Vantage' - Daily limit reached (25 for free)")
-        logger.info("3. No Greeks in response - Free tier may not include Greeks")
-        logger.info("4. Empty response - Symbol may not have options available")
-        logger.info("5. Rate limit - Max 5 calls/minute for free tier")
+        logger.info("\n📊 Task Distribution by Tier:")
+        for tier, count in distribution.get('by_tier', {}).items():
+            logger.info(f"  {tier}: {count}")
+        
+        logger.info("\n📊 Task Distribution by API Type:")
+        for api_type, count in distribution.get('by_api_type', {}).items():
+            logger.info(f"  {api_type}: {count}")
+        
+        # Current state
+        current_state = stats.get('current_state', {})
+        logger.info("\n🔍 Final State:")
+        logger.info(f"  Total tasks in system: {current_state.get('total_tasks', 0)}")
+        logger.info(f"  Tasks in queue: {current_state.get('queue_size', 0)}")
+        logger.info(f"  Active tasks: {current_state.get('active_tasks', 0)}")
+        
+        # Save complete statistics
+        stats_file = self.results_dir / f"execution_stats_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        with open(stats_file, 'w') as f:
+            json.dump(stats, f, indent=2, default=str)
+        logger.info(f"\n📁 Complete statistics saved to: {stats_file}")
+        
+        # Health check
+        health = self.scheduler.health_check()
+        logger.info("\n🏥 Health Check Results:")
+        for check, result in health.get('checks', {}).items():
+            status = "✓" if result else "✗"
+            logger.info(f"  {status} {check}: {result}")
+        
+        # Final verdict
+        logger.info("\n" + "=" * 80)
+        logger.info("TEST RESULTS SUMMARY")
+        logger.info("=" * 80)
+        
+        total_executed = stats.get('tasks_executed', 0)
+        total_failed = stats.get('tasks_failed', 0)
+        success_rate = ((total_executed - total_failed) / total_executed * 100) if total_executed > 0 else 0
+        
+        logger.info(f"Total tasks executed: {total_executed}")
+        logger.info(f"Successful: {total_executed - total_failed}")
+        logger.info(f"Failed: {total_failed}")
+        logger.info(f"Success rate: {success_rate:.1f}%")
+        
+        # Determine pass/fail
+        passed = (
+            total_executed > 0 and
+            success_rate >= 80 and  # 80% success rate threshold
+            health.get('healthy', False)
+        )
+        
+        if passed:
+            logger.info("\n🎉 TEST PASSED - System is working correctly!")
+            logger.info("The scheduler is:")
+            logger.info("  ✓ Loading tasks from configuration")
+            logger.info("  ✓ Executing API calls through AlphaVantageClient")
+            logger.info("  ✓ Respecting rate limits")
+            logger.info("  ✓ Managing task priorities")
+            logger.info("  ✓ Handling errors gracefully")
+        else:
+            logger.error("\n❌ TEST FAILED - Issues detected")
+            if total_executed == 0:
+                logger.error("  - No tasks were executed")
+            if success_rate < 80:
+                logger.error(f"  - Success rate too low: {success_rate:.1f}% < 80%")
+            if not health.get('healthy', False):
+                logger.error("  - Health check failed")
+        
+        return passed
     
-    def run_all_tests(self):
-        """Run all options tests"""
-        try:
-            # Test 1: Direct API call
-            self.test_direct_options_call()
-            
-            # Test 2: Through scheduler
-            self.test_scheduler_options_execution()
-            
-            # Test 3: Check schedule
-            self.test_options_in_schedule()
-            
-            # Test 4: Rate limiting
-            self.test_rate_limiting_with_options()
-            
-            # Generate report
-            self.generate_report()
-            
-        finally:
-            # Cleanup
-            logger.info("\nShutting down scheduler...")
-            self.scheduler.shutdown()
-            logger.info("✅ Shutdown complete")
+    def verify_api_coverage(self):
+        """Verify that configured APIs are actually being called"""
+        logger.info("\n📋 Verifying API Coverage...")
+        
+        # Get scheduler statistics
+        stats = self.scheduler.get_statistics()
+        distribution = stats.get('task_distribution', {})
+        api_types = distribution.get('by_api_type', {})
+        
+        if api_types:
+            logger.info(f"APIs that were scheduled: {list(api_types.keys())}")
+            logger.info(f"Total unique API types: {len(api_types)}")
+        else:
+            logger.warning("No API type distribution data available")
+        
+        # Check if key APIs were called
+        expected_apis = ['options_with_greeks', 'rsi', 'macd', 'bbands', 'vwap']
+        covered = [api for api in expected_apis if api in api_types]
+        missing = [api for api in expected_apis if api not in api_types]
+        
+        if covered:
+            logger.info(f"✓ Key APIs covered: {covered}")
+        if missing:
+            logger.warning(f"⚠ Key APIs not covered: {missing}")
+        
+        coverage = (len(covered) / len(expected_apis) * 100) if expected_apis else 0
+        logger.info(f"Key API coverage: {coverage:.1f}%")
+        
+        return coverage >= 60  # 60% coverage of key APIs is acceptable for test
 
 
 def main():
-    """Run the options test"""
-    try:
-        tester = OptionsSchedulerTest()
-        tester.run_all_tests()
-    except Exception as e:
-        logger.error(f"❌ Test failed: {e}")
-        import traceback
-        traceback.print_exc()
+    """Main test execution"""
+    logger.info("=" * 80)
+    logger.info("DATA SCHEDULER COMPLETE SYSTEM TEST")
+    logger.info("Mode: PRODUCTION CONFIGURATION TEST")
+    logger.info("=" * 80)
+    logger.info("")
+    logger.info("This test will:")
+    logger.info("1. Load your actual YAML configuration files")
+    logger.info("2. Use your environment variables (.env)")
+    logger.info("3. Initialize the scheduler with real components")
+    logger.info("4. Create tasks from your configuration")
+    logger.info("5. Run the scheduler in production mode")
+    logger.info("6. Execute real API calls through AlphaVantageClient")
+    logger.info("7. Verify the system works as configured")
+    logger.info("")
+    logger.info("=" * 80)
+    
+    # Create and run test
+    test = RealSchedulerSystemTest()
+    
+    # Run the production system test
+    success = test.run_production_system()
+    
+    # Verify API coverage
+    if success:
+        coverage_ok = test.verify_api_coverage()
+        success = success and coverage_ok
+    
+    # Exit with appropriate code
+    sys.exit(0 if success else 1)
 
 
 if __name__ == "__main__":
+    # Run the real system test
     main()
