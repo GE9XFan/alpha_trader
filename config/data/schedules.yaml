@@ -1,0 +1,116 @@
+# config/data/schedules.yaml
+# Smarter scheduler configuration with API budget awareness
+# Phase 4.2 - Day 16 (Revised)
+
+# Market hours configuration (all times in ET)
+market_hours:
+  pre_market_start: "04:00"
+  market_open: "09:30"
+  market_close: "16:00"
+  after_hours_end: "20:00"
+  timezone: "America/New_York"
+
+# Rate limit budget management
+rate_limit_budget:
+  max_per_minute: 600
+  target_per_minute: 500
+  reserved_buffer: 100  # Keep 100 calls/min for manual/emergency
+
+# Symbol tiers
+symbol_tiers:
+  tier_a:
+    symbols: ["SPY", "QQQ", "IWM","IBIT"]
+    priority: 1
+    
+  tier_b:
+    symbols: ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA"]
+    priority: 2
+    
+  tier_c:
+    symbols: ["DIS", "NFLX", "COST", "WMA", "HOOD", "MSTR", "PLTR", "SMCI","AMD","INTC","ORCL","SNOW"]
+    priority: 3
+
+# API Groups with smart scheduling
+api_groups:
+  critical:  # Must have for trading decisions
+    apis: ["REALTIME_OPTIONS"]
+    tier_a_interval: 30  # seconds (matches cache TTL)
+    tier_b_interval: 60
+    tier_c_interval: 180
+    calls_per_symbol: 2  # per minute estimate
+    
+  indicators_fast:  # Phase 5 - will add RSI, MACD, BBANDS
+    apis: []  # Empty for now
+    tier_a_interval: 60
+    tier_b_interval: 300
+    tier_c_interval: 600
+    calls_per_symbol: 1
+    
+  indicators_slow:  # Phase 5 - will add ATR, ADX, etc.
+    apis: []
+    tier_a_interval: 300
+    tier_b_interval: 900
+    tier_c_interval: 1800
+    calls_per_symbol: 0.2
+    
+  analytics:  # Phase 6
+    apis: []
+    tier_a_interval: 300
+    tier_b_interval: 900
+    tier_c_interval: 1800
+    calls_per_symbol: 0.2
+    
+  daily:  # Once per day APIs
+    apis: ["HISTORICAL_OPTIONS"]
+    schedule_time: "06:00"  # Run pre-market
+    calls_per_symbol: 0.05  # Negligible
+    
+  sentiment:  # Phase 13 - news, sentiment
+    apis: []
+    interval: 300  # Every 5 minutes, not per symbol
+    calls_per_run: 0.2
+
+# Smart scheduling rules
+scheduling_rules:
+  # Check cache before every API call
+  cache_first: true
+  
+  # Skip call if cache is fresh (within X% of TTL)
+  cache_freshness_threshold: 0.8  # Skip if 80% fresh
+  
+  # Dynamic adjustment based on rate limit usage
+  auto_throttle:
+    enabled: true
+    high_usage_threshold: 450  # calls/min
+    reduce_frequency_by: 0.5  # Cut frequency in half
+    
+  # Batch similar API calls together
+  batching:
+    enabled: false  # Alpha Vantage doesn't support batching
+    
+  # Priority during different market periods
+  period_adjustments:
+    pre_market:
+      multiplier: 0.2  # 20% of normal frequency
+    market_hours:
+      multiplier: 1.0  # Normal frequency
+    moc_window:
+      multiplier: 2.0  # Double frequency
+    after_hours:
+      multiplier: 0.1  # 10% of normal frequency
+
+# MOC window special handling  
+moc_window:
+  enabled: true
+  start_time: "15:40"
+  end_time: "15:55"
+  symbols_to_elevate: ["SPY", "QQQ"]  # Only elevate specific symbols
+  
+# Scheduler settings
+scheduler:
+  enabled: true
+  max_workers: 3
+  job_defaults:
+    coalesce: true
+    max_instances: 1
+    misfire_grace_time: 30

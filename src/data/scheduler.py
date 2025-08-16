@@ -1,0 +1,300 @@
+"""Data scheduler for automated API calls - Phase 4.2"""
+
+import yaml
+from pathlib import Path
+from datetime import datetime, time
+import pytz
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.executors.pool import ThreadPoolExecutor
+from datetime import timedelta
+import sys
+sys.path.append(str(Path(__file__).parent.parent.parent))
+from src.connections.av_client import AlphaVantageClient
+from src.data.ingestion import DataIngestion
+from src.data.rate_limiter import TokenBucketRateLimiter
+
+class DataScheduler:
+    """
+    Manages automated data collection with market awareness and rate limit respect
+    Phase 4.2 - Day 16
+    """
+    
+    def __init__(self, test_mode=False):
+        # Load configurations
+        self._load_config()
+        
+        # Initialize scheduler
+        self._init_scheduler()
+        
+        # Test mode flag
+        self.test_mode = test_mode
+        
+        # Track state
+        self.is_running = False
+        self.jobs_created = 0
+        self.last_rate_check = datetime.now()
+        
+        print(f"DataScheduler initialized")
+        print(f"  Market timezone: {self.timezone}")
+        print(f"  Target rate: {self.rate_limit_config['target_per_minute']}/min")
+        print(f"  Tier A symbols: {len(self.tiers['tier_a']['symbols'])}")
+        print(f"  Tier B symbols: {len(self.tiers['tier_b']['symbols'])}")
+        if test_mode:
+            print(f"  🧪 TEST MODE ENABLED - Ignoring market hours")
+    
+    def _load_config(self):
+        """Load scheduler configuration from YAML"""
+        config_path = Path(__file__).parent.parent.parent / 'config' / 'data' / 'schedules.yaml'
+        
+        with open(config_path, 'r') as f:
+            self.config = yaml.safe_load(f)
+        
+        # Extract key configurations
+        self.market_hours = self.config['market_hours']
+        self.timezone = pytz.timezone(self.market_hours['timezone'])
+        self.rate_limit_config = self.config['rate_limit_budget']
+        self.tiers = self.config['symbol_tiers']
+        self.api_groups = self.config['api_groups']
+        self.rules = self.config['scheduling_rules']
+        self.moc_config = self.config['moc_window']
+        
+    def _init_scheduler(self):
+        """Initialize APScheduler with proper configuration"""
+        # Configure executors and job defaults
+        executors = {
+            'default': ThreadPoolExecutor(
+                max_workers=self.config['scheduler']['max_workers']
+            )
+        }
+        
+        job_defaults = self.config['scheduler']['job_defaults']
+        
+        # Create scheduler
+        self.scheduler = BackgroundScheduler(
+            executors=executors,
+            job_defaults=job_defaults,
+            timezone=self.timezone
+        )
+    
+    def start(self):
+        """Start the scheduler"""
+        if not self.is_running:
+            self.scheduler.start()
+            self.is_running = True
+            print("✓ Scheduler started")
+            
+            # Create initial jobs
+            self._create_jobs()
+        else:
+            print("Scheduler already running")
+    
+    def stop(self):
+        """Stop the scheduler gracefully"""
+        if self.is_running:
+            self.scheduler.shutdown(wait=True)
+            self.is_running = False
+            print("✓ Scheduler stopped")
+    
+    def _create_jobs(self):
+        """Create scheduled jobs based on configuration"""
+        print(f"Creating scheduled jobs...")
+        
+        # Schedule realtime options for critical API group
+        if 'critical' in self.api_groups:
+            self._schedule_realtime_options()
+        
+        # Schedule daily historical options
+        if 'daily' in self.api_groups:
+            self._schedule_historical_options()
+        
+        print(f"  Created {self.jobs_created} jobs")
+        
+        # List all jobs
+        jobs = self.scheduler.get_jobs()
+        for job in jobs:
+            print(f"    - {job.id}: {job.trigger}")
+    
+    def _schedule_realtime_options(self):
+        """Schedule realtime options data collection"""
+        critical_config = self.api_groups['critical']
+        
+        # Schedule Tier A symbols
+        for symbol in self.tiers['tier_a']['symbols']:
+            if symbol:  # Skip empty symbols
+                interval = critical_config['tier_a_interval']
+                job_id = f"realtime_options_{symbol}_tier_a"
+                
+                self.scheduler.add_job(
+                    func=self._fetch_realtime_options,
+                    trigger='interval',
+                    seconds=interval,
+                    args=[symbol],
+                    id=job_id,
+                    name=f"Realtime Options {symbol}",
+                    replace_existing=True
+                )
+                self.jobs_created += 1
+                print(f"  ✓ Scheduled {symbol} realtime options every {interval}s")
+        
+        # Schedule Tier B symbols
+        for symbol in self.tiers['tier_b']['symbols']:
+            if symbol:
+                interval = critical_config['tier_b_interval']
+                job_id = f"realtime_options_{symbol}_tier_b"
+                
+                self.scheduler.add_job(
+                    func=self._fetch_realtime_options,
+                    trigger='interval',
+                    seconds=interval,
+                    args=[symbol],
+                    id=job_id,
+                    name=f"Realtime Options {symbol}",
+                    replace_existing=True
+                )
+                self.jobs_created += 1
+        
+        # Schedule Tier C symbols
+        for symbol in self.tiers['tier_c']['symbols']:
+            if symbol:
+                interval = critical_config.get('tier_c_interval', 180)  # Default 180s
+                job_id = f"realtime_options_{symbol}_tier_c"
+                
+                self.scheduler.add_job(
+                    func=self._fetch_realtime_options,
+                    trigger='interval',
+                    seconds=interval,
+                    args=[symbol],
+                    id=job_id,
+                    name=f"Realtime Options {symbol}",
+                    replace_existing=True
+                )
+                self.jobs_created += 1
+                
+        if self.tiers['tier_c']['symbols']:
+            print(f"  ✓ Scheduled {len(self.tiers['tier_c']['symbols'])} Tier C symbols every {interval}s")
+
+    
+    def _schedule_historical_options(self):
+        """Schedule daily historical options collection"""
+        daily_config = self.api_groups['daily']
+        schedule_time = daily_config['schedule_time']  # "06:00"
+        
+        # Parse time
+        hour, minute = map(int, schedule_time.split(':'))
+        
+        # Schedule for all tier A + B symbols
+        all_symbols = (self.tiers['tier_a']['symbols'] + 
+                      self.tiers['tier_b']['symbols'] +
+                      self.tiers['tier_c']['symbols'])
+        
+        for symbol in all_symbols:
+            if symbol:
+                job_id = f"historical_options_{symbol}_daily"
+                
+                self.scheduler.add_job(
+                    func=self._fetch_historical_options,
+                    trigger='cron',
+                    hour=hour,
+                    minute=minute,
+                    args=[symbol],
+                    id=job_id,
+                    name=f"Historical Options {symbol}",
+                    replace_existing=True
+                )
+                self.jobs_created += 1
+        
+        print(f"  ✓ Scheduled daily historical options at {schedule_time}")
+    
+    def _fetch_realtime_options(self, symbol):
+        """
+        Fetch realtime options data
+        Called by scheduler for each symbol
+        """
+        try:
+            # Check if market is open (basic check for now)
+            if not self._is_market_hours():
+                print(f"Skipping {symbol} - market closed")
+                return
+            
+            timestamp = datetime.now().strftime('%H:%M:%S')
+            
+            # Show test mode indicator
+            mode_indicator = "🧪" if self.test_mode else "📊"
+            print(f"[{timestamp}] {mode_indicator} Fetching realtime options for {symbol}")
+            
+            # Initialize clients
+            av_client = AlphaVantageClient()
+            ingestion = DataIngestion()
+            
+            # Fetch data (cache-aware automatically)
+            data = av_client.get_realtime_options(symbol)
+            
+            if data and 'data' in data:
+                # Ingest into database (also updates cache)
+                records = ingestion.ingest_options_data(data, symbol)
+                print(f"  ✓ {symbol}: {records} records processed")
+            else:
+                print(f"  ⚠ {symbol}: No data received")
+                
+        except Exception as e:
+            print(f"  ✗ Error fetching {symbol}: {e}")
+    
+    def _fetch_historical_options(self, symbol):
+        """
+        Fetch historical options data
+        Called by scheduler once per day
+        """
+        try:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Fetching historical options for {symbol}")
+            
+            av_client = AlphaVantageClient()
+            ingestion = DataIngestion()
+            
+            data = av_client.get_historical_options(symbol)
+            
+            if data and 'data' in data:
+                records = ingestion.ingest_historical_options(data, symbol)
+                print(f"  ✓ {symbol}: {records} historical records processed")
+                
+        except Exception as e:
+            print(f"  ✗ Error fetching historical {symbol}: {e}")
+    
+    def _is_market_hours(self):
+            """Check if current time is during market hours"""
+            # Override for testing
+            if self.test_mode:
+                return True
+                
+            now = datetime.now(self.timezone)
+            current_time = now.time()
+            
+            # Parse market hours
+            market_open = datetime.strptime(self.market_hours['market_open'], '%H:%M').time()
+            market_close = datetime.strptime(self.market_hours['market_close'], '%H:%M').time()
+            
+            # Check if weekend
+            if now.weekday() >= 5:  # Saturday = 5, Sunday = 6
+                return False
+            
+            # Check if within market hours
+            return market_open <= current_time <= market_close
+    
+    def get_status(self):
+        """Get scheduler status"""
+        jobs = self.scheduler.get_jobs()
+        
+        status = {
+            'running': self.is_running,
+            'total_jobs': len(jobs),
+            'is_market_hours': self._is_market_hours(),
+            'jobs': []
+        }
+        
+        for job in jobs:
+            status['jobs'].append({
+                'id': job.id,
+                'name': job.name,
+                'next_run': job.next_run_time.strftime('%Y-%m-%d %H:%M:%S') if job.next_run_time else 'Paused'
+            })
+        
+        return status
