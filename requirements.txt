@@ -1,0 +1,18 @@
+# Database
+psycopg2-binary==2.9.10
+sqlalchemy==2.0.23
+
+# Configuration
+python-dotenv==1.0.0
+pyyaml==6.0.1
+
+# API & Data
+requests==2.32.3
+pandas==2.1.4
+numpy==1.26.2
+
+# Testing
+pytest==8.2.0
+
+# Discord (since you'll need it later anyway)
+discord-webhook==1.4.1

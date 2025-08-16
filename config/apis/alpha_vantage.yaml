@@ -1,0 +1,22 @@
+# Alpha Vantage API Configuration - Minimal for Phase 0
+base_url: "https://www.alphavantage.co/query"
+timeout: 30
+retry_count: 3
+
+# Rate limiting configuration
+rate_limit:
+  max_per_minute: 600
+  target_per_minute: 500  # Stay below max
+  refill_rate: 10  # tokens per second
+  burst_capacity: 20
+
+# Just REALTIME_OPTIONS for Phase 1
+endpoints:
+  realtime_options:
+    function: "REALTIME_OPTIONS"
+    datatype: "json"
+    require_greeks: "true"
+
+  historical_options:
+    function: "HISTORICAL_OPTIONS" 
+    datatype: "json"
