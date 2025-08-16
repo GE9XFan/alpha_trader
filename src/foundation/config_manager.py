@@ -21,6 +21,11 @@ class ConfigManager:
                 self.av_config = yaml.safe_load(f) or {}
         else:
             self.av_config = {}
+
+        # Load IBKR settings from environment
+        self.ibkr_host = os.getenv('IBKR_HOST', '127.0.0.1')
+        self.ibkr_port = os.getenv('IBKR_PORT', '7497')
+        self.ibkr_client_id = os.getenv('IBKR_CLIENT_ID', '1')
     
     def get(self, key, default=None):
         """Simple getter for config values"""

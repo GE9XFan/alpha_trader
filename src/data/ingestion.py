@@ -216,6 +216,79 @@ class DataIngestion:
         print(f"✓ Historical ingestion complete: {records_inserted} inserted, {records_updated} updated")
         return records_inserted + records_updated
     
+    def ingest_ibkr_bar(self, symbol, timestamp, open_, high, low, close, volume, vwap, count, bar_size='5sec'):
+        """
+        Ingest IBKR bar data
+        Phase 3.5: Store real-time bar data
+        """
+        table_map = {
+            '5sec': 'ibkr_bars_5sec',
+            '1min': 'ibkr_bars_1min', 
+            '5min': 'ibkr_bars_5min'
+        }
+        
+        table = table_map.get(bar_size, 'ibkr_bars_5sec')
+        
+        try:
+            with self.engine.connect() as conn:
+                query = text(f"""
+                    INSERT INTO {table} 
+                    (symbol, timestamp, open, high, low, close, volume, vwap, bar_count)
+                    VALUES 
+                    (:symbol, :timestamp, :open, :high, :low, :close, :volume, :vwap, :bar_count)
+                    ON CONFLICT (symbol, timestamp) 
+                    DO UPDATE SET
+                        close = :close,
+                        volume = :volume,
+                        vwap = :vwap
+                """)
+                
+                conn.execute(query, {
+                    'symbol': symbol,
+                    'timestamp': datetime.fromtimestamp(timestamp),
+                    'open': Decimal(str(open_)),
+                    'high': Decimal(str(high)),
+                    'low': Decimal(str(low)),
+                    'close': Decimal(str(close)),
+                    'volume': volume,
+                    'vwap': Decimal(str(vwap)) if vwap else None,
+                    'bar_count': count
+                })
+                conn.commit()
+                
+        except Exception as e:
+            print(f"Error storing bar data: {e}")
+    
+    def ingest_ibkr_quote(self, symbol, bid, bid_size, ask, ask_size, last, last_size, volume):
+        """
+        Ingest IBKR quote data
+        Phase 3.5: Store real-time quotes
+        """
+        try:
+            with self.engine.connect() as conn:
+                query = text("""
+                    INSERT INTO ibkr_quotes
+                    (symbol, timestamp, bid, bid_size, ask, ask_size, last, last_size, volume)
+                    VALUES
+                    (:symbol, :timestamp, :bid, :bid_size, :ask, :ask_size, :last, :last_size, :volume)
+                """)
+                
+                conn.execute(query, {
+                    'symbol': symbol,
+                    'timestamp': datetime.now(),
+                    'bid': Decimal(str(bid)) if bid > 0 else None,
+                    'bid_size': bid_size if bid_size > 0 else None,
+                    'ask': Decimal(str(ask)) if ask > 0 else None,
+                    'ask_size': ask_size if ask_size > 0 else None,
+                    'last': Decimal(str(last)) if last > 0 else None,
+                    'last_size': last_size if last_size > 0 else None,
+                    'volume': volume if volume > 0 else None
+                })
+                conn.commit()
+                
+        except Exception as e:
+            print(f"Error storing quote data: {e}")
+
     def _to_decimal(self, value):
         """Convert string to Decimal, handling None"""
         if value is None or value == '':

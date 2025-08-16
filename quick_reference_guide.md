@@ -1,61 +1,126 @@
 # AlphaTrader Quick Reference Guide
+**Phase 3 Complete - IBKR Integration Active**
 
-## 🚀 Daily Development Commands
+---
 
-### Start Development Session
+## 🚀 Daily Startup Routine
+
+### 1. Environment Setup
 ```bash
 cd ~/AlphaTrader
 source venv/bin/activate
 export DATABASE_URL=postgresql://michaelmerrick:password@localhost:5432/trading_system_db
 ```
 
-### Common Operations
+### 2. Service Check
 ```bash
-# Test current setup
-python scripts/test_phase0.py          # Test foundation
-python scripts/test_phase2_complete.py  # Test all Phase 0-2
+# Check PostgreSQL
+pg_ctl status
+# or
+brew services list | grep postgresql
 
-# Fetch fresh data
-python -c "from src.connections.av_client import AlphaVantageClient; client = AlphaVantageClient(); client.get_realtime_options('SPY')"
+# Check TWS is running (if during market hours)
+ps aux | grep tws
 
-# Query data
-python scripts/query_options_data.py
+# Check Redis (Phase 4)
+redis-cli ping  # Should return PONG
+```
+
+### 3. Market Hours Quick Test
+```bash
+# During market hours (9:30 AM - 4:00 PM ET)
+python scripts/test_ibkr_live_data.py
+```
+
+---
+
+## 💻 Common Operations
+
+### Alpha Vantage Operations
+```bash
+# Fetch fresh options data
+python -c "from src.connections.av_client import AlphaVantageClient; client = AlphaVantageClient(); data = client.get_realtime_options('SPY'); print(f'Got {len(data[\"data\"])} contracts')"
 
 # Check rate limit status
 python -c "from src.connections.av_client import AlphaVantageClient; client = AlphaVantageClient(); print(client.get_rate_limit_status())"
+
+# Quick options update for SPY
+python scripts/test_realtime_options.py
 ```
 
-### Database Operations
+### IBKR Operations
+```bash
+# Test TWS connection
+python scripts/test_ibkr_connection.py
+
+# Test market data (bars + quotes)
+python scripts/test_ibkr_market_data.py
+
+# Full live data test (best during market hours)
+python scripts/test_ibkr_live_data.py
+```
+
+### Database Queries
 ```bash
 # Connect to database
 psql -U michaelmerrick -d trading_system_db
 
-# Common queries
-\dt                                    # List all tables
+# Quick counts
 SELECT COUNT(*) FROM av_realtime_options;
-SELECT * FROM av_realtime_options LIMIT 5;
-\d av_realtime_options                # Show table structure
-\q                                     # Exit
+SELECT COUNT(*) FROM ibkr_bars_5sec WHERE timestamp > NOW() - INTERVAL '1 hour';
+SELECT COUNT(*) FROM ibkr_quotes WHERE timestamp > NOW() - INTERVAL '1 hour';
+
+# Latest market data
+SELECT * FROM ibkr_bars_5sec ORDER BY timestamp DESC LIMIT 5;
+SELECT * FROM ibkr_quotes ORDER BY timestamp DESC LIMIT 5;
+
+# Options summary
+SELECT symbol, COUNT(*), MIN(strike), MAX(strike), COUNT(DISTINCT expiration)
+FROM av_realtime_options 
+GROUP BY symbol;
 ```
 
-## 💻 Code Snippets
+---
 
-### Fetch & Store Options Data
+## 🔧 Code Snippets
+
+### Complete Data Fetch & Store
 ```python
+# Alpha Vantage Options
 from src.connections.av_client import AlphaVantageClient
 from src.data.ingestion import DataIngestion
 
-# Get options with Greeks
 client = AlphaVantageClient()
-data = client.get_realtime_options('SPY')
-
-# Store in database
 ingestion = DataIngestion()
+
+# Fetch and store options
+data = client.get_realtime_options('SPY')
 records = ingestion.ingest_options_data(data, 'SPY')
-print(f"Stored {records} contracts")
+print(f"Stored {records} option contracts")
 ```
 
-### Query Near-The-Money Options
+### IBKR Real-Time Stream
+```python
+# IBKR Real-time data
+from src.connections.ibkr_connection import IBKRConnectionManager
+import time
+
+ibkr = IBKRConnectionManager()
+
+# Connect
+if ibkr.connect_tws():
+    # Subscribe to data
+    ibkr.get_quotes('SPY')  # Quotes
+    ibkr.subscribe_bars('SPY', '5 secs')  # Bars
+    
+    # Let it run for 30 seconds
+    time.sleep(30)
+    
+    # Disconnect
+    ibkr.disconnect_tws()
+```
+
+### Query Latest Market Data
 ```python
 from sqlalchemy import create_engine, text
 from src.foundation.config_manager import ConfigManager
@@ -64,236 +129,51 @@ config = ConfigManager()
 engine = create_engine(config.database_url)
 
 with engine.connect() as conn:
+    # Get latest bars
     result = conn.execute(text("""
-        SELECT contract_id, strike, option_type, last_price, delta
+        SELECT timestamp, symbol, open, high, low, close, volume, vwap
+        FROM ibkr_bars_5sec
+        WHERE timestamp > NOW() - INTERVAL '5 minutes'
+        ORDER BY timestamp DESC
+        LIMIT 10
+    """))
+    
+    for row in result:
+        print(f"{row.timestamp}: {row.symbol} C={row.close} V={row.volume}")
+```
+
+### Near-The-Money Options with Greeks
+```python
+with engine.connect() as conn:
+    result = conn.execute(text("""
+        SELECT contract_id, strike, option_type, 
+               last_price, delta, gamma, theta, implied_volatility
         FROM av_realtime_options
         WHERE symbol = 'SPY'
           AND strike BETWEEN 640 AND 650
           AND expiration = (SELECT MIN(expiration) FROM av_realtime_options)
-        ORDER BY strike
+        ORDER BY strike, option_type
     """))
     
     for row in result:
-        print(f"{row.contract_id}: ${row.strike} {row.option_type}, Delta={row.delta}")
+        print(f"{row.strike} {row.option_type}: Δ={row.delta:.3f}, θ={row.theta:.3f}")
 ```
 
-### Check Rate Limiter
+---
+
+## 📊 System Health Checks
+
+### Complete System Check
 ```python
-from src.data.rate_limiter import get_rate_limiter
-
-limiter = get_rate_limiter()
-stats = limiter.get_stats()
-print(f"Calls made: {stats['calls_made']}")
-print(f"Tokens available: {stats['tokens_available']}/20")
-print(f"This minute: {stats['minute_window_calls']}/600")
-```
-
-## 📊 Important SQL Queries
-
-### Data Overview
-```sql
--- Summary statistics
-SELECT 
-    COUNT(*) as total_contracts,
-    COUNT(DISTINCT symbol) as symbols,
-    COUNT(DISTINCT expiration) as expirations,
-    MIN(strike) as min_strike,
-    MAX(strike) as max_strike
-FROM av_realtime_options;
-
--- Contracts by expiration
-SELECT 
-    expiration,
-    COUNT(*) as contracts,
-    SUM(volume) as total_volume
-FROM av_realtime_options
-GROUP BY expiration
-ORDER BY expiration
-LIMIT 10;
-
--- High volume options
-SELECT 
-    contract_id,
-    strike,
-    option_type,
-    volume,
-    last_price,
-    delta
-FROM av_realtime_options
-WHERE volume > 100000
-ORDER BY volume DESC
-LIMIT 10;
-
--- Near-the-money options
-SELECT *
-FROM av_realtime_options
-WHERE symbol = 'SPY'
-  AND strike BETWEEN 640 AND 650
-  AND expiration = '2025-08-15'
-ORDER BY strike, option_type;
-```
-
-## 🔧 Configuration Reference
-
-### Key Files
-```
-config/.env                    # API keys & database URL
-config/apis/alpha_vantage.yaml # API settings & endpoints
-```
-
-### Environment Variables
-```bash
-DATABASE_URL=postgresql://michaelmerrick:password@localhost:5432/trading_system_db
-AV_API_KEY=your_actual_api_key_here
-```
-
-### Alpha Vantage Settings
-```yaml
-# config/apis/alpha_vantage.yaml
-endpoints:
-  realtime_options:
-    function: "REALTIME_OPTIONS"
-    require_greeks: "true"    # CRITICAL - enables Greeks!
-    datatype: "json"
-```
-
-## 🐛 Troubleshooting
-
-### Greeks showing as NULL
-```python
-# Check configuration
-config = ConfigManager()
-print(config.av_config['endpoints']['realtime_options'])
-# Should show: require_greeks: "true"
-```
-
-### Rate limit issues
-```python
-# Check current status
-from src.connections.av_client import AlphaVantageClient
-client = AlphaVantageClient()
-print(client.get_rate_limit_status())
-# Wait if tokens depleted
-```
-
-### Database connection errors
-```bash
-# Test connection
-psql -U michaelmerrick -d trading_system_db -c "SELECT 1;"
-
-# Check PostgreSQL status
-pg_ctl status
-# or
-brew services list | grep postgresql
-```
-
-### Import errors
-```bash
-# Ensure virtual environment active
-which python  # Should show venv path
-
-# Reinstall dependencies
-pip install -r requirements.txt
-```
-
-## 📁 Project Structure Reminder
-
-```
-AlphaTrader/
-├── src/
-│   ├── foundation/config_manager.py    # Config management
-│   ├── connections/av_client.py        # API client
-│   └── data/
-│       ├── ingestion.py               # Data pipeline
-│       └── rate_limiter.py            # Rate limiting
-├── config/
-│   ├── .env                           # Credentials
-│   └── apis/alpha_vantage.yaml        # API config
-├── scripts/                           # Test & utility scripts
-└── data/api_responses/                # Saved responses
-```
-
-## 📈 Current System Capabilities
-
-| Component | Status | Details |
-|-----------|--------|---------|
-| **Config Manager** | ✅ Active | Loads .env and YAML |
-| **AV Client** | ✅ Active | 2 endpoints integrated |
-| **Rate Limiter** | ✅ Active | 600/min protection |
-| **Data Ingestion** | ✅ Active | Insert/update logic |
-| **Database** | ✅ Active | 4 tables, 18K+ records |
-
-## 🎯 Phase 3 Preview (IBKR)
-
-### Required Setup
-```bash
-# Install IB API
-pip install ibapi
-
-# IBKR Settings (.env)
-IBKR_HOST=127.0.0.1
-IBKR_PORT=7497  # Paper: 7497, Live: 7496
-IBKR_CLIENT_ID=1
-```
-
-### Basic Connection (Phase 3.1)
-```python
-# Coming in Phase 3
-from ibapi.client import EClient
-from ibapi.wrapper import EWrapper
-
-class IBKRConnection(EWrapper, EClient):
-    def __init__(self):
-        EClient.__init__(self, self)
-    
-    def connect_tws(self):
-        self.connect("127.0.0.1", 7497, clientId=1)
-```
-
-## 📝 Git Commands
-
-```bash
-# Check status
-git status
-
-# Add all changes
-git add .
-
-# Commit with message
-git commit -m "Phase 2 complete: Rate limiting and dual APIs"
-
-# Create branch for Phase 3
-git checkout -b phase-3-ibkr-integration
-```
-
-## 🔗 Important Links
-
-- [Alpha Vantage Docs](https://www.alphavantage.co/documentation/)
-- [IBKR API Docs](https://interactivebrokers.github.io/tws-api/)
-- [PostgreSQL Docs](https://www.postgresql.org/docs/)
-- [SQLAlchemy Docs](https://docs.sqlalchemy.org/)
-
-## 📊 Performance Benchmarks
-
-| Operation | Target | Current |
-|-----------|--------|---------|
-| API Call | < 2s | ~1.3s ✅ |
-| DB Insert (10K) | < 30s | ~8s ✅ |
-| Query (complex) | < 100ms | ~45ms ✅ |
-| Rate Limit Check | < 10ms | ~1ms ✅ |
-
-## 🚦 System Health Checks
-
-```python
-# Complete health check
-def system_health_check():
+def full_system_check():
     from src.foundation.config_manager import ConfigManager
     from src.connections.av_client import AlphaVantageClient
+    from src.connections.ibkr_connection import IBKRConnectionManager
     from sqlalchemy import create_engine, text
     
     print("=== System Health Check ===\n")
     
-    # 1. Config
+    # 1. Configuration
     try:
         config = ConfigManager()
         print("✅ Configuration loaded")
@@ -305,37 +185,311 @@ def system_health_check():
     try:
         engine = create_engine(config.database_url)
         with engine.connect() as conn:
-            result = conn.execute(text("SELECT COUNT(*) FROM av_realtime_options"))
-            count = result.scalar()
-            print(f"✅ Database connected ({count} records)")
+            # Check all tables
+            result = conn.execute(text("""
+                SELECT COUNT(*) as options, 
+                       (SELECT COUNT(*) FROM ibkr_bars_5sec) as bars,
+                       (SELECT COUNT(*) FROM ibkr_quotes) as quotes
+                FROM av_realtime_options
+            """))
+            counts = result.fetchone()
+            print(f"✅ Database: {counts.options} options, {counts.bars} bars, {counts.quotes} quotes")
     except Exception as e:
         print(f"❌ Database error: {e}")
         return False
     
-    # 3. API Client
+    # 3. Alpha Vantage
     try:
-        client = AlphaVantageClient()
-        stats = client.get_rate_limit_status()
-        print(f"✅ API client ready ({stats['tokens_available']} tokens)")
+        av_client = AlphaVantageClient()
+        stats = av_client.get_rate_limit_status()
+        print(f"✅ Alpha Vantage: {stats['tokens_available']:.0f}/20 tokens available")
     except Exception as e:
-        print(f"❌ API client error: {e}")
-        return False
+        print(f"❌ AV client error: {e}")
     
-    print("\n✅ All systems operational!")
+    # 4. IBKR
+    try:
+        ibkr = IBKRConnectionManager()
+        if ibkr.connect_tws():
+            print("✅ IBKR TWS connected")
+            ibkr.disconnect_tws()
+        else:
+            print("⚠️  IBKR not connected (TWS may be down)")
+    except Exception as e:
+        print(f"⚠️  IBKR error: {e}")
+    
+    print("\n✅ System check complete!")
     return True
 
-# Run health check
-system_health_check()
+# Run it
+full_system_check()
 ```
 
 ---
 
-**Quick Help**
-- Virtual env not active? → `source venv/bin/activate`
-- Database not connecting? → Check PostgreSQL: `brew services list`
-- Greeks missing? → Check `require_greeks: "true"` in config
-- Rate limited? → Wait for tokens: 10 per second refill
+## 🛠️ Configuration Files
 
-**Current Phase:** 2 Complete ✅  
-**Next Phase:** 3 - IBKR Integration  
-**Timeline:** Day 10 of 106 (On Schedule)
+### Key Locations
+```
+config/.env                       # API keys & credentials
+config/apis/alpha_vantage.yaml   # AV settings & rate limits
+```
+
+### Critical Settings
+```yaml
+# Alpha Vantage (config/apis/alpha_vantage.yaml)
+endpoints:
+  realtime_options:
+    require_greeks: "true"    # MUST be true for Greeks!
+
+rate_limit:
+  max_per_minute: 600
+  target_per_minute: 500
+```
+
+### Environment Variables
+```bash
+# .env file
+DATABASE_URL=postgresql://user:pass@localhost:5432/trading_system_db
+AV_API_KEY=your_alpha_vantage_key
+IBKR_HOST=127.0.0.1
+IBKR_PORT=7497    # 7497=paper, 7496=live
+IBKR_CLIENT_ID=1
+```
+
+---
+
+## 🐛 Troubleshooting
+
+### IBKR Issues
+
+#### TWS Not Connecting
+```bash
+# 1. Check TWS is running
+ps aux | grep tws
+
+# 2. Verify API settings in TWS:
+#    File → Global Configuration → API → Settings
+#    - Enable ActiveX and Socket Clients ✓
+#    - Allow connections from localhost only ✓
+#    - Socket port: 7497 (paper) or 7496 (live)
+
+# 3. Test connection
+python scripts/test_ibkr_connection.py
+
+# 4. If still failing, restart TWS
+```
+
+#### No Market Data from IBKR
+```bash
+# Check if market is open
+python -c "
+from datetime import datetime
+now = datetime.now()
+if now.weekday() >= 5:
+    print('Weekend - market closed')
+elif 9 <= now.hour < 16:
+    if now.hour == 9 and now.minute < 30:
+        print('Pre-market')
+    else:
+        print('Market OPEN')
+else:
+    print('After hours')
+"
+
+# Check data subscriptions
+python scripts/test_ibkr_market_data.py
+```
+
+### Database Issues
+
+#### Connection Problems
+```bash
+# Check PostgreSQL running
+brew services list | grep postgresql
+
+# Start if needed
+brew services start postgresql@14
+
+# Test connection
+psql -U michaelmerrick -d trading_system_db -c "SELECT 1;"
+```
+
+#### Check Data Freshness
+```sql
+-- Most recent options update
+SELECT MAX(updated_at) FROM av_realtime_options;
+
+-- Recent IBKR data
+SELECT COUNT(*), MAX(timestamp) 
+FROM ibkr_bars_5sec 
+WHERE timestamp > NOW() - INTERVAL '1 hour';
+
+-- Data by symbol
+SELECT symbol, COUNT(*), MAX(timestamp) as latest
+FROM ibkr_bars_5sec
+GROUP BY symbol
+ORDER BY latest DESC;
+```
+
+### Alpha Vantage Issues
+
+#### Greeks Missing
+```python
+# Check config has require_greeks
+from src.foundation.config_manager import ConfigManager
+config = ConfigManager()
+print(config.av_config['endpoints']['realtime_options'])
+# Should show: {'function': 'REALTIME_OPTIONS', 'require_greeks': 'true', ...}
+```
+
+#### Rate Limit Hit
+```python
+# Check current status
+from src.connections.av_client import AlphaVantageClient
+client = AlphaVantageClient()
+stats = client.get_rate_limit_status()
+print(f"Tokens: {stats['tokens_available']}/20")
+print(f"This minute: {stats['minute_window_calls']}/600")
+# Wait if depleted (refills at 10 tokens/second)
+```
+
+---
+
+## 📁 Project Structure Reference
+
+```
+AlphaTrader/
+├── src/
+│   ├── foundation/
+│   │   └── config_manager.py      # Loads .env and YAML
+│   ├── connections/
+│   │   ├── av_client.py           # Alpha Vantage client
+│   │   └── ibkr_connection.py     # IBKR TWS connection
+│   └── data/
+│       ├── ingestion.py           # Unified data storage
+│       └── rate_limiter.py        # Token bucket (600/min)
+├── config/
+│   ├── .env                       # Your credentials
+│   └── apis/
+│       └── alpha_vantage.yaml     # API configuration
+├── scripts/
+│   ├── test_ibkr_*.py            # IBKR test scripts
+│   └── test_phase*.py            # Phase validation
+└── data/
+    └── api_responses/             # Saved JSON responses
+```
+
+---
+
+## 📈 Performance Benchmarks
+
+| Operation | Target | Current | Status |
+|-----------|--------|---------|--------|
+| AV API Call | < 2s | ~1.3s | ✅ |
+| IBKR Connect | < 5s | ~2s | ✅ |
+| DB Insert (10K) | < 30s | ~8s | ✅ |
+| Query Complex | < 100ms | ~45ms | ✅ |
+| Rate Limit Check | < 10ms | ~1ms | ✅ |
+| Bar Latency | < 500ms | ~100ms | ✅ |
+
+---
+
+## 🎯 Current Capabilities
+
+| Feature | Status | Details |
+|---------|--------|---------|
+| **Alpha Vantage Options** | ✅ Active | 18,588 contracts with Greeks |
+| **IBKR Real-time Bars** | ✅ Ready | 5-second bars (needs market open) |
+| **IBKR Quotes** | ✅ Ready | Bid/ask/last streaming |
+| **Rate Limiting** | ✅ Active | 600/min protection |
+| **Data Ingestion** | ✅ Active | Unified storage layer |
+| **Database** | ✅ Active | 8 tables, optimized |
+
+---
+
+## 🔗 Quick Links
+
+### Documentation
+- [README.md](README.md) - Project overview
+- [SSOT-Ops.md](docs/SSOT-Ops.md) - Operational specs
+- [SSOT-Tech.md](docs/SSOT-Tech.md) - Technical details
+- [Phased Plan](docs/granular-phased-plan.md) - Complete roadmap
+
+### Key Scripts
+```bash
+# Phase validation
+scripts/test_phase0.py          # Foundation check
+scripts/test_phase2_complete.py # AV integration
+scripts/test_ibkr_connection.py # IBKR connection
+
+# Live testing
+scripts/test_ibkr_live_data.py  # Full market test
+scripts/query_options_data.py   # Data analysis
+```
+
+---
+
+## 📅 Phase Status
+
+| Phase | Days | Status | Next Step |
+|-------|------|--------|-----------|
+| 0: Foundation | 1-3 | ✅ Complete | - |
+| 1: First API | 4-7 | ✅ Complete | - |
+| 2: Rate Limiting | 8-10 | ✅ Complete | - |
+| 3: IBKR | 11-14 | ✅ Complete | - |
+| **4: Scheduler** | **15-17** | **📋 Next** | **Install Redis** |
+| 5: Indicators | 18-24 | 🔜 Coming | RSI, MACD, etc. |
+| 7: First Strategy | 29-35 | 🎯 Critical | 0DTE strategy |
+| 9: Paper Trading | 40-43 | 🚀 Milestone | First trades! |
+
+---
+
+## 🚀 Monday Checklist
+
+```bash
+# 1. Start services
+brew services start postgresql@14
+brew services start redis  # After installing
+
+# 2. Activate environment
+cd ~/AlphaTrader
+source venv/bin/activate
+
+# 3. Check TWS
+# Open TWS, verify API enabled
+
+# 4. Test live data (after 9:30 AM ET)
+python scripts/test_ibkr_live_data.py
+
+# 5. Verify data flowing
+psql -U michaelmerrick -d trading_system_db -c "
+SELECT COUNT(*), MAX(timestamp) 
+FROM ibkr_bars_5sec 
+WHERE timestamp > NOW() - INTERVAL '1 hour';"
+
+# 6. Begin Phase 4
+# Implement DataScheduler class
+```
+
+---
+
+## 💡 Pro Tips
+
+1. **Market Hours Testing** - Best results 10 AM - 3 PM ET
+2. **Rate Limiting** - Stay under 500/min for safety
+3. **Database Cleanup** - Archive old bars weekly
+4. **TWS Settings** - Save workspace after config
+5. **Error Logs** - Check TWS logs at `~/Jts/`
+
+---
+
+**Quick Help**
+- Virtual env issues? → `deactivate` then `source venv/bin/activate`
+- TWS won't connect? → Restart TWS, check port 7497
+- Database full? → `psql -c "VACUUM ANALYZE;"`
+- Greeks missing? → Verify `require_greeks: "true"`
+
+**Current Status:** Phase 3 Complete ✅  
+**Next Phase:** 4 - Scheduler & Cache  
+**Progress:** Day 14 of 106 (13.2%)  
+**First Trade:** Day 40 (26 days away)
