@@ -465,5 +465,3 @@ newsletter_content:
 3. **Community Focus** - Build together, learn together
 4. **Consistent Quality** - Never compromise on value
 5. **Continuous Improvement** - Always refining and expanding
-
-This educational platform transforms your trading system from just a profit generator into a comprehensive learning ecosystem that provides value to the community while building your reputation as an educator and trader.
