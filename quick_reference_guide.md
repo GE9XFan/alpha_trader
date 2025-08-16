@@ -1,5 +1,6 @@
 # AlphaTrader Quick Reference Guide
-**Phase 3 Complete - IBKR Integration Active**
+**Phase 4.1 Complete - Cache Layer Operational**  
+**Day 15 of 106** | **August 16, 2025**
 
 ---
 
@@ -10,6 +11,7 @@
 cd ~/AlphaTrader
 source venv/bin/activate
 export DATABASE_URL=postgresql://michaelmerrick:password@localhost:5432/trading_system_db
+export REDIS_URL=redis://localhost:6379/0
 ```
 
 ### 2. Service Check
@@ -19,33 +21,73 @@ pg_ctl status
 # or
 brew services list | grep postgresql
 
-# Check TWS is running (if during market hours)
-ps aux | grep tws
-
-# Check Redis (Phase 4)
+# Check Redis (NEW)
 redis-cli ping  # Should return PONG
+redis-cli INFO memory | head -5
+
+# Check TWS (if during market hours)
+ps aux | grep tws
 ```
 
-### 3. Market Hours Quick Test
+### 3. Quick System Health Check
 ```bash
-# During market hours (9:30 AM - 4:00 PM ET)
-python scripts/test_ibkr_live_data.py
+# Full system check with cache
+python -c "
+from src.data.cache_manager import get_cache
+from src.connections.av_client import AlphaVantageClient
+cache = get_cache()
+client = AlphaVantageClient()
+print('Cache Stats:', cache.get_stats())
+print('Rate Limit:', client.get_rate_limit_status())
+"
 ```
 
 ---
 
 ## 💻 Common Operations
 
-### Alpha Vantage Operations
+### Redis Cache Operations (NEW)
 ```bash
-# Fetch fresh options data
-python -c "from src.connections.av_client import AlphaVantageClient; client = AlphaVantageClient(); data = client.get_realtime_options('SPY'); print(f'Got {len(data[\"data\"])} contracts')"
+# Check cache status
+redis-cli INFO stats | grep instantaneous_ops
 
-# Check rate limit status
-python -c "from src.connections.av_client import AlphaVantageClient; client = AlphaVantageClient(); print(client.get_rate_limit_status())"
+# Monitor cache activity in real-time
+redis-cli MONITOR  # Ctrl+C to stop
 
-# Quick options update for SPY
-python scripts/test_realtime_options.py
+# View all Alpha Vantage cache keys
+redis-cli KEYS "av:*"
+
+# Check specific key TTL
+redis-cli TTL "av:realtime_options:SPY"
+
+# Clear all cache
+redis-cli FLUSHDB
+
+# Get cache memory usage
+redis-cli INFO memory | grep used_memory_human
+```
+
+### Alpha Vantage with Cache (UPDATED)
+```bash
+# Fetch with caching (30.6x faster on second call!)
+python -c "
+from src.connections.av_client import AlphaVantageClient
+import time
+client = AlphaVantageClient()
+
+# First call - hits API
+start = time.time()
+data = client.get_realtime_options('SPY')
+print(f'API call: {time.time()-start:.2f}s')
+
+# Second call - hits cache
+start = time.time()
+data = client.get_realtime_options('SPY')
+print(f'Cache call: {time.time()-start:.2f}s')
+
+# Show cache stats
+print('Cache:', client.get_cache_status())
+"
 ```
 
 ### IBKR Operations
@@ -60,115 +102,137 @@ python scripts/test_ibkr_market_data.py
 python scripts/test_ibkr_live_data.py
 ```
 
-### Database Queries
+### Database Queries with Cache Impact
 ```bash
 # Connect to database
 psql -U michaelmerrick -d trading_system_db
 
-# Quick counts
-SELECT COUNT(*) FROM av_realtime_options;
-SELECT COUNT(*) FROM ibkr_bars_5sec WHERE timestamp > NOW() - INTERVAL '1 hour';
-SELECT COUNT(*) FROM ibkr_quotes WHERE timestamp > NOW() - INTERVAL '1 hour';
+# Quick data summary
+SELECT 
+    'Options' as type, COUNT(*) as records, MAX(updated_at) as latest
+FROM av_realtime_options
+UNION ALL
+SELECT 
+    'Historical', COUNT(*), MAX(created_at)
+FROM av_historical_options
+UNION ALL
+SELECT 
+    'IBKR Bars', COUNT(*), MAX(timestamp)
+FROM ibkr_bars_5sec
+WHERE timestamp > NOW() - INTERVAL '1 hour';
 
-# Latest market data
-SELECT * FROM ibkr_bars_5sec ORDER BY timestamp DESC LIMIT 5;
-SELECT * FROM ibkr_quotes ORDER BY timestamp DESC LIMIT 5;
-
-# Options summary
-SELECT symbol, COUNT(*), MIN(strike), MAX(strike), COUNT(DISTINCT expiration)
-FROM av_realtime_options 
-GROUP BY symbol;
+# High volume options today
+SELECT contract_id, strike, option_type, volume, delta, implied_volatility
+FROM av_realtime_options
+WHERE symbol = 'SPY' AND volume > 100000
+ORDER BY volume DESC LIMIT 5;
 ```
 
 ---
 
 ## 🔧 Code Snippets
 
-### Complete Data Fetch & Store
+### Complete Data Fetch with Cache (NEW)
 ```python
-# Alpha Vantage Options
 from src.connections.av_client import AlphaVantageClient
 from src.data.ingestion import DataIngestion
+from src.data.cache_manager import get_cache
 
 client = AlphaVantageClient()
 ingestion = DataIngestion()
+cache = get_cache()
 
-# Fetch and store options
-data = client.get_realtime_options('SPY')
-records = ingestion.ingest_options_data(data, 'SPY')
-print(f"Stored {records} option contracts")
+# This flow now includes automatic caching!
+# 1. Check cache first
+# 2. Hit API only if cache miss
+# 3. Store in DB
+# 4. Update cache
+
+data = client.get_realtime_options('SPY')  # Fast if cached!
+records = ingestion.ingest_options_data(data, 'SPY')  # Also updates cache
+print(f"Processed {records} records")
+print(f"Cache stats: {cache.get_stats()}")
 ```
 
-### IBKR Real-Time Stream
+### Cache Management Utilities (NEW)
 ```python
-# IBKR Real-time data
-from src.connections.ibkr_connection import IBKRConnectionManager
+from src.data.cache_manager import get_cache
+
+cache = get_cache()
+
+# Check what's cached
+def show_cache_contents():
+    stats = cache.get_stats()
+    print(f"Total keys: {stats['keys']}")
+    print(f"Memory: {stats['used_memory']}")
+    
+    # Check specific symbols
+    for symbol in ['SPY', 'QQQ', 'IWM']:
+        key = f"av:realtime_options:{symbol}"
+        if cache.exists(key):
+            ttl = cache.get_ttl(key)
+            print(f"{symbol}: Cached (TTL: {ttl}s)")
+        else:
+            print(f"{symbol}: Not cached")
+
+# Clear stale data
+def clear_options_cache():
+    deleted = cache.flush_pattern("av:realtime_options:*")
+    print(f"Cleared {deleted} options cache entries")
+
+show_cache_contents()
+```
+
+### Performance Comparison (NEW)
+```python
 import time
+from src.connections.av_client import AlphaVantageClient
 
-ibkr = IBKRConnectionManager()
-
-# Connect
-if ibkr.connect_tws():
-    # Subscribe to data
-    ibkr.get_quotes('SPY')  # Quotes
-    ibkr.subscribe_bars('SPY', '5 secs')  # Bars
+def benchmark_cache():
+    client = AlphaVantageClient()
+    results = {}
     
-    # Let it run for 30 seconds
-    time.sleep(30)
+    # Test each symbol twice
+    for symbol in ['SPY', 'QQQ', 'IWM']:
+        # First call (API)
+        start = time.time()
+        data1 = client.get_realtime_options(symbol)
+        api_time = time.time() - start
+        
+        # Second call (Cache)
+        start = time.time()
+        data2 = client.get_realtime_options(symbol)
+        cache_time = time.time() - start
+        
+        results[symbol] = {
+            'api_time': api_time,
+            'cache_time': cache_time,
+            'speedup': api_time / cache_time,
+            'contracts': len(data1.get('data', []))
+        }
     
-    # Disconnect
-    ibkr.disconnect_tws()
-```
+    # Display results
+    for symbol, metrics in results.items():
+        print(f"\n{symbol}:")
+        print(f"  API: {metrics['api_time']:.3f}s")
+        print(f"  Cache: {metrics['cache_time']:.3f}s")
+        print(f"  Speedup: {metrics['speedup']:.1f}x")
+        print(f"  Contracts: {metrics['contracts']}")
 
-### Query Latest Market Data
-```python
-from sqlalchemy import create_engine, text
-from src.foundation.config_manager import ConfigManager
-
-config = ConfigManager()
-engine = create_engine(config.database_url)
-
-with engine.connect() as conn:
-    # Get latest bars
-    result = conn.execute(text("""
-        SELECT timestamp, symbol, open, high, low, close, volume, vwap
-        FROM ibkr_bars_5sec
-        WHERE timestamp > NOW() - INTERVAL '5 minutes'
-        ORDER BY timestamp DESC
-        LIMIT 10
-    """))
-    
-    for row in result:
-        print(f"{row.timestamp}: {row.symbol} C={row.close} V={row.volume}")
-```
-
-### Near-The-Money Options with Greeks
-```python
-with engine.connect() as conn:
-    result = conn.execute(text("""
-        SELECT contract_id, strike, option_type, 
-               last_price, delta, gamma, theta, implied_volatility
-        FROM av_realtime_options
-        WHERE symbol = 'SPY'
-          AND strike BETWEEN 640 AND 650
-          AND expiration = (SELECT MIN(expiration) FROM av_realtime_options)
-        ORDER BY strike, option_type
-    """))
-    
-    for row in result:
-        print(f"{row.strike} {row.option_type}: Δ={row.delta:.3f}, θ={row.theta:.3f}")
+benchmark_cache()
 ```
 
 ---
 
 ## 📊 System Health Checks
 
-### Complete System Check
+### Complete System Check with Cache (UPDATED)
 ```python
 def full_system_check():
     from src.foundation.config_manager import ConfigManager
     from src.connections.av_client import AlphaVantageClient
     from src.connections.ibkr_connection import IBKRConnectionManager
+    from src.data.cache_manager import get_cache
     from sqlalchemy import create_engine, text
     
     print("=== System Health Check ===\n")
@@ -181,11 +245,18 @@ def full_system_check():
         print(f"❌ Config error: {e}")
         return False
     
-    # 2. Database
+    # 2. Redis Cache (NEW)
+    try:
+        cache = get_cache()
+        stats = cache.get_stats()
+        print(f"✅ Redis Cache: {stats['keys']} keys, {stats['used_memory']}")
+    except Exception as e:
+        print(f"❌ Cache error: {e}")
+    
+    # 3. Database
     try:
         engine = create_engine(config.database_url)
         with engine.connect() as conn:
-            # Check all tables
             result = conn.execute(text("""
                 SELECT COUNT(*) as options, 
                        (SELECT COUNT(*) FROM ibkr_bars_5sec) as bars,
@@ -198,15 +269,17 @@ def full_system_check():
         print(f"❌ Database error: {e}")
         return False
     
-    # 3. Alpha Vantage
+    # 4. Alpha Vantage with Cache
     try:
         av_client = AlphaVantageClient()
-        stats = av_client.get_rate_limit_status()
-        print(f"✅ Alpha Vantage: {stats['tokens_available']:.0f}/20 tokens available")
+        rate_stats = av_client.get_rate_limit_status()
+        cache_stats = av_client.get_cache_status()
+        print(f"✅ Alpha Vantage: {rate_stats['tokens_available']:.0f}/20 tokens")
+        print(f"✅ AV Cache: {cache_stats['av_keys']} cached endpoints")
     except Exception as e:
         print(f"❌ AV client error: {e}")
     
-    # 4. IBKR
+    # 5. IBKR
     try:
         ibkr = IBKRConnectionManager()
         if ibkr.connect_tws():
@@ -228,29 +301,37 @@ full_system_check()
 
 ## 🛠️ Configuration Files
 
-### Key Locations
+### Key Locations (UPDATED)
 ```
-config/.env                       # API keys & credentials
+config/.env                       # API keys & credentials + REDIS_URL
 config/apis/alpha_vantage.yaml   # AV settings & rate limits
+config/system/redis.yaml         # Cache TTL settings (NEW)
 ```
 
-### Critical Settings
+### Redis Configuration (NEW)
 ```yaml
-# Alpha Vantage (config/apis/alpha_vantage.yaml)
-endpoints:
-  realtime_options:
-    require_greeks: "true"    # MUST be true for Greeks!
+# config/system/redis.yaml
+connection:
+  host: localhost
+  port: 6379
+  db: 0
+  decode_responses: true
 
-rate_limit:
-  max_per_minute: 600
-  target_per_minute: 500
+cache_ttl:
+  realtime_options: 30      # 30 seconds for Greeks
+  historical_options: 86400  # 24 hours
+  api_responses: 300        # 5 minutes general
+  
+pool:
+  max_connections: 10
 ```
 
-### Environment Variables
+### Environment Variables (UPDATED)
 ```bash
 # .env file
 DATABASE_URL=postgresql://user:pass@localhost:5432/trading_system_db
 AV_API_KEY=your_alpha_vantage_key
+REDIS_URL=redis://localhost:6379/0  # NEW
 IBKR_HOST=127.0.0.1
 IBKR_PORT=7497    # 7497=paper, 7496=live
 IBKR_CLIENT_ID=1
@@ -260,171 +341,153 @@ IBKR_CLIENT_ID=1
 
 ## 🐛 Troubleshooting
 
-### IBKR Issues
+### Redis/Cache Issues (NEW)
 
-#### TWS Not Connecting
+#### Redis Not Running
 ```bash
-# 1. Check TWS is running
-ps aux | grep tws
+# Check if Redis is running
+redis-cli ping
+# If "Could not connect", start it:
+brew services start redis
 
-# 2. Verify API settings in TWS:
-#    File → Global Configuration → API → Settings
-#    - Enable ActiveX and Socket Clients ✓
-#    - Allow connections from localhost only ✓
-#    - Socket port: 7497 (paper) or 7496 (live)
-
-# 3. Test connection
-python scripts/test_ibkr_connection.py
-
-# 4. If still failing, restart TWS
+# Check Redis logs
+brew services info redis
 ```
 
-#### No Market Data from IBKR
-```bash
-# Check if market is open
-python -c "
-from datetime import datetime
-now = datetime.now()
-if now.weekday() >= 5:
-    print('Weekend - market closed')
-elif 9 <= now.hour < 16:
-    if now.hour == 9 and now.minute < 30:
-        print('Pre-market')
-    else:
-        print('Market OPEN')
-else:
-    print('After hours')
-"
+#### Cache Not Working
+```python
+# Debug cache operations
+from src.data.cache_manager import get_cache
 
-# Check data subscriptions
-python scripts/test_ibkr_market_data.py
+cache = get_cache()
+
+# Test basic operations
+cache.set("test", "value", ttl=5)
+print(cache.get("test"))  # Should print "value"
+time.sleep(6)
+print(cache.get("test"))  # Should print None (expired)
+
+# Check Redis connection
+print(cache.redis_client.ping())  # Should be True
+```
+
+#### Cache Hit Rate Low
+```python
+# Analyze cache performance
+from src.connections.av_client import AlphaVantageClient
+
+client = AlphaVantageClient()
+
+# Force cache refresh
+cache = client.cache
+cache.flush_pattern("av:*")
+
+# Make calls and check timing
+import time
+times = []
+for i in range(3):
+    start = time.time()
+    client.get_realtime_options('SPY')
+    times.append(time.time() - start)
+    
+print(f"Call times: {times}")
+print(f"First call (API): {times[0]:.3f}s")
+print(f"Cached calls: {[f'{t:.3f}s' for t in times[1:]]}")
 ```
 
 ### Database Issues
-
-#### Connection Problems
 ```bash
-# Check PostgreSQL running
-brew services list | grep postgresql
-
-# Start if needed
-brew services start postgresql@14
-
-# Test connection
-psql -U michaelmerrick -d trading_system_db -c "SELECT 1;"
+# Check data freshness with cache impact
+psql -U michaelmerrick -d trading_system_db -c "
+SELECT 
+    source,
+    COUNT(*) as records,
+    MAX(updated_at) as last_update,
+    NOW() - MAX(updated_at) as age
+FROM (
+    SELECT 'realtime' as source, updated_at FROM av_realtime_options
+    UNION ALL
+    SELECT 'historical', created_at FROM av_historical_options
+) t
+GROUP BY source;"
 ```
 
-#### Check Data Freshness
-```sql
--- Most recent options update
-SELECT MAX(updated_at) FROM av_realtime_options;
+---
 
--- Recent IBKR data
-SELECT COUNT(*), MAX(timestamp) 
-FROM ibkr_bars_5sec 
-WHERE timestamp > NOW() - INTERVAL '1 hour';
+## 📁 Test Scripts Reference
 
--- Data by symbol
-SELECT symbol, COUNT(*), MAX(timestamp) as latest
-FROM ibkr_bars_5sec
-GROUP BY symbol
-ORDER BY latest DESC;
+### Phase 4.1 Tests (NEW)
+```bash
+# Cache-specific tests
+python scripts/test_cache_manager.py       # Basic cache operations
+python scripts/test_cached_av_client.py    # API client with caching
+python scripts/test_cache_integration.py   # Full pipeline test
+
+# Run all Phase 4.1 tests
+for test in test_cache_manager test_cached_av_client test_cache_integration; do
+    echo "Running $test..."
+    python scripts/$test.py
+    echo "---"
+done
 ```
 
-### Alpha Vantage Issues
-
-#### Greeks Missing
-```python
-# Check config has require_greeks
-from src.foundation.config_manager import ConfigManager
-config = ConfigManager()
-print(config.av_config['endpoints']['realtime_options'])
-# Should show: {'function': 'REALTIME_OPTIONS', 'require_greeks': 'true', ...}
+### Complete Test Suite
+```bash
+# All phases in order
+python scripts/test_phase0.py              # Foundation
+python scripts/test_phase2_complete.py     # Alpha Vantage
+python scripts/test_ibkr_connection.py     # IBKR setup
+python scripts/test_cache_integration.py   # Cache layer
 ```
 
-#### Rate Limit Hit
-```python
-# Check current status
+---
+
+## 📈 Performance Quick Stats
+
+### Cache Performance (NEW)
+| Metric | Value | Impact |
+|--------|-------|--------|
+| Speed Improvement | 30.6x | 1.01s → 0.03s |
+| API Calls Saved | 50% | With 2 symbols |
+| Cache Hit Rate | 66.7% | Excellent |
+| Memory Usage | 8.48MB | Very efficient |
+| TTL (Options) | 30s | Perfect for Greeks |
+| TTL (Historical) | 24h | Daily refresh |
+
+### System Performance
+| Operation | Before Cache | With Cache | Status |
+|-----------|--------------|------------|--------|
+| SPY Options Fetch | 1.01s | 0.03s | ✅ 30x faster |
+| Database Query | 45ms | 45ms | ✅ No change |
+| Rate Limit Check | 1ms | 1ms | ✅ Fast |
+| Memory Total | 200MB | 208MB | ✅ +8MB only |
+
+---
+
+## 🔗 Quick Commands
+
+### Data Collection with Cache
+```bash
+# Quick options update (now cached!)
+python -c "
 from src.connections.av_client import AlphaVantageClient
-client = AlphaVantageClient()
-stats = client.get_rate_limit_status()
-print(f"Tokens: {stats['tokens_available']}/20")
-print(f"This minute: {stats['minute_window_calls']}/600")
-# Wait if depleted (refills at 10 tokens/second)
+from src.data.ingestion import DataIngestion
+c = AlphaVantageClient()
+i = DataIngestion()
+for symbol in ['SPY', 'QQQ']:
+    data = c.get_realtime_options(symbol)
+    records = i.ingest_options_data(data, symbol)
+    print(f'{symbol}: {records} records')
+"
 ```
 
----
-
-## 📁 Project Structure Reference
-
-```
-AlphaTrader/
-├── src/
-│   ├── foundation/
-│   │   └── config_manager.py      # Loads .env and YAML
-│   ├── connections/
-│   │   ├── av_client.py           # Alpha Vantage client
-│   │   └── ibkr_connection.py     # IBKR TWS connection
-│   └── data/
-│       ├── ingestion.py           # Unified data storage
-│       └── rate_limiter.py        # Token bucket (600/min)
-├── config/
-│   ├── .env                       # Your credentials
-│   └── apis/
-│       └── alpha_vantage.yaml     # API configuration
-├── scripts/
-│   ├── test_ibkr_*.py            # IBKR test scripts
-│   └── test_phase*.py            # Phase validation
-└── data/
-    └── api_responses/             # Saved JSON responses
-```
-
----
-
-## 📈 Performance Benchmarks
-
-| Operation | Target | Current | Status |
-|-----------|--------|---------|--------|
-| AV API Call | < 2s | ~1.3s | ✅ |
-| IBKR Connect | < 5s | ~2s | ✅ |
-| DB Insert (10K) | < 30s | ~8s | ✅ |
-| Query Complex | < 100ms | ~45ms | ✅ |
-| Rate Limit Check | < 10ms | ~1ms | ✅ |
-| Bar Latency | < 500ms | ~100ms | ✅ |
-
----
-
-## 🎯 Current Capabilities
-
-| Feature | Status | Details |
-|---------|--------|---------|
-| **Alpha Vantage Options** | ✅ Active | 18,588 contracts with Greeks |
-| **IBKR Real-time Bars** | ✅ Ready | 5-second bars (needs market open) |
-| **IBKR Quotes** | ✅ Ready | Bid/ask/last streaming |
-| **Rate Limiting** | ✅ Active | 600/min protection |
-| **Data Ingestion** | ✅ Active | Unified storage layer |
-| **Database** | ✅ Active | 8 tables, optimized |
-
----
-
-## 🔗 Quick Links
-
-### Documentation
-- [README.md](README.md) - Project overview
-- [SSOT-Ops.md](docs/SSOT-Ops.md) - Operational specs
-- [SSOT-Tech.md](docs/SSOT-Tech.md) - Technical details
-- [Phased Plan](docs/granular-phased-plan.md) - Complete roadmap
-
-### Key Scripts
+### Cache Monitoring
 ```bash
-# Phase validation
-scripts/test_phase0.py          # Foundation check
-scripts/test_phase2_complete.py # AV integration
-scripts/test_ibkr_connection.py # IBKR connection
+# Watch cache in real-time
+redis-cli MONITOR | grep "av:"
 
-# Live testing
-scripts/test_ibkr_live_data.py  # Full market test
-scripts/query_options_data.py   # Data analysis
+# Cache statistics dashboard
+watch -n 1 'redis-cli INFO stats | grep -E "keyspace|ops|memory"'
 ```
 
 ---
@@ -437,59 +500,67 @@ scripts/query_options_data.py   # Data analysis
 | 1: First API | 4-7 | ✅ Complete | - |
 | 2: Rate Limiting | 8-10 | ✅ Complete | - |
 | 3: IBKR | 11-14 | ✅ Complete | - |
-| **4: Scheduler** | **15-17** | **📋 Next** | **Install Redis** |
-| 5: Indicators | 18-24 | 🔜 Coming | RSI, MACD, etc. |
+| **4.1: Cache** | **15** | ✅ **Complete** | - |
+| **4.2: Scheduler** | **16** | 📋 **Tomorrow** | **DataScheduler class** |
+| 4.3: Integration | 17 | 🔜 Sunday | 24-hour test |
+| 5: Indicators | 18-24 | 🎯 Next Week | RSI, MACD, etc. |
 | 7: First Strategy | 29-35 | 🎯 Critical | 0DTE strategy |
 | 9: Paper Trading | 40-43 | 🚀 Milestone | First trades! |
 
 ---
 
-## 🚀 Monday Checklist
+## 🚀 Tomorrow's Checklist (Day 16)
 
 ```bash
-# 1. Start services
-brew services start postgresql@14
-brew services start redis  # After installing
-
-# 2. Activate environment
+# Morning Setup
 cd ~/AlphaTrader
 source venv/bin/activate
 
-# 3. Check TWS
-# Open TWS, verify API enabled
+# Verify services
+redis-cli ping
+pg_ctl status
 
-# 4. Test live data (after 9:30 AM ET)
-python scripts/test_ibkr_live_data.py
+# Start Day 16 - Scheduler
+# 1. Create src/data/scheduler.py
+# 2. Create config/data/schedules.yaml
+# 3. Implement DataScheduler class
+# 4. Test with live data
+# 5. Verify cache integration
 
-# 5. Verify data flowing
-psql -U michaelmerrick -d trading_system_db -c "
-SELECT COUNT(*), MAX(timestamp) 
-FROM ibkr_bars_5sec 
-WHERE timestamp > NOW() - INTERVAL '1 hour';"
-
-# 6. Begin Phase 4
-# Implement DataScheduler class
+# Key Goals:
+# - Automated API calls every 30 seconds
+# - Market hours awareness
+# - Zero manual intervention
 ```
 
 ---
 
 ## 💡 Pro Tips
 
-1. **Market Hours Testing** - Best results 10 AM - 3 PM ET
+### Cache-Specific Tips (NEW)
+1. **Monitor TTL** - Use `redis-cli TTL key` to check expiration
+2. **Cache Warming** - Not needed with 30s TTL
+3. **Memory Limit** - Set max memory in Redis config if needed
+4. **Key Patterns** - Use `av:type:symbol:date` consistently
+5. **Debug Mode** - Use `redis-cli MONITOR` to see all operations
+
+### General Tips
+1. **Market Hours Testing** - Best 10 AM - 3 PM ET
 2. **Rate Limiting** - Stay under 500/min for safety
-3. **Database Cleanup** - Archive old bars weekly
-4. **TWS Settings** - Save workspace after config
+3. **Cache Before API** - Always check cache first
+4. **Database Cleanup** - Archive old bars weekly
 5. **Error Logs** - Check TWS logs at `~/Jts/`
 
 ---
 
 **Quick Help**
-- Virtual env issues? → `deactivate` then `source venv/bin/activate`
-- TWS won't connect? → Restart TWS, check port 7497
-- Database full? → `psql -c "VACUUM ANALYZE;"`
-- Greeks missing? → Verify `require_greeks: "true"`
+- Redis issues? → `brew services restart redis`
+- Cache miss? → Check TTL with `redis-cli TTL "av:realtime_options:SPY"`
+- Slow performance? → Verify cache with benchmark_cache()
+- Memory concerns? → `redis-cli INFO memory`
 
-**Current Status:** Phase 3 Complete ✅  
-**Next Phase:** 4 - Scheduler & Cache  
-**Progress:** Day 14 of 106 (13.2%)  
-**First Trade:** Day 40 (26 days away)
+**Current Status:** Phase 4.1 Complete ✅  
+**Next Phase:** 4.2 - Scheduler (Day 16)  
+**Progress:** Day 15 of 106 (14.2%)  
+**Cache Performance:** 30.6x faster! 🚀  
+**First Trade:** Day 40 (25 days away)

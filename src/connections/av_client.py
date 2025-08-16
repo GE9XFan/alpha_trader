@@ -1,16 +1,18 @@
-"""Alpha Vantage client with rate limiting - Phase 2"""
+"""Alpha Vantage client with rate limiting and caching - Phase 4.1"""
 
 import requests
 import json
 from pathlib import Path
 import sys
 import time
+import hashlib
 
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from src.foundation.config_manager import ConfigManager
 from src.data.rate_limiter import get_rate_limiter
+from src.data.cache_manager import get_cache
 
 
 class AlphaVantageClient:
@@ -23,16 +25,41 @@ class AlphaVantageClient:
         # Get the global rate limiter
         self.rate_limiter = get_rate_limiter()
         
+        # Get the global cache instance
+        self.cache = get_cache()
+        
+        # Cache TTL from config
+        self.cache_ttl = {
+            'realtime_options': 30,  # 30 seconds
+            'historical_options': 86400  # 24 hours
+        }
+        
         if not self.api_key:
             raise ValueError("Alpha Vantage API key not found")
         
-        print(f"AV Client initialized with rate limiting")
+        print(f"AV Client initialized with rate limiting and caching")
     
-    def _make_request(self, params, description="API call"):
+    def _make_cache_key(self, function: str, symbol: str, extra: str = "") -> str:
+        """Generate a consistent cache key"""
+        # Create a unique key for this API call
+        if extra:
+            return f"av:{function}:{symbol}:{extra}"
+        return f"av:{function}:{symbol}"
+    
+    def _make_request(self, params, description="API call", cache_key=None, cache_ttl=None):
         """
-        Make a rate-limited API request
-        Phase 2: All requests go through rate limiter
+        Make a rate-limited, cached API request
+        Phase 4: Check cache first, then make API call if needed
         """
+        # Check cache first if cache_key provided
+        if cache_key:
+            cached_data = self.cache.get(cache_key)
+            if cached_data:
+                print(f"✓ Cache hit for {description}")
+                return cached_data
+            else:
+                print(f"Cache miss for {description}, calling API...")
+        
         # Acquire token from rate limiter
         wait_time = self.rate_limiter.wait_time()
         if wait_time > 0:
@@ -59,6 +86,11 @@ class AlphaVantageClient:
                 # This is the rate limit message from Alpha Vantage
                 raise Exception(f"API Rate Limit Hit: {data['Note']}")
             
+            # Cache the successful response if cache_key provided
+            if cache_key and cache_ttl:
+                self.cache.set(cache_key, data, ttl=cache_ttl)
+                print(f"✓ Cached {description} for {cache_ttl} seconds")
+            
             return data
             
         except requests.exceptions.RequestException as e:
@@ -68,35 +100,48 @@ class AlphaVantageClient:
             print(f"✗ Error: {e}")
             raise
     
-    def get_realtime_options(self, symbol='SPY'):
+    def get_realtime_options(self, symbol='SPY', use_cache=True):
         """
         Get real-time options data for a symbol
-        Phase 2: Now with rate limiting
+        Phase 4: Now with caching support
         """
         endpoint_config = self.config.av_config['endpoints']['realtime_options']
         
         params = {
-        'function': endpoint_config['function'],
-        'symbol': symbol,
-        'apikey': self.api_key,
-        'datatype': endpoint_config.get('datatype', 'json')
-    }
-    
+            'function': endpoint_config['function'],
+            'symbol': symbol,
+            'apikey': self.api_key,
+            'datatype': endpoint_config.get('datatype', 'json')
+        }
+        
         if endpoint_config.get('require_greeks'):
             params['require_greeks'] = endpoint_config['require_greeks']
-
+        
+        # Generate cache key
+        cache_key = None
+        cache_ttl = None
+        if use_cache:
+            cache_key = self._make_cache_key('realtime_options', symbol)
+            cache_ttl = self.cache_ttl['realtime_options']
+        
         print(f"Calling REALTIME_OPTIONS for {symbol}...")
-        data = self._make_request(params, f"REALTIME_OPTIONS({symbol})")
-        print(f"✓ Successfully retrieved options data for {symbol}")
+        data = self._make_request(
+            params, 
+            f"REALTIME_OPTIONS({symbol})",
+            cache_key=cache_key,
+            cache_ttl=cache_ttl
+        )
+        
+        if not use_cache or not cache_key:
+            print(f"✓ Successfully retrieved options data for {symbol}")
         
         return data
     
-    def get_historical_options(self, symbol='SPY', date=None):
+    def get_historical_options(self, symbol='SPY', date=None, use_cache=True):
         """
         Get historical options data for a symbol
-        Phase 2.3: Second API endpoint
+        Phase 4: Now with caching support
         """
-        # First, add this endpoint to your config/apis/alpha_vantage.yaml
         params = {
             'function': 'HISTORICAL_OPTIONS',
             'symbol': symbol,
@@ -107,18 +152,44 @@ class AlphaVantageClient:
         if date:
             params['date'] = date
         
+        # Generate cache key
+        cache_key = None
+        cache_ttl = None
+        if use_cache:
+            date_str = date if date else 'latest'
+            cache_key = self._make_cache_key('historical_options', symbol, date_str)
+            cache_ttl = self.cache_ttl['historical_options']
+        
         print(f"Calling HISTORICAL_OPTIONS for {symbol}...")
-        data = self._make_request(params, f"HISTORICAL_OPTIONS({symbol})")
-        print(f"✓ Successfully retrieved historical options for {symbol}")
+        data = self._make_request(
+            params, 
+            f"HISTORICAL_OPTIONS({symbol})",
+            cache_key=cache_key,
+            cache_ttl=cache_ttl
+        )
+        
+        if not use_cache or not cache_key:
+            print(f"✓ Successfully retrieved historical options for {symbol}")
         
         return data
     
     def get_rate_limit_status(self):
         """Get current rate limit statistics"""
         return self.rate_limiter.get_stats()
+    
+    def get_cache_status(self):
+        """Get cache statistics"""
+        stats = self.cache.get_stats()
+        
+        # Count AV-specific keys
+        av_keys = len(self.cache.redis_client.keys("av:*"))
+        stats['av_keys'] = av_keys
+        
+        return stats
 
 
 if __name__ == "__main__":
     # Quick test
     client = AlphaVantageClient()
     print(f"Rate limit status: {client.get_rate_limit_status()}")
+    print(f"Cache status: {client.get_cache_status()}")

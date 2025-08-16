@@ -15,4 +15,4 @@ numpy==1.26.2
 pytest==8.2.0
 
 # Discord (since you'll need it later anyway)
-discord-webhook==1.4.1
+discord-webhook==1.4.1redis==5.0.1

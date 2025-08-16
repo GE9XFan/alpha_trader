@@ -1,4 +1,4 @@
-"""Data ingestion module - Phase 2 with multiple APIs"""
+"""Data ingestion module - Phase 4.1 with caching"""
 
 import sys
 from pathlib import Path
@@ -9,17 +9,19 @@ from sqlalchemy import create_engine, text
 
 sys.path.append(str(Path(__file__).parent.parent.parent))
 from src.foundation.config_manager import ConfigManager
+from src.data.cache_manager import get_cache  # ADD THIS
 
 
 class DataIngestion:
     def __init__(self):
         self.config = ConfigManager()
         self.engine = create_engine(self.config.database_url)
+        self.cache = get_cache()  # ADD THIS
     
     def ingest_options_data(self, api_response, symbol):
         """
         Ingest REALTIME_OPTIONS data into database
-        Phase 1: Simple version - parse, validate, store
+        Phase 4.1: Cache after successful ingestion
         """
         if not api_response or 'data' not in api_response:
             print("No data to ingest")
@@ -111,13 +113,18 @@ class DataIngestion:
             
             conn.commit()
         
+        # PHASE 4.1: Cache the data after successful ingestion
+        cache_key = f"av:realtime_options:{symbol}"
+        self.cache.set(cache_key, api_response, ttl=30)
+        print(f"✓ Data cached for {symbol}")
+        
         print(f"✓ Ingestion complete: {records_inserted} inserted, {records_updated} updated")
         return records_inserted + records_updated
     
     def ingest_historical_options(self, api_response, symbol, data_date=None):
         """
         Ingest HISTORICAL_OPTIONS data into database
-        Phase 2.3: Second API endpoint
+        Phase 4.1: Cache after successful ingestion
         """
         if not api_response or 'data' not in api_response:
             print("No historical data to ingest")
@@ -213,9 +220,15 @@ class DataIngestion:
             
             conn.commit()
         
+        # PHASE 4.1: Cache the data after successful ingestion
+        date_str = str(data_date) if data_date else 'latest'
+        cache_key = f"av:historical_options:{symbol}:{date_str}"
+        self.cache.set(cache_key, api_response, ttl=86400)  # 24 hours
+        print(f"✓ Historical data cached for {symbol}")
+        
         print(f"✓ Historical ingestion complete: {records_inserted} inserted, {records_updated} updated")
         return records_inserted + records_updated
-    
+        
     def ingest_ibkr_bar(self, symbol, timestamp, open_, high, low, close, volume, vwap, count, bar_size='5sec'):
         """
         Ingest IBKR bar data
