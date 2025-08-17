@@ -53,3 +53,10 @@ endpoints:
       nbdevup: 2
       nbdevdn: 2
       matype: 0  # 0=SMA
+  
+  vwap:
+    function: VWAP
+    cache_ttl: 60
+    default_params:
+      interval: 5min
+      datatype: json

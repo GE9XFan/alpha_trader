@@ -631,6 +631,81 @@ class DataIngestion:
         print(f"✓ BBANDS ingestion complete: {records_inserted} inserted, {records_updated} updated")
         return total_records
 
+    def ingest_vwap_data(self, vwap_data, symbol, interval):
+        """
+        Ingest VWAP data into database
+        
+        Args:
+            vwap_data: API response from Alpha Vantage
+            symbol: Stock symbol
+            interval: Time interval (1min, 5min, etc.)
+        
+        Returns:
+            int: Number of records processed
+        """
+        if not vwap_data or 'Technical Analysis: VWAP' not in vwap_data:
+            print(f"No VWAP data to ingest for {symbol}")
+            return 0
+        
+        # Extract VWAP values
+        vwap_values = vwap_data['Technical Analysis: VWAP']
+        
+        # Prepare records for insertion
+        records = []
+        for timestamp_str, value_dict in vwap_values.items():
+            # Parse timestamp - VWAP timestamps don't have seconds
+            try:
+                # Try with seconds first
+                timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
+            except ValueError:
+                # Fall back to without seconds
+                timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M')
+            
+            # Extract VWAP value from nested dict {'VWAP': 'value'}
+            vwap_value = float(value_dict['VWAP'])
+            
+            records.append({
+                'symbol': symbol,
+                'timestamp': timestamp,
+                'vwap': vwap_value,
+                'interval': interval,
+                'updated_at': datetime.now()
+            })
+        
+        # Batch insert into database
+        if records:
+            # Process in batches of 1000
+            batch_size = 1000
+            total_inserted = 0
+            
+            with self.engine.begin() as conn:
+                for i in range(0, len(records), batch_size):
+                    batch = records[i:i+batch_size]
+                    
+                    # Use INSERT ... ON CONFLICT DO UPDATE
+                    stmt = text("""
+                        INSERT INTO av_vwap (symbol, timestamp, vwap, interval, updated_at)
+                        VALUES (:symbol, :timestamp, :vwap, :interval, :updated_at)
+                        ON CONFLICT (symbol, timestamp, interval)
+                        DO UPDATE SET 
+                            vwap = EXCLUDED.vwap,
+                            updated_at = EXCLUDED.updated_at
+                    """)
+                    
+                    conn.execute(stmt, batch)
+                    total_inserted += len(batch)
+            
+            print(f"Ingested {total_inserted} VWAP records for {symbol} ({interval})")
+            
+            # Update cache with fresh data
+            cache_key = f"av:vwap:{symbol}:{interval}"
+            cache_ttl = self.config.av_config['endpoints']['vwap'].get('cache_ttl', 60)
+            self.cache.set(cache_key, vwap_data, cache_ttl)
+            
+            return total_inserted
+        
+        return 0
+
     def ingest_ibkr_bar(self, symbol, timestamp, open_, high, low, close, volume, vwap, count, bar_size='5sec'):
         """
         Ingest IBKR bar data

@@ -40,7 +40,7 @@ api_groups:
     calls_per_symbol: 2  # per minute estimate
     
   indicators_fast:  # Phase 5 - will add RSI, MACD, BBANDS
-    apis: ["RSI","MACD","BBANDS"]  
+    apis: ["RSI","MACD","BBANDS","VWAP"]  
     tier_a_interval: 60
     tier_b_interval: 300
     tier_c_interval: 600

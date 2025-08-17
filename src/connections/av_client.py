@@ -358,6 +358,44 @@ class AlphaVantageClient:
         
         return data
 
+    def get_vwap(self, symbol, interval=None):
+        """Get VWAP data from Alpha Vantage"""
+        # Get config - NO HARDCODING
+        vwap_config = self.config.av_config['endpoints']['vwap']
+        
+        # Use config default if not specified
+        if interval is None:
+            interval = vwap_config['default_params']['interval']
+        
+        # Check cache first
+        cache_key = f"av:vwap:{symbol}:{interval}"
+        cached_data = self.cache.get(cache_key)
+        if cached_data:
+            print(f"Cache hit for VWAP {symbol} {interval}")
+            return cached_data
+        
+        # Build params
+        params = {
+            'function': vwap_config['function'],
+            'symbol': symbol,
+            'interval': interval,
+            'apikey': self.config.av_api_key,
+            'datatype': vwap_config['default_params'].get('datatype', 'json')
+        }
+        
+        # Make request
+        print(f"Fetching VWAP for {symbol} with interval={interval}")
+        response = self._make_request(params)
+        
+        # Cache if successful
+        if response and 'Technical Analysis: VWAP' in response:
+            cache_ttl = vwap_config.get('cache_ttl', 60)
+            self.cache.set(cache_key, response, cache_ttl)
+            data_points = len(response.get('Technical Analysis: VWAP', {}))
+            print(f"Fetched {data_points} VWAP data points for {symbol}")
+        
+        return response
+    
     def get_rate_limit_status(self):
         """Get current rate limit statistics"""
         return self.rate_limiter.get_stats()

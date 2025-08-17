@@ -444,6 +444,78 @@ class DataScheduler:
         
         print(f"    ✓ Tier C: {len(self.tiers['tier_c']['symbols'])} symbols every {indicators_config['tier_c_interval']}s")
 
+    def _schedule_vwap_indicators(self):
+        """Schedule Volume Weighted Average Price indicator data collection"""
+        if 'indicators_fast' not in self.api_groups:
+            return
+        
+        indicators_config = self.api_groups['indicators_fast']
+        
+        # Only schedule if VWAP is in the apis list (uppercase in config)
+        if 'VWAP' not in indicators_config.get('apis', []):
+            print("  VWAP not configured in indicators_fast group")
+            return
+        
+        print("  Scheduling VWAP indicators...")
+        
+        # Get VWAP config for default parameters (lowercase in endpoints)
+        vwap_config = self.config.av_config['endpoints']['vwap']['default_params']
+        interval = vwap_config['interval']
+        
+        # Schedule Tier A symbols (every 60 seconds)
+        for symbol in self.tiers['tier_a']['symbols']:
+            if symbol:
+                tier_interval = indicators_config['tier_a_interval']
+                job_id = f"vwap_{symbol}_tier_a"
+                self.scheduler.add_job(
+                    func=self._fetch_vwap,
+                    trigger='interval',
+                    seconds=tier_interval,
+                    args=[symbol, interval],  # Pass as two separate args
+                    id=job_id,
+                    name=f"VWAP {symbol}",
+                    replace_existing=True
+                )
+                self.jobs_created += 1
+        
+        print(f"    ✓ Tier A: {len(self.tiers['tier_a']['symbols'])} symbols every {indicators_config['tier_a_interval']}s")
+        
+        # Schedule Tier B symbols (every 5 minutes)
+        for symbol in self.tiers['tier_b']['symbols']:
+            if symbol:
+                tier_interval = indicators_config['tier_b_interval']
+                job_id = f"vwap_{symbol}_tier_b"
+                self.scheduler.add_job(
+                    func=self._fetch_vwap,
+                    trigger='interval',
+                    seconds=tier_interval,
+                    args=[symbol, interval],  # Pass as two separate args
+                    id=job_id,
+                    name=f"VWAP {symbol}",
+                    replace_existing=True
+                )
+                self.jobs_created += 1
+        
+        print(f"    ✓ Tier B: {len(self.tiers['tier_b']['symbols'])} symbols every {indicators_config['tier_b_interval']}s")
+        
+        # Schedule Tier C symbols (every 10 minutes)
+        for symbol in self.tiers['tier_c']['symbols']:
+            if symbol:
+                tier_interval = indicators_config['tier_c_interval']
+                job_id = f"vwap_{symbol}_tier_c"
+                self.scheduler.add_job(
+                    func=self._fetch_vwap,
+                    trigger='interval',
+                    seconds=tier_interval,
+                    args=[symbol, interval],  # Pass as two separate args
+                    id=job_id,
+                    name=f"VWAP {symbol}",
+                    replace_existing=True
+                )
+                self.jobs_created += 1
+        
+        print(f"    ✓ Tier C: {len(self.tiers['tier_c']['symbols'])} symbols every {indicators_config['tier_c_interval']}s")
+
     def _fetch_realtime_options(self, symbol):
         """
         Fetch realtime options data
@@ -632,6 +704,25 @@ class DataScheduler:
                 
         except Exception as e:
             print(f"  ✗ Error fetching BBANDS for {symbol}: {e}")
+
+    def _fetch_vwap(self, symbol, interval):
+        """Fetch and ingest VWAP data for a symbol"""
+        # Fetch data using the passed interval
+        vwap_data = self.av_client.get_vwap(symbol, interval)
+        
+        if vwap_data and 'Technical Analysis: VWAP' in vwap_data:
+            # Ingest into database
+            records = self.ingestion.ingest_vwap_data(
+                vwap_data,
+                symbol,
+                interval
+            )
+            print(f"[VWAP] {symbol}: {records} records ingested")
+            return records
+        else:
+            print(f"[VWAP] {symbol}: No data received")
+            return 0
+
 
     def _is_market_hours(self):
             """Check if current time is during market hours"""
