@@ -32,7 +32,9 @@ class AlphaVantageClient:
         self.cache_ttl = {
             'realtime_options': self.config.av_config['endpoints'].get('realtime_options', {}).get('cache_ttl', 30),
             'historical_options': self.config.av_config['endpoints'].get('historical_options', {}).get('cache_ttl', 86400),
-            'rsi': self.config.av_config['endpoints'].get('rsi', {}).get('cache_ttl', 60)
+            'rsi': self.config.av_config['endpoints'].get('rsi', {}).get('cache_ttl', 60),
+            'macd': self.config.av_config['endpoints'].get('macd', {}).get('cache_ttl', 60)
+
         }
         
         if not self.api_key:
@@ -236,6 +238,69 @@ class AlphaVantageClient:
             print(f"✓ Successfully retrieved RSI for {symbol}")
         
         return data    
+    
+    def get_macd(self, symbol, interval=None, fastperiod=None, slowperiod=None,
+             signalperiod=None, series_type=None, use_cache=True):
+        """
+        Get MACD (Moving Average Convergence Divergence) data for a symbol
+        Phase 5.2: Technical indicator with caching
+        
+        Args:
+            symbol: Stock symbol (REQUIRED)
+            interval: From config if None
+            fastperiod: From config if None  
+            slowperiod: From config if None
+            signalperiod: From config if None
+            series_type: From config if None
+            use_cache: Whether to use cache
+        """
+        # Get MACD configuration
+        macd_config = self.config.av_config['endpoints']['macd']
+        
+        # Use config defaults if not specified
+        if interval is None:
+            interval = macd_config['default_params']['interval']
+        if fastperiod is None:
+            fastperiod = macd_config['default_params']['fastperiod']
+        if slowperiod is None:
+            slowperiod = macd_config['default_params']['slowperiod']
+        if signalperiod is None:
+            signalperiod = macd_config['default_params']['signalperiod']
+        if series_type is None:
+            series_type = macd_config['default_params']['series_type']
+        
+        params = {
+            'function': macd_config['function'],
+            'symbol': symbol,
+            'interval': interval,
+            'fastperiod': fastperiod,
+            'slowperiod': slowperiod,
+            'signalperiod': signalperiod,
+            'series_type': series_type,
+            'apikey': self.api_key,
+            'datatype': macd_config.get('datatype', 'json')
+        }
+        
+        # Generate cache key
+        cache_key = None
+        cache_ttl = None
+        if use_cache:
+            cache_key = self._make_cache_key('macd', symbol, f"{interval}_{fastperiod}_{slowperiod}_{signalperiod}")
+            cache_ttl = macd_config.get('cache_ttl', 60)
+        
+        print(f"Calling MACD for {symbol} ({interval})...")
+        data = self._make_request(
+            params, 
+            f"MACD({symbol}, {interval})",
+            cache_key=cache_key,
+            cache_ttl=cache_ttl
+        )
+        
+        if not use_cache or not cache_key:
+            print(f"✓ Successfully retrieved MACD for {symbol}")
+        
+        return data
+
     def get_rate_limit_status(self):
         """Get current rate limit statistics"""
         return self.rate_limiter.get_stats()

@@ -11,6 +11,7 @@ import sys
 sys.path.append(str(Path(__file__).parent.parent.parent))
 from src.connections.av_client import AlphaVantageClient
 from src.data.ingestion import DataIngestion
+from src.foundation.config_manager import ConfigManager
 from src.data.rate_limiter import TokenBucketRateLimiter
 
 class DataScheduler:
@@ -25,6 +26,9 @@ class DataScheduler:
         
         # Initialize scheduler
         self._init_scheduler()
+
+        # Initialize ConfigManager
+        self.config = ConfigManager()
         
         # Test mode flag
         self.test_mode = test_mode
@@ -106,6 +110,7 @@ class DataScheduler:
             # Schedule RSI indicators (NEW - Phase 5.1)
             if 'indicators_fast' in self.api_groups:
                 self._schedule_rsi_indicators()
+                self._schedule_macd_indicators()
             
             # Schedule daily historical options
             if 'daily' in self.api_groups:
@@ -279,6 +284,85 @@ class DataScheduler:
         
         print(f"    ✓ Tier C: {len(self.tiers['tier_c']['symbols'])} symbols every {interval}s")
 
+    def _schedule_macd_indicators(self):
+        """Schedule MACD indicator data collection"""
+        if 'indicators_fast' not in self.api_groups:
+            return
+            
+        indicators_config = self.api_groups['indicators_fast']
+        
+        # Only schedule if MACD is in the apis list
+        if 'MACD' not in indicators_config.get('apis', []):
+            print("  MACD not configured in indicators_fast group")
+            return
+            
+        print("  Scheduling MACD indicators...")
+        
+        # Get MACD config for default parameters
+        macd_config = self.config.av_config['endpoints']['macd']['default_params']
+        interval = macd_config['interval']
+        fastperiod = macd_config['fastperiod']
+        slowperiod = macd_config['slowperiod']
+        signalperiod = macd_config['signalperiod']
+        series_type = macd_config['series_type']
+        
+        # Schedule Tier A symbols (every 60 seconds)
+        for symbol in self.tiers['tier_a']['symbols']:
+            if symbol:
+                tier_interval = indicators_config['tier_a_interval']
+                job_id = f"macd_{symbol}_tier_a"
+                
+                self.scheduler.add_job(
+                    func=self._fetch_macd,
+                    trigger='interval',
+                    seconds=tier_interval,
+                    args=[symbol, interval, fastperiod, slowperiod, signalperiod, series_type],
+                    id=job_id,
+                    name=f"MACD {symbol}",
+                    replace_existing=True
+                )
+                self.jobs_created += 1
+        
+        print(f"    ✓ Tier A: {len(self.tiers['tier_a']['symbols'])} symbols every {indicators_config['tier_a_interval']}s")
+        
+        # Schedule Tier B symbols (every 5 minutes)
+        for symbol in self.tiers['tier_b']['symbols']:
+            if symbol:
+                tier_interval = indicators_config['tier_b_interval']
+                job_id = f"macd_{symbol}_tier_b"
+                
+                self.scheduler.add_job(
+                    func=self._fetch_macd,
+                    trigger='interval',
+                    seconds=tier_interval,
+                    args=[symbol, interval, fastperiod, slowperiod, signalperiod, series_type],
+                    id=job_id,
+                    name=f"MACD {symbol}",
+                    replace_existing=True
+                )
+                self.jobs_created += 1
+        
+        print(f"    ✓ Tier B: {len(self.tiers['tier_b']['symbols'])} symbols every {indicators_config['tier_b_interval']}s")
+        
+        # Schedule Tier C symbols (every 10 minutes)
+        for symbol in self.tiers['tier_c']['symbols']:
+            if symbol:
+                tier_interval = indicators_config['tier_c_interval']
+                job_id = f"macd_{symbol}_tier_c"
+                
+                self.scheduler.add_job(
+                    func=self._fetch_macd,
+                    trigger='interval',
+                    seconds=tier_interval,
+                    args=[symbol, interval, fastperiod, slowperiod, signalperiod, series_type],
+                    id=job_id,
+                    name=f"MACD {symbol}",
+                    replace_existing=True
+                )
+                self.jobs_created += 1
+        
+        print(f"    ✓ Tier C: {len(self.tiers['tier_c']['symbols'])} symbols every {indicators_config['tier_c_interval']}s")
+
     def _fetch_realtime_options(self, symbol):
         """
         Fetch realtime options data
@@ -366,6 +450,55 @@ class DataScheduler:
                 
         except Exception as e:
             print(f"  ✗ Error fetching RSI for {symbol}: {e}")
+
+    def _fetch_macd(self, symbol, interval, fastperiod, slowperiod, signalperiod, series_type):
+        """
+        Fetch MACD indicator data
+        Called by scheduler for each symbol
+        Phase 5.2: Technical indicator scheduling
+        """
+        try:
+            # Check if market is open
+            if not self._is_market_hours():
+                print(f"Skipping MACD for {symbol} - market closed")
+                return
+            
+            timestamp = datetime.now().strftime('%H:%M:%S')
+            mode_indicator = "🧪" if self.test_mode else "📊"
+            
+            print(f"[{timestamp}] {mode_indicator} Fetching MACD for {symbol}")
+            
+            # Initialize clients
+            av_client = AlphaVantageClient()
+            ingestion = DataIngestion()
+            
+            # Fetch MACD data (cache-aware automatically)
+            data = av_client.get_macd(
+                symbol, 
+                interval=interval, 
+                fastperiod=fastperiod,
+                slowperiod=slowperiod,
+                signalperiod=signalperiod,
+                series_type=series_type
+            )
+            
+            if data and 'Technical Analysis: MACD' in data:
+                # Ingest into database with ALL parameters
+                records = ingestion.ingest_macd_data(
+                    data, 
+                    symbol, 
+                    interval, 
+                    fastperiod, 
+                    slowperiod, 
+                    signalperiod, 
+                    series_type
+                )
+                print(f"  ✓ {symbol} MACD: {records} records processed")
+            else:
+                print(f"  ⚠ {symbol} MACD: No data received")
+                
+        except Exception as e:
+            print(f"  ✗ Error fetching MACD for {symbol}: {e}")
 
     def _is_market_hours(self):
             """Check if current time is during market hours"""

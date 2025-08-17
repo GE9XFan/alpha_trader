@@ -229,7 +229,7 @@ class DataIngestion:
         print(f"✓ Historical ingestion complete: {records_inserted} inserted, {records_updated} updated")
         return records_inserted + records_updated
 
-    def ingest_rsi_data(self, api_response, symbol, interval='1min', time_period=14):
+    def ingest_rsi_data(self, api_response, symbol, interval, time_period):
         """
         Ingest RSI indicator data into database
         Phase 5.1: Technical indicator ingestion
@@ -340,6 +340,147 @@ class DataIngestion:
         
         total_records = records_inserted + records_updated
         print(f"✓ RSI ingestion complete: {records_inserted} inserted, {records_updated} updated")
+        return total_records
+
+    def ingest_macd_data(self, api_response, symbol, interval,fastperiod, slowperiod, signalperiod, series_type):
+        """
+        Ingest MACD indicator data into database
+        Phase 5.2: Technical indicator with 3 values per timestamp
+        
+        Args:
+            api_response: Raw API response from Alpha Vantage
+            symbol: Stock symbol (REQUIRED)
+            interval: Time interval (REQUIRED)
+            fastperiod: Fast EMA period (REQUIRED)
+            slowperiod: Slow EMA period (REQUIRED)
+            signalperiod: Signal EMA period (REQUIRED)
+            series_type: Price type used (REQUIRED)
+        """
+        if not api_response or 'Technical Analysis: MACD' not in api_response:
+            print(f"No MACD data to ingest for {symbol}")
+            return 0
+        
+        macd_data = api_response['Technical Analysis: MACD']
+        print(f"Processing {len(macd_data)} MACD data points for {symbol}...")
+        
+        records_inserted = 0
+        records_updated = 0
+        
+        with self.engine.connect() as conn:
+            for timestamp_str, macd_dict in macd_data.items():
+                try:
+                    # Parse timestamp (format: '2025-08-15 20:00')
+                    timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M')
+                    
+                    # Extract all 3 MACD values
+                    macd_value = self._to_decimal(macd_dict.get('MACD'))
+                    signal_value = self._to_decimal(macd_dict.get('MACD_Signal'))
+                    hist_value = self._to_decimal(macd_dict.get('MACD_Hist'))
+                    
+                    if macd_value is None or signal_value is None or hist_value is None:
+                        continue
+                    
+                    # Check if this data point exists
+                    existing = conn.execute(
+                        text("""
+                            SELECT id FROM av_macd 
+                            WHERE symbol = :symbol 
+                            AND timestamp = :timestamp 
+                            AND interval = :interval 
+                            AND fastperiod = :fastperiod
+                            AND slowperiod = :slowperiod
+                            AND signalperiod = :signalperiod
+                        """),
+                        {
+                            'symbol': symbol,
+                            'timestamp': timestamp,
+                            'interval': interval,
+                            'fastperiod': fastperiod,
+                            'slowperiod': slowperiod,
+                            'signalperiod': signalperiod
+                        }
+                    ).fetchone()
+                    
+                    if existing:
+                        # Update existing record
+                        conn.execute(
+                            text("""
+                                UPDATE av_macd 
+                                SET macd = :macd,
+                                    macd_signal = :macd_signal,
+                                    macd_hist = :macd_hist,
+                                    series_type = :series_type,
+                                    updated_at = :updated_at
+                                WHERE symbol = :symbol 
+                                AND timestamp = :timestamp 
+                                AND interval = :interval 
+                                AND fastperiod = :fastperiod
+                                AND slowperiod = :slowperiod
+                                AND signalperiod = :signalperiod
+                            """),
+                            {
+                                'symbol': symbol,
+                                'timestamp': timestamp,
+                                'interval': interval,
+                                'fastperiod': fastperiod,
+                                'slowperiod': slowperiod,
+                                'signalperiod': signalperiod,
+                                'series_type': series_type,
+                                'macd': macd_value,
+                                'macd_signal': signal_value,
+                                'macd_hist': hist_value,
+                                'updated_at': datetime.now()
+                            }
+                        )
+                        records_updated += 1
+                    else:
+                        # Insert new record
+                        conn.execute(
+                            text("""
+                                INSERT INTO av_macd 
+                                (symbol, timestamp, macd, macd_signal, macd_hist, 
+                                interval, fastperiod, slowperiod, signalperiod, series_type,
+                                created_at, updated_at)
+                                VALUES 
+                                (:symbol, :timestamp, :macd, :macd_signal, :macd_hist,
+                                :interval, :fastperiod, :slowperiod, :signalperiod, :series_type,
+                                :created_at, :updated_at)
+                            """),
+                            {
+                                'symbol': symbol,
+                                'timestamp': timestamp,
+                                'macd': macd_value,
+                                'macd_signal': signal_value,
+                                'macd_hist': hist_value,
+                                'interval': interval,
+                                'fastperiod': fastperiod,
+                                'slowperiod': slowperiod,
+                                'signalperiod': signalperiod,
+                                'series_type': series_type,
+                                'created_at': datetime.now(),
+                                'updated_at': datetime.now()
+                            }
+                        )
+                        records_inserted += 1
+                    
+                    # Process in batches to avoid overwhelming
+                    if (records_inserted + records_updated) % 1000 == 0:
+                        conn.commit()
+                        print(f"  Processed {records_inserted + records_updated} records...")
+                        
+                except Exception as e:
+                    print(f"Error processing MACD timestamp {timestamp_str}: {e}")
+                    continue
+            
+            conn.commit()
+        
+        # Cache the data after successful ingestion
+        cache_key = f"av:macd:{symbol}:{interval}_{fastperiod}_{slowperiod}_{signalperiod}"
+        self.cache.set(cache_key, api_response, ttl=60)
+        print(f"✓ MACD data cached for {symbol}")
+        
+        total_records = records_inserted + records_updated
+        print(f"✓ MACD ingestion complete: {records_inserted} inserted, {records_updated} updated")
         return total_records
 
     def ingest_ibkr_bar(self, symbol, timestamp, open_, high, low, close, volume, vwap, count, bar_size='5sec'):

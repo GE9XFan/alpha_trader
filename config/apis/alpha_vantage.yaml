@@ -30,3 +30,14 @@ endpoints:
       interval: "1min"
       time_period: 14
       series_type: "close"
+
+  macd:
+    function: "MACD"
+    datatype: "json"
+    cache_ttl: 60  # 60 seconds for fast indicators
+    default_params:
+      interval: "1min"
+      fastperiod: 12
+      slowperiod: 26
+      signalperiod: 9
+      series_type: "close"
