@@ -28,7 +28,7 @@ class DataScheduler:
         self._init_scheduler()
 
         # Initialize ConfigManager
-        self.config = ConfigManager()
+        self.config_manager = ConfigManager()
         
         # Test mode flag
         self.test_mode = test_mode
@@ -51,27 +51,27 @@ class DataScheduler:
         config_path = Path(__file__).parent.parent.parent / 'config' / 'data' / 'schedules.yaml'
         
         with open(config_path, 'r') as f:
-            self.config = yaml.safe_load(f)
+            self.yaml_config = yaml.safe_load(f)
         
         # Extract key configurations
-        self.market_hours = self.config['market_hours']
+        self.market_hours = self.yaml_config['market_hours']
         self.timezone = pytz.timezone(self.market_hours['timezone'])
-        self.rate_limit_config = self.config['rate_limit_budget']
-        self.tiers = self.config['symbol_tiers']
-        self.api_groups = self.config['api_groups']
-        self.rules = self.config['scheduling_rules']
-        self.moc_config = self.config['moc_window']
+        self.rate_limit_config = self.yaml_config['rate_limit_budget']
+        self.tiers = self.yaml_config['symbol_tiers']
+        self.api_groups = self.yaml_config['api_groups']
+        self.rules = self.yaml_config['scheduling_rules']
+        self.moc_config = self.yaml_config['moc_window']
         
     def _init_scheduler(self):
         """Initialize APScheduler with proper configuration"""
         # Configure executors and job defaults
         executors = {
             'default': ThreadPoolExecutor(
-                max_workers=self.config['scheduler']['max_workers']
+                max_workers=self.yaml_config['scheduler']['max_workers']
             )
         }
         
-        job_defaults = self.config['scheduler']['job_defaults']
+        job_defaults = self.yaml_config['scheduler']['job_defaults']
         
         # Create scheduler
         self.scheduler = BackgroundScheduler(
@@ -112,6 +112,7 @@ class DataScheduler:
                 self._schedule_rsi_indicators()
                 self._schedule_macd_indicators()
                 self._schedule_bbands_indicators() 
+                self._schedule_vwap_indicators()
             
             # Schedule daily historical options
             if 'daily' in self.api_groups:
@@ -300,7 +301,7 @@ class DataScheduler:
         print("  Scheduling MACD indicators...")
         
         # Get MACD config for default parameters
-        macd_config = self.config.av_config['endpoints']['macd']['default_params']
+        macd_config = self.config_manager.av_config['endpoints']['macd']['default_params']
         interval = macd_config['interval']
         fastperiod = macd_config['fastperiod']
         slowperiod = macd_config['slowperiod']
@@ -379,7 +380,7 @@ class DataScheduler:
         print("  Scheduling BBANDS indicators...")
         
         # Get BBANDS config for default parameters - NO HARDCODING!
-        bbands_config = self.config.av_config['endpoints']['bbands']['default_params']
+        bbands_config = self.config_manager.av_config['endpoints']['bbands']['default_params']
         interval = bbands_config['interval']
         time_period = bbands_config['time_period']
         series_type = bbands_config['series_type']
@@ -459,7 +460,7 @@ class DataScheduler:
         print("  Scheduling VWAP indicators...")
         
         # Get VWAP config for default parameters (lowercase in endpoints)
-        vwap_config = self.config.av_config['endpoints']['vwap']['default_params']
+        vwap_config = self.config_manager.av_config['endpoints']['vwap']['default_params']
         interval = vwap_config['interval']
         
         # Schedule Tier A symbols (every 60 seconds)
@@ -707,22 +708,40 @@ class DataScheduler:
 
     def _fetch_vwap(self, symbol, interval):
         """Fetch and ingest VWAP data for a symbol"""
-        # Fetch data using the passed interval
-        vwap_data = self.av_client.get_vwap(symbol, interval)
-        
-        if vwap_data and 'Technical Analysis: VWAP' in vwap_data:
-            # Ingest into database
-            records = self.ingestion.ingest_vwap_data(
-                vwap_data,
-                symbol,
-                interval
-            )
-            print(f"[VWAP] {symbol}: {records} records ingested")
-            return records
-        else:
-            print(f"[VWAP] {symbol}: No data received")
+        try:
+            # Check if market is open
+            if not self._is_market_hours():
+                print(f"Skipping VWAP for {symbol} - market closed")
+                return
+            
+            timestamp = datetime.now().strftime('%H:%M:%S')
+            mode_indicator = "🧪" if self.test_mode else "📊"
+            
+            print(f"[{timestamp}] {mode_indicator} Fetching VWAP for {symbol}")
+            
+            # Initialize clients - LIKE ALL OTHER FETCH METHODS
+            av_client = AlphaVantageClient()
+            ingestion = DataIngestion()
+            
+            # Fetch VWAP data
+            vwap_data = av_client.get_vwap(symbol, interval)
+            
+            if vwap_data and 'Technical Analysis: VWAP' in vwap_data:
+                # Ingest into database
+                records = ingestion.ingest_vwap_data(
+                    vwap_data,
+                    symbol,
+                    interval
+                )
+                print(f"  ✓ {symbol} VWAP: {records} records processed")
+                return records
+            else:
+                print(f"  ⚠ {symbol} VWAP: No data received")
+                return 0
+                
+        except Exception as e:
+            print(f"  ✗ Error fetching VWAP for {symbol}: {e}")
             return 0
-
 
     def _is_market_hours(self):
             """Check if current time is during market hours"""

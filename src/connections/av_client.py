@@ -34,9 +34,8 @@ class AlphaVantageClient:
             'historical_options': self.config.av_config['endpoints'].get('historical_options', {}).get('cache_ttl', 86400),
             'rsi': self.config.av_config['endpoints'].get('rsi', {}).get('cache_ttl', 60),
             'macd': self.config.av_config['endpoints'].get('macd', {}).get('cache_ttl', 60),
-            'bbands': self.config.av_config['endpoints'].get('bbands', {}).get('cache_ttl', 60)
-
-
+            'bbands': self.config.av_config['endpoints'].get('bbands', {}).get('cache_ttl', 60),
+            'vwap': self.config.av_config['endpoints'].get('vwap', {}).get('cache_ttl', 60)
         }
         
         if not self.api_key:
@@ -303,7 +302,8 @@ class AlphaVantageClient:
         
         return data
 
-    def get_bbands(self, symbol, interval, time_period, series_type, nbdevup, nbdevdn, matype, use_cache=True):
+    def get_bbands(self, symbol, interval=None, time_period=None, series_type=None, 
+                    nbdevup=None, nbdevdn=None, matype=None, use_cache=True):
         """
         Get Bollinger Bands (BBANDS) data for a symbol
         Phase 5.3: Technical indicator with caching
@@ -321,6 +321,22 @@ class AlphaVantageClient:
         # Get BBANDS configuration for validation only
         bbands_config = self.config.av_config['endpoints']['bbands']
         
+        # ADD THIS SECTION - Load defaults from config
+        bbands_config = self.config.av_config['endpoints']['bbands']
+        
+        if interval is None:
+            interval = bbands_config['default_params']['interval']
+        if time_period is None:
+            time_period = bbands_config['default_params']['time_period']
+        if series_type is None:
+            series_type = bbands_config['default_params']['series_type']
+        if nbdevup is None:
+            nbdevup = bbands_config['default_params']['nbdevup']
+        if nbdevdn is None:
+            nbdevdn = bbands_config['default_params']['nbdevdn']
+        if matype is None:
+            matype = bbands_config['default_params']['matype']
+
         params = {
             'function': bbands_config['function'],
             'symbol': symbol,
@@ -379,7 +395,7 @@ class AlphaVantageClient:
             'function': vwap_config['function'],
             'symbol': symbol,
             'interval': interval,
-            'apikey': self.config.av_api_key,
+            'apikey': self.api_key,
             'datatype': vwap_config['default_params'].get('datatype', 'json')
         }
         
