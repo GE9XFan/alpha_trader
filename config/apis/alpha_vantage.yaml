@@ -16,10 +16,13 @@ endpoints:
     function: "REALTIME_OPTIONS"
     datatype: "json"
     require_greeks: "true"
+    cache_ttl: 30
 
   historical_options:
     function: "HISTORICAL_OPTIONS" 
     datatype: "json"
+    cache_ttl: 86400
+    
 
 # Technical Indicators (Phase 5)
   rsi:

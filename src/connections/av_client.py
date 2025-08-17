@@ -319,8 +319,6 @@ class AlphaVantageClient:
             matype: Moving average type (REQUIRED)
             use_cache: Whether to use cache
         """
-        # Get BBANDS configuration for validation only
-        bbands_config = self.config.av_config['endpoints']['bbands']
         
         # ADD THIS SECTION - Load defaults from config
         bbands_config = self.config.av_config['endpoints']['bbands']
@@ -375,7 +373,7 @@ class AlphaVantageClient:
         
         return data
 
-    def get_vwap(self, symbol, interval=None):
+    def get_vwap(self, symbol, interval=None, use_cache=True):
         """Get VWAP data from Alpha Vantage"""
         # Get config - NO HARDCODING
         vwap_config = self.config.av_config['endpoints']['vwap']
@@ -383,13 +381,6 @@ class AlphaVantageClient:
         # Use config default if not specified
         if interval is None:
             interval = vwap_config['default_params']['interval']
-        
-        # Check cache first
-        cache_key = f"av:vwap:{symbol}:{interval}"
-        cached_data = self.cache.get(cache_key)
-        if cached_data:
-            print(f"Cache hit for VWAP {symbol} {interval}")
-            return cached_data
         
         # Build params
         params = {
@@ -400,20 +391,31 @@ class AlphaVantageClient:
             'datatype': vwap_config['default_params'].get('datatype', 'json')
         }
         
-        # Make request
-        print(f"Fetching VWAP for {symbol} with interval={interval}")
-        response = self._make_request(params)
-        
-        # Cache if successful
-        if response and 'Technical Analysis: VWAP' in response:
+        # Generate cache key using standard pattern
+        cache_key = None
+        cache_ttl = None
+        if use_cache:
+            cache_key = self._make_cache_key('vwap', symbol, interval)
             cache_ttl = vwap_config.get('cache_ttl', 60)
-            self.cache.set(cache_key, response, cache_ttl)
+        
+        # Make request using standard pattern with cache support
+        print(f"Fetching VWAP for {symbol} with interval={interval}")
+        response = self._make_request(
+            params,
+            f"VWAP({symbol}, {interval})",
+            cache_key=cache_key,
+            cache_ttl=cache_ttl
+        )
+        
+        # Keep the existing validation logic
+        if response and 'Technical Analysis: VWAP' in response:
             data_points = len(response.get('Technical Analysis: VWAP', {}))
             print(f"Fetched {data_points} VWAP data points for {symbol}")
         
         return response
 
-    def get_atr(self, symbol=None, interval=None, time_period=None):
+
+    def get_atr(self, symbol, interval=None, time_period=None):
             """
             Get Average True Range (ATR) indicator
             Phase 5.5 - Day 22: Volatility indicator
@@ -434,8 +436,6 @@ class AlphaVantageClient:
             default_params = atr_config['default_params']
             
             # Use provided values or fall back to config
-            if symbol is None:
-                symbol = self.config.av_config.get('default_symbol', 'SPY')
             if interval is None:
                 interval = default_params.get('interval', 'daily')
             if time_period is None:
