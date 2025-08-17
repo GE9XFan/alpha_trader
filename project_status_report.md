@@ -44,7 +44,7 @@ Previously completed phases established:
 ### ✅ Phase 5: Core Technical Indicators (Days 18-24)
 **Status:** IN PROGRESS | **Day 1 of 7 Complete**
 
-#### Phase 5.1: RSI Implementation (Day 18) - COMPLETE
+#### Phase 5.1: RSI, MACD, BBANDS Implementation (Day 18) - COMPLETE
 
 | Component | Status | Details | Quality |
 |-----------|--------|---------|---------|
@@ -69,9 +69,7 @@ Previously completed phases established:
 
 | Indicator | Day | Status | Expected Complexity |
 |-----------|-----|--------|-------------------|
-| MACD | 19 | 📋 Ready | Medium (3 values per point) |
 | BBANDS | 20 | 📋 Planned | Medium (3 bands) |
-| VWAP | 21 | 📋 Planned | Simple (1 value) |
 | ATR | 22 | 📋 Planned | Simple (1 value) |
 | ADX | 23 | 📋 Planned | Medium (3 values) |
 | Integration | 24 | 📋 Planned | Complex (testing all) |
