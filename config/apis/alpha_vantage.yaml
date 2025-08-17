@@ -20,3 +20,13 @@ endpoints:
   historical_options:
     function: "HISTORICAL_OPTIONS" 
     datatype: "json"
+
+# Technical Indicators (Phase 5)
+  rsi:
+    function: "RSI"
+    datatype: "json"
+    cache_ttl: 60  # 60 seconds for fast indicators
+    default_params:
+      interval: "1min"
+      time_period: 14
+      series_type: "close"

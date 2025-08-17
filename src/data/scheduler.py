@@ -94,26 +94,30 @@ class DataScheduler:
             self.scheduler.shutdown(wait=True)
             self.is_running = False
             print("✓ Scheduler stopped")
-    
+        
     def _create_jobs(self):
-        """Create scheduled jobs based on configuration"""
-        print(f"Creating scheduled jobs...")
-        
-        # Schedule realtime options for critical API group
-        if 'critical' in self.api_groups:
-            self._schedule_realtime_options()
-        
-        # Schedule daily historical options
-        if 'daily' in self.api_groups:
-            self._schedule_historical_options()
-        
-        print(f"  Created {self.jobs_created} jobs")
-        
-        # List all jobs
-        jobs = self.scheduler.get_jobs()
-        for job in jobs:
-            print(f"    - {job.id}: {job.trigger}")
-    
+            """Create scheduled jobs based on configuration"""
+            print(f"Creating scheduled jobs...")
+            
+            # Schedule realtime options for critical API group
+            if 'critical' in self.api_groups:
+                self._schedule_realtime_options()
+            
+            # Schedule RSI indicators (NEW - Phase 5.1)
+            if 'indicators_fast' in self.api_groups:
+                self._schedule_rsi_indicators()
+            
+            # Schedule daily historical options
+            if 'daily' in self.api_groups:
+                self._schedule_historical_options()
+            
+            print(f"  Created {self.jobs_created} jobs")
+            
+            # List all jobs
+            jobs = self.scheduler.get_jobs()
+            for job in jobs[:10]:  # Show first 10 jobs
+                print(f"    - {job.id}: {job.trigger}")
+                    
     def _schedule_realtime_options(self):
         """Schedule realtime options data collection"""
         critical_config = self.api_groups['critical']
@@ -173,7 +177,6 @@ class DataScheduler:
         if self.tiers['tier_c']['symbols']:
             print(f"  ✓ Scheduled {len(self.tiers['tier_c']['symbols'])} Tier C symbols every {interval}s")
 
-    
     def _schedule_historical_options(self):
         """Schedule daily historical options collection"""
         daily_config = self.api_groups['daily']
@@ -205,6 +208,77 @@ class DataScheduler:
         
         print(f"  ✓ Scheduled daily historical options at {schedule_time}")
     
+    def _schedule_rsi_indicators(self):
+        """Schedule RSI indicator data collection"""
+        if 'indicators_fast' not in self.api_groups:
+            return
+            
+        indicators_config = self.api_groups['indicators_fast']
+        
+        # Only schedule if RSI is in the apis list
+        if 'RSI' not in indicators_config.get('apis', []):
+            print("  RSI not configured in indicators_fast group")
+            return
+            
+        print("  Scheduling RSI indicators...")
+        
+        # Schedule Tier A symbols (every 60 seconds)
+        for symbol in self.tiers['tier_a']['symbols']:
+            if symbol:
+                interval = indicators_config['tier_a_interval']
+                job_id = f"rsi_{symbol}_tier_a"
+                
+                self.scheduler.add_job(
+                    func=self._fetch_rsi,
+                    trigger='interval',
+                    seconds=interval,
+                    args=[symbol],
+                    id=job_id,
+                    name=f"RSI {symbol}",
+                    replace_existing=True
+                )
+                self.jobs_created += 1
+        
+        print(f"    ✓ Tier A: {len(self.tiers['tier_a']['symbols'])} symbols every {interval}s")
+        
+        # Schedule Tier B symbols (every 5 minutes)
+        for symbol in self.tiers['tier_b']['symbols']:
+            if symbol:
+                interval = indicators_config['tier_b_interval']
+                job_id = f"rsi_{symbol}_tier_b"
+                
+                self.scheduler.add_job(
+                    func=self._fetch_rsi,
+                    trigger='interval',
+                    seconds=interval,
+                    args=[symbol],
+                    id=job_id,
+                    name=f"RSI {symbol}",
+                    replace_existing=True
+                )
+                self.jobs_created += 1
+        
+        print(f"    ✓ Tier B: {len(self.tiers['tier_b']['symbols'])} symbols every {interval}s")
+        
+        # Schedule Tier C symbols (every 10 minutes)
+        for symbol in self.tiers['tier_c']['symbols']:
+            if symbol:
+                interval = indicators_config['tier_c_interval']
+                job_id = f"rsi_{symbol}_tier_c"
+                
+                self.scheduler.add_job(
+                    func=self._fetch_rsi,
+                    trigger='interval',
+                    seconds=interval,
+                    args=[symbol],
+                    id=job_id,
+                    name=f"RSI {symbol}",
+                    replace_existing=True
+                )
+                self.jobs_created += 1
+        
+        print(f"    ✓ Tier C: {len(self.tiers['tier_c']['symbols'])} symbols every {interval}s")
+
     def _fetch_realtime_options(self, symbol):
         """
         Fetch realtime options data
@@ -259,6 +333,40 @@ class DataScheduler:
         except Exception as e:
             print(f"  ✗ Error fetching historical {symbol}: {e}")
     
+    def _fetch_rsi(self, symbol, interval='1min', time_period=14):
+        """
+        Fetch RSI indicator data
+        Called by scheduler for each symbol
+        Phase 5.1: Technical indicator scheduling
+        """
+        try:
+            # Check if market is open
+            if not self._is_market_hours():
+                print(f"Skipping RSI for {symbol} - market closed")
+                return
+            
+            timestamp = datetime.now().strftime('%H:%M:%S')
+            mode_indicator = "🧪" if self.test_mode else "📊"
+            
+            print(f"[{timestamp}] {mode_indicator} Fetching RSI for {symbol}")
+            
+            # Initialize clients
+            av_client = AlphaVantageClient()
+            ingestion = DataIngestion()
+            
+            # Fetch RSI data (cache-aware automatically)
+            data = av_client.get_rsi(symbol, interval=interval, time_period=time_period)
+            
+            if data and 'Technical Analysis: RSI' in data:
+                # Ingest into database
+                records = ingestion.ingest_rsi_data(data, symbol, interval, time_period)
+                print(f"  ✓ {symbol} RSI: {records} records processed")
+            else:
+                print(f"  ⚠ {symbol} RSI: No data received")
+                
+        except Exception as e:
+            print(f"  ✗ Error fetching RSI for {symbol}: {e}")
+
     def _is_market_hours(self):
             """Check if current time is during market hours"""
             # Override for testing

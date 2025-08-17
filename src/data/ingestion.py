@@ -228,7 +228,120 @@ class DataIngestion:
         
         print(f"✓ Historical ingestion complete: {records_inserted} inserted, {records_updated} updated")
         return records_inserted + records_updated
+
+    def ingest_rsi_data(self, api_response, symbol, interval='1min', time_period=14):
+        """
+        Ingest RSI indicator data into database
+        Phase 5.1: Technical indicator ingestion
         
+        Args:
+            api_response: Raw API response from Alpha Vantage
+            symbol: Stock symbol
+            interval: Time interval (from API call)
+            time_period: RSI period (from API call)
+        """
+        if not api_response or 'Technical Analysis: RSI' not in api_response:
+            print(f"No RSI data to ingest for {symbol}")
+            return 0
+        
+        rsi_data = api_response['Technical Analysis: RSI']
+        print(f"Processing {len(rsi_data)} RSI data points for {symbol}...")
+        
+        records_inserted = 0
+        records_updated = 0
+        
+        with self.engine.connect() as conn:
+            for timestamp_str, rsi_dict in rsi_data.items():
+                try:
+                    # Parse timestamp (format: '2025-08-15 20:00')
+                    timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M')
+                    
+                    # Extract RSI value from nested dict {'RSI': '36.4294'}
+                    rsi_value = self._to_decimal(rsi_dict.get('RSI'))
+                    
+                    if rsi_value is None:
+                        continue
+                    
+                    # Check if this data point exists
+                    existing = conn.execute(
+                        text("""
+                            SELECT id FROM av_rsi 
+                            WHERE symbol = :symbol 
+                            AND timestamp = :timestamp 
+                            AND interval = :interval 
+                            AND time_period = :time_period
+                        """),
+                        {
+                            'symbol': symbol,
+                            'timestamp': timestamp,
+                            'interval': interval,
+                            'time_period': time_period
+                        }
+                    ).fetchone()
+                    
+                    if existing:
+                        # Update existing record
+                        conn.execute(
+                            text("""
+                                UPDATE av_rsi 
+                                SET rsi = :rsi,
+                                    updated_at = :updated_at
+                                WHERE symbol = :symbol 
+                                AND timestamp = :timestamp 
+                                AND interval = :interval 
+                                AND time_period = :time_period
+                            """),
+                            {
+                                'symbol': symbol,
+                                'timestamp': timestamp,
+                                'interval': interval,
+                                'time_period': time_period,
+                                'rsi': rsi_value,
+                                'updated_at': datetime.now()
+                            }
+                        )
+                        records_updated += 1
+                    else:
+                        # Insert new record
+                        conn.execute(
+                            text("""
+                                INSERT INTO av_rsi 
+                                (symbol, timestamp, rsi, interval, time_period, created_at, updated_at)
+                                VALUES 
+                                (:symbol, :timestamp, :rsi, :interval, :time_period, :created_at, :updated_at)
+                            """),
+                            {
+                                'symbol': symbol,
+                                'timestamp': timestamp,
+                                'rsi': rsi_value,
+                                'interval': interval,
+                                'time_period': time_period,
+                                'created_at': datetime.now(),
+                                'updated_at': datetime.now()
+                            }
+                        )
+                        records_inserted += 1
+                    
+                    # Process in batches to avoid overwhelming
+                    if (records_inserted + records_updated) % 1000 == 0:
+                        conn.commit()
+                        print(f"  Processed {records_inserted + records_updated} records...")
+                        
+                except Exception as e:
+                    print(f"Error processing RSI timestamp {timestamp_str}: {e}")
+                    continue
+            
+            conn.commit()
+        
+        # Cache the data after successful ingestion
+        cache_key = f"av:rsi:{symbol}:{interval}_{time_period}"
+        self.cache.set(cache_key, api_response, ttl=60)
+        print(f"✓ RSI data cached for {symbol}")
+        
+        total_records = records_inserted + records_updated
+        print(f"✓ RSI ingestion complete: {records_inserted} inserted, {records_updated} updated")
+        return total_records
+
     def ingest_ibkr_bar(self, symbol, timestamp, open_, high, low, close, volume, vwap, count, bar_size='5sec'):
         """
         Ingest IBKR bar data

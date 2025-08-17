@@ -30,8 +30,9 @@ class AlphaVantageClient:
         
         # Cache TTL from config
         self.cache_ttl = {
-            'realtime_options': 30,  # 30 seconds
-            'historical_options': 86400  # 24 hours
+            'realtime_options': self.config.av_config['endpoints'].get('realtime_options', {}).get('cache_ttl', 30),
+            'historical_options': self.config.av_config['endpoints'].get('historical_options', {}).get('cache_ttl', 86400),
+            'rsi': self.config.av_config['endpoints'].get('rsi', {}).get('cache_ttl', 60)
         }
         
         if not self.api_key:
@@ -100,47 +101,56 @@ class AlphaVantageClient:
             print(f"✗ Error: {e}")
             raise
     
-    def get_realtime_options(self, symbol='SPY', use_cache=True):
-        """
-        Get real-time options data for a symbol
-        Phase 4: Now with caching support
-        """
-        endpoint_config = self.config.av_config['endpoints']['realtime_options']
-        
-        params = {
-            'function': endpoint_config['function'],
-            'symbol': symbol,
-            'apikey': self.api_key,
-            'datatype': endpoint_config.get('datatype', 'json')
-        }
-        
-        if endpoint_config.get('require_greeks'):
-            params['require_greeks'] = endpoint_config['require_greeks']
-        
-        # Generate cache key
-        cache_key = None
-        cache_ttl = None
-        if use_cache:
-            cache_key = self._make_cache_key('realtime_options', symbol)
-            cache_ttl = self.cache_ttl['realtime_options']
-        
-        print(f"Calling REALTIME_OPTIONS for {symbol}...")
-        data = self._make_request(
-            params, 
-            f"REALTIME_OPTIONS({symbol})",
-            cache_key=cache_key,
-            cache_ttl=cache_ttl
-        )
-        
-        if not use_cache or not cache_key:
-            print(f"✓ Successfully retrieved options data for {symbol}")
-        
-        return data
+    def get_realtime_options(self, symbol, use_cache=True):
+            """
+            Get real-time options data for a symbol
+            Phase 4: Now with caching support
+            
+            Args:
+                symbol: Stock symbol (REQUIRED)
+                use_cache: Whether to use cache
+            """
+            endpoint_config = self.config.av_config['endpoints']['realtime_options']
+            
+            params = {
+                'function': endpoint_config['function'],
+                'symbol': symbol,
+                'apikey': self.api_key,
+                'datatype': endpoint_config.get('datatype', 'json')
+            }
+            
+            if endpoint_config.get('require_greeks'):
+                params['require_greeks'] = endpoint_config['require_greeks']
+            
+            # Generate cache key
+            cache_key = None
+            cache_ttl = None
+            if use_cache:
+                cache_key = self._make_cache_key('realtime_options', symbol)
+                cache_ttl = self.cache_ttl['realtime_options']
+            
+            print(f"Calling REALTIME_OPTIONS for {symbol}...")
+            data = self._make_request(
+                params, 
+                f"REALTIME_OPTIONS({symbol})",
+                cache_key=cache_key,
+                cache_ttl=cache_ttl
+            )
+            
+            if not use_cache or not cache_key:
+                print(f"✓ Successfully retrieved options data for {symbol}")
+            
+            return data
     
-    def get_historical_options(self, symbol='SPY', date=None, use_cache=True):
+    def get_historical_options(self, symbol, date=None, use_cache=True):
         """
         Get historical options data for a symbol
         Phase 4: Now with caching support
+        
+        Args:
+            symbol: Stock symbol (REQUIRED)
+            date: Optional date
+            use_cache: Whether to use cache
         """
         params = {
             'function': 'HISTORICAL_OPTIONS',
@@ -172,7 +182,60 @@ class AlphaVantageClient:
             print(f"✓ Successfully retrieved historical options for {symbol}")
         
         return data
-    
+
+    def get_rsi(self, symbol, interval=None, time_period=None, 
+                series_type=None, use_cache=True):
+        """
+        Get RSI (Relative Strength Index) data for a symbol
+        Phase 5.1: Technical indicator with caching
+        
+        Args:
+            symbol: Stock symbol (REQUIRED)
+            interval: From config if None
+            time_period: From config if None  
+            series_type: From config if None
+            use_cache: Whether to use cache
+        """
+        # Get RSI configuration
+        rsi_config = self.config.av_config['endpoints']['rsi']
+        
+        # Use config defaults if not specified
+        if interval is None:
+            interval = rsi_config['default_params']['interval']
+        if time_period is None:
+            time_period = rsi_config['default_params']['time_period']
+        if series_type is None:
+            series_type = rsi_config['default_params']['series_type']
+        
+        params = {
+            'function': rsi_config['function'],
+            'symbol': symbol,
+            'interval': interval,
+            'time_period': time_period,
+            'series_type': series_type,
+            'apikey': self.api_key,
+            'datatype': rsi_config.get('datatype', 'json')
+        }
+        
+        # Generate cache key
+        cache_key = None
+        cache_ttl = None
+        if use_cache:
+            cache_key = self._make_cache_key('rsi', symbol, f"{interval}_{time_period}")
+            cache_ttl = rsi_config.get('cache_ttl', 60)
+        
+        print(f"Calling RSI for {symbol} ({interval})...")
+        data = self._make_request(
+            params, 
+            f"RSI({symbol}, {interval})",
+            cache_key=cache_key,
+            cache_ttl=cache_ttl
+        )
+        
+        if not use_cache or not cache_key:
+            print(f"✓ Successfully retrieved RSI for {symbol}")
+        
+        return data    
     def get_rate_limit_status(self):
         """Get current rate limit statistics"""
         return self.rate_limiter.get_stats()
