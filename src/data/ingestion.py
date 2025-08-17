@@ -706,6 +706,149 @@ class DataIngestion:
         
         return 0
 
+    def ingest_atr_data(self, api_response, symbol, interval=None, time_period=None):
+            """
+            Ingest ATR (Average True Range) indicator data into database
+            Phase 5.5 - Day 22: Volatility indicator ingestion
+            
+            ATR is different from other indicators:
+            - Uses DATE not TIMESTAMP (daily data)
+            - Single value per day (volatility in price units)
+            - Updates less frequently (daily market close)
+            
+            Args:
+                api_response: Raw API response from Alpha Vantage
+                symbol: Stock symbol
+                interval: Time interval (from config if not provided)
+                time_period: ATR calculation period (from config if not provided)
+            
+            Returns:
+                Number of records processed
+            """
+            # Get defaults from config - NO HARDCODING!
+            if interval is None:
+                interval = self.config.av_config['endpoints']['atr']['default_params']['interval']
+            if time_period is None:
+                time_period = self.config.av_config['endpoints']['atr']['default_params']['time_period']
+            
+            if not api_response or 'Technical Analysis: ATR' not in api_response:
+                print(f"No ATR data to ingest for {symbol}")
+                return 0
+            
+            atr_data = api_response['Technical Analysis: ATR']
+            print(f"Processing {len(atr_data)} ATR data points for {symbol}...")
+            
+            records_inserted = 0
+            records_updated = 0
+            batch = []
+            
+            with self.engine.connect() as conn:
+                # Process each date's ATR value
+                for date_str, atr_dict in atr_data.items():
+                    try:
+                        # Parse date (not datetime since ATR is daily)
+                        date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
+                        
+                        # Extract ATR value
+                        atr_value = self._to_decimal(atr_dict.get('ATR'))
+                        
+                        if atr_value is None:
+                            continue
+                        
+                        # Check if record exists
+                        check_query = text("""
+                            SELECT id FROM av_atr 
+                            WHERE symbol = :symbol 
+                            AND timestamp = :timestamp 
+                            AND time_period = :time_period
+                        """)
+                        
+                        result = conn.execute(check_query, {
+                            'symbol': symbol,
+                            'timestamp': date_obj,
+                            'time_period': time_period
+                        })
+                        existing = result.fetchone()
+                        
+                        if existing:
+                            # Update existing record
+                            update_query = text("""
+                                UPDATE av_atr 
+                                SET atr = :atr,
+                                    interval = :interval,
+                                    updated_at = CURRENT_TIMESTAMP
+                                WHERE symbol = :symbol 
+                                AND timestamp = :timestamp 
+                                AND time_period = :time_period
+                            """)
+                            
+                            conn.execute(update_query, {
+                                'symbol': symbol,
+                                'timestamp': date_obj,
+                                'atr': atr_value,
+                                'interval': interval,
+                                'time_period': time_period
+                            })
+                            records_updated += 1
+                        else:
+                            # Prepare for batch insert
+                            batch.append({
+                                'symbol': symbol,
+                                'timestamp': date_obj,
+                                'atr': atr_value,
+                                'interval': interval,
+                                'time_period': time_period
+                            })
+                            
+                            # Insert in batches of 1000
+                            if len(batch) >= 1000:
+                                insert_query = text("""
+                                    INSERT INTO av_atr 
+                                    (symbol, timestamp, atr, interval, time_period)
+                                    VALUES (:symbol, :timestamp, :atr, :interval, :time_period)
+                                """)
+                                conn.execute(insert_query, batch)
+                                conn.commit()
+                                records_inserted += len(batch)
+                                print(f"  Inserted batch of {len(batch)} ATR records")
+                                batch = []
+                    
+                    except Exception as e:
+                        print(f"  Error processing ATR date {date_str}: {str(e)[:100]}")
+                        continue
+                
+                # Insert remaining batch
+                if batch:
+                    insert_query = text("""
+                        INSERT INTO av_atr 
+                        (symbol, timestamp, atr, interval, time_period)
+                        VALUES (:symbol, :timestamp, :atr, :interval, :time_period)
+                    """)
+                    conn.execute(insert_query, batch)
+                    conn.commit()
+                    records_inserted += len(batch)
+                    print(f"  Inserted final batch of {len(batch)} ATR records")
+            
+            total_records = records_inserted + records_updated
+            
+            # Cache the response after successful ingestion
+            cache_key = f"av:atr:{symbol}:{interval}_{time_period}"
+            cache_ttl = 300  # 5 minutes for daily data
+            self.cache.set(cache_key, api_response, ttl=cache_ttl)
+            
+            print(f"✓ ATR ingestion complete for {symbol}:")
+            print(f"  - Inserted: {records_inserted}")
+            print(f"  - Updated: {records_updated}")
+            print(f"  - Total: {total_records}")
+            
+            # Show latest ATR value for context
+            if atr_data:
+                latest_date = list(atr_data.keys())[0]
+                latest_atr = atr_data[latest_date].get('ATR')
+                print(f"  - Latest ATR ({latest_date}): {latest_atr} (${latest_atr} daily range)")
+            
+            return total_records    
+
     def ingest_ibkr_bar(self, symbol, timestamp, open_, high, low, close, volume, vwap, count, bar_size='5sec'):
         """
         Ingest IBKR bar data

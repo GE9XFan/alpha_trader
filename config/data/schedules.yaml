@@ -46,12 +46,12 @@ api_groups:
     tier_c_interval: 600
     calls_per_symbol: 1
     
-  indicators_slow:  # Phase 5 - will add ATR, ADX, etc.
-    apis: []
-    tier_a_interval: 300
-    tier_b_interval: 900
-    tier_c_interval: 1800
-    calls_per_symbol: 0.2
+  indicators_slow:
+    apis: ["ATR"]  # Add ATR to slow indicators
+    tier_a_interval: 900   # 15 minutes for Tier A
+    tier_b_interval: 1800  # 30 minutes for Tier B  
+    tier_c_interval: 3600  # 60 minutes for Tier C
+    calls_per_symbol: 1
     
   analytics:  # Phase 6
     apis: []

@@ -35,7 +35,8 @@ class AlphaVantageClient:
             'rsi': self.config.av_config['endpoints'].get('rsi', {}).get('cache_ttl', 60),
             'macd': self.config.av_config['endpoints'].get('macd', {}).get('cache_ttl', 60),
             'bbands': self.config.av_config['endpoints'].get('bbands', {}).get('cache_ttl', 60),
-            'vwap': self.config.av_config['endpoints'].get('vwap', {}).get('cache_ttl', 60)
+            'vwap': self.config.av_config['endpoints'].get('vwap', {}).get('cache_ttl', 60),
+            'atr': self.config.av_config['endpoints'].get('atr', {}).get('cache_ttl', 300)
         }
         
         if not self.api_key:
@@ -411,7 +412,98 @@ class AlphaVantageClient:
             print(f"Fetched {data_points} VWAP data points for {symbol}")
         
         return response
-    
+
+    def get_atr(self, symbol=None, interval=None, time_period=None):
+            """
+            Get Average True Range (ATR) indicator
+            Phase 5.5 - Day 22: Volatility indicator
+            
+            ATR measures market volatility by decomposing the entire range of an asset
+            for that period. Used primarily for position sizing and stop loss placement.
+            
+            Args:
+                symbol: Stock symbol (from config if not provided)
+                interval: Time interval - typically 'daily' for ATR
+                time_period: Number of periods for ATR calculation (default 14)
+            
+            Returns:
+                API response dict or cached data
+            """
+            # Get ATR config - NO HARDCODED VALUES!
+            atr_config = self.config.av_config['endpoints']['atr']
+            default_params = atr_config['default_params']
+            
+            # Use provided values or fall back to config
+            if symbol is None:
+                symbol = self.config.av_config.get('default_symbol', 'SPY')
+            if interval is None:
+                interval = default_params.get('interval', 'daily')
+            if time_period is None:
+                time_period = default_params.get('time_period', 14)
+            
+            # Check cache first - ATR uses longer TTL since it's daily data
+            cache_key = f"av:atr:{symbol}:{interval}_{time_period}"
+            cached_data = self.cache.get(cache_key)
+            
+            if cached_data:
+                print(f"  📊 ATR {symbol}: Cache hit (daily volatility)")
+                return cached_data
+            
+            # Rate limit check
+            self.rate_limiter.acquire()
+            
+            # Prepare API parameters
+            params = {
+                'function': atr_config['function'],
+                'symbol': symbol,
+                'interval': interval,
+                'time_period': time_period,
+                'apikey': self.api_key,
+                'datatype': atr_config.get('datatype', 'json')
+            }
+            
+            try:
+                # Make API call
+                response = requests.get(
+                    self.base_url,
+                    params=params,
+                    timeout=self.timeout
+                )
+                response.raise_for_status()
+                
+                data = response.json()
+                
+                # Check for API errors
+                if 'Error Message' in data:
+                    print(f"  ❌ ATR API Error: {data['Error Message']}")
+                    return None
+                
+                if 'Note' in data:
+                    print(f"  ⚠️ Rate limit warning: {data['Note']}")
+                    return None
+                
+                # Validate we got ATR data
+                if 'Technical Analysis: ATR' not in data:
+                    print(f"  ❌ No ATR data in response for {symbol}")
+                    return None
+                
+                # Cache successful response with longer TTL for daily data
+                cache_ttl = atr_config.get('cache_ttl', 300)
+                self.cache.set(cache_key, data, ttl=cache_ttl)
+                
+                # Count data points for logging
+                atr_points = len(data.get('Technical Analysis: ATR', {}))
+                print(f"  📊 ATR {symbol}: {atr_points} daily volatility points fetched")
+                
+                return data
+                
+            except requests.exceptions.RequestException as e:
+                print(f"  ❌ ATR request failed: {str(e)[:100]}")
+                return None
+            except Exception as e:
+                print(f"  ❌ Unexpected error in get_atr: {str(e)[:100]}")
+                return None    
+
     def get_rate_limit_status(self):
         """Get current rate limit statistics"""
         return self.rate_limiter.get_stats()

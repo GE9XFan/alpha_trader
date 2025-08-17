@@ -114,6 +114,9 @@ class DataScheduler:
                 self._schedule_bbands_indicators() 
                 self._schedule_vwap_indicators()
             
+            if 'indicators_slow' in self.api_groups:
+                self._schedule_atr_indicators()
+            
             # Schedule daily historical options
             if 'daily' in self.api_groups:
                 self._schedule_historical_options()
@@ -517,6 +520,76 @@ class DataScheduler:
         
         print(f"    ✓ Tier C: {len(self.tiers['tier_c']['symbols'])} symbols every {indicators_config['tier_c_interval']}s")
 
+    def _schedule_atr_indicators(self):
+        """
+        Schedule ATR indicator data collection
+        Phase 5.5: Add to indicators_slow group
+        
+        ATR updates less frequently since it's daily data
+        """
+        if 'indicators_slow' not in self.api_groups:
+            print("  indicators_slow group not configured")
+            return
+        
+        slow_config = self.api_groups['indicators_slow']
+        
+        if 'ATR' not in slow_config.get('apis', []):
+            print("  ATR not configured in indicators_slow group")
+            return
+        
+        print("\n  Scheduling ATR (daily volatility) jobs:")
+        
+        # Schedule for each tier with SLOWER intervals
+        # Tier A: Every 15 minutes (900s)
+        for symbol in self.tiers['tier_a']['symbols']:
+            job_name = f"ATR_{symbol}_A"
+            self.scheduler.add_job(
+                func=self._fetch_atr,
+                trigger='interval',
+                args=[symbol],
+                seconds=slow_config.get('tier_a_interval', 900),
+                id=job_name,
+                name=job_name,
+                replace_existing=True,
+                max_instances=1
+            )
+            self.jobs_created += 1
+            print(f"    ✓ {symbol}: Every {slow_config.get('tier_a_interval', 900)}s (15 min)")
+        
+        # Tier B: Every 30 minutes (1800s)
+        for symbol in self.tiers['tier_b']['symbols']:
+            job_name = f"ATR_{symbol}_B"
+            self.scheduler.add_job(
+                func=self._fetch_atr,
+                trigger='interval',
+                args=[symbol],
+                seconds=slow_config.get('tier_b_interval', 1800),
+                id=job_name,
+                name=job_name,
+                replace_existing=True,
+                max_instances=1
+            )
+            self.jobs_created += 1
+            print(f"    ✓ {symbol}: Every {slow_config.get('tier_b_interval', 1800)}s (30 min)")
+        
+        # Tier C: Every 60 minutes (3600s)
+        for symbol in self.tiers['tier_c']['symbols']:
+            job_name = f"ATR_{symbol}_C"
+            self.scheduler.add_job(
+                func=self._fetch_atr,
+                trigger='interval',
+                args=[symbol],
+                seconds=slow_config.get('tier_c_interval', 3600),
+                id=job_name,
+                name=job_name,
+                replace_existing=True,
+                max_instances=1
+            )
+            self.jobs_created += 1
+            print(f"    ✓ {symbol}: Every {slow_config.get('tier_c_interval', 3600)}s (60 min)")
+        
+        print(f"    Total ATR jobs created: {self.jobs_created}")    
+
     def _fetch_realtime_options(self, symbol):
         """
         Fetch realtime options data
@@ -742,6 +815,38 @@ class DataScheduler:
         except Exception as e:
             print(f"  ✗ Error fetching VWAP for {symbol}: {e}")
             return 0
+
+    def _fetch_atr(self, symbol, interval=None, time_period=None):
+            """
+            Fetch ATR (Average True Range) indicator data
+            Called by scheduler for each symbol
+            Phase 5.5: Volatility indicator scheduling
+            
+            ATR is different - it's daily data, so less frequent updates needed
+            """
+            if not self.test_mode and not self._is_market_hours():
+                print(f"Skipping ATR for {symbol} - market closed")
+                return
+            
+            # Get config defaults if not provided - NO HARDCODING!
+            if interval is None:
+                interval = self.config_manager.av_config['endpoints']['atr']['default_params']['interval']
+            if time_period is None:
+                time_period = self.config_manager.av_config['endpoints']['atr']['default_params']['time_period']
+            
+            av_client = AlphaVantageClient()
+            ingestion = DataIngestion()
+            
+            # Fetch ATR data
+            data = av_client.get_atr(symbol, interval, time_period)
+            
+            if data and 'Technical Analysis: ATR' in data:
+                # Ingest the data
+                records = ingestion.ingest_atr_data(data, symbol, interval, time_period)
+                print(f"  ✓ {symbol} ATR: {records} records processed (daily volatility)")
+            else:
+                print(f"  ⚠️ No ATR data for {symbol}")
+
 
     def _is_market_hours(self):
             """Check if current time is during market hours"""
