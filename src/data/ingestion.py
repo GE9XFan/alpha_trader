@@ -923,19 +923,33 @@ class DataIngestion:
             print(f"Error storing quote data: {e}")
 
     def _to_decimal(self, value):
-        """Convert string to Decimal, handling None"""
-        if value is None or value == '':
+        """Convert string to Decimal, handling None and logging issues"""
+        if value is None:
             return None
+        
+        if value == '':
+            # Empty string is suspicious - log it
+            print(f"  ⚠️ Warning: Empty string found where number expected")
+            return None
+        
         try:
             return Decimal(str(value))
-        except:
+        except Exception as e:
+            print(f"  ⚠️ Warning: Failed to convert '{value}' to Decimal: {e}")
             return None
     
     def _to_int(self, value):
-        """Convert string to int, handling None"""
-        if value is None or value == '':
+        """Convert string to int, handling None and logging issues"""
+        if value is None:
             return None
+            
+        if value == '':
+            # Empty string is suspicious for integers
+            print(f"  ⚠️ Warning: Empty string found where integer expected")
+            return None
+        
         try:
             return int(value)
-        except:
+        except Exception as e:
+            print(f"  ⚠️ Warning: Failed to convert '{value}' to int: {e}")
             return None

@@ -47,7 +47,7 @@ api_groups:
     calls_per_symbol: 1
     
   indicators_slow:
-    apis: ["ATR"]  # Add ATR to slow indicators
+    apis: []  # ATR moved to daily_volatility  # Add ATR to slow indicators
     tier_a_interval: 900   # 15 minutes for Tier A
     tier_b_interval: 1800  # 30 minutes for Tier B  
     tier_c_interval: 3600  # 60 minutes for Tier C
@@ -64,6 +64,11 @@ api_groups:
     apis: ["HISTORICAL_OPTIONS"]
     schedule_time: "06:00"  # Run pre-market
     calls_per_symbol: 0.05  # Negligible
+    
+  daily_volatility:  # NEW - ATR daily data
+    apis: ["ATR"]
+    schedule_time: "16:30"  # 30 min after market close
+    calls_per_symbol: 0.04  # Once per day
     
   sentiment:  # Phase 13 - news, sentiment
     apis: []

@@ -44,12 +44,20 @@ class AlphaVantageClient:
         
         print(f"AV Client initialized with rate limiting and caching")
     
-    def _make_cache_key(self, function: str, symbol: str, extra: str = "") -> str:
-        """Generate a consistent cache key"""
-        # Create a unique key for this API call
-        if extra:
-            return f"av:{function}:{symbol}:{extra}"
-        return f"av:{function}:{symbol}"
+    def _make_cache_key(self, function: str, symbol: str, **kwargs) -> str:
+        """Generate a unique cache key including ALL parameters"""
+        key_parts = ['av', function.lower(), symbol]
+        
+        # Sort parameters for consistent ordering
+        sorted_params = sorted(kwargs.items())
+        
+        # Add each non-None parameter to the key
+        for param_name, param_value in sorted_params:
+            if param_name in ['use_cache', 'self'] or param_value is None:
+                continue
+            key_parts.append(f"{param_name}={param_value}")
+        
+        return ':'.join(key_parts)
     
     def _make_request(self, params, description="API call", cache_key=None, cache_ttl=None):
         """
@@ -171,7 +179,7 @@ class AlphaVantageClient:
         cache_ttl = None
         if use_cache:
             date_str = date if date else 'latest'
-            cache_key = self._make_cache_key('historical_options', symbol, date_str)
+            cache_key = self._make_cache_key('historical_options', symbol, date=date_str)
             cache_ttl = self.cache_ttl['historical_options']
         
         print(f"Calling HISTORICAL_OPTIONS for {symbol}...")
@@ -225,7 +233,13 @@ class AlphaVantageClient:
         cache_key = None
         cache_ttl = None
         if use_cache:
-            cache_key = self._make_cache_key('rsi', symbol, f"{interval}_{time_period}")
+            cache_key = self._make_cache_key(
+            'rsi', 
+            symbol,
+            interval=interval,
+            time_period=time_period,
+            series_type=series_type
+        )
             cache_ttl = rsi_config.get('cache_ttl', 60)
         
         print(f"Calling RSI for {symbol} ({interval})...")
@@ -287,7 +301,15 @@ class AlphaVantageClient:
         cache_key = None
         cache_ttl = None
         if use_cache:
-            cache_key = self._make_cache_key('macd', symbol, f"{interval}_{fastperiod}_{slowperiod}_{signalperiod}")
+            cache_key = self._make_cache_key(
+            'macd',
+            symbol,
+            interval=interval,
+            fastperiod=fastperiod,
+            slowperiod=slowperiod,
+            signalperiod=signalperiod,
+            series_type=series_type
+        )
             cache_ttl = macd_config.get('cache_ttl', 60)
         
         print(f"Calling MACD for {symbol} ({interval})...")
@@ -354,10 +376,15 @@ class AlphaVantageClient:
         cache_ttl = None
         if use_cache:
             cache_key = self._make_cache_key(
-                'bbands', 
-                symbol, 
-                f"{interval}_{time_period}_{nbdevup}_{nbdevdn}_{matype}"
-            )
+            'bbands',
+            symbol,
+            interval=interval,
+            time_period=time_period,
+            series_type=series_type,
+            nbdevup=nbdevup,
+            nbdevdn=nbdevdn,
+            matype=matype
+        )
             cache_ttl = bbands_config.get('cache_ttl', 60)
         
         print(f"Calling BBANDS for {symbol} ({interval})...")
@@ -395,7 +422,7 @@ class AlphaVantageClient:
         cache_key = None
         cache_ttl = None
         if use_cache:
-            cache_key = self._make_cache_key('vwap', symbol, interval)
+            cache_key = self._make_cache_key('vwap', symbol, interval=interval)
             cache_ttl = vwap_config.get('cache_ttl', 60)
         
         # Make request using standard pattern with cache support
@@ -442,7 +469,12 @@ class AlphaVantageClient:
                 time_period = default_params.get('time_period', 14)
             
             # Check cache first - ATR uses longer TTL since it's daily data
-            cache_key = f"av:atr:{symbol}:{interval}_{time_period}"
+            cache_key = self._make_cache_key(
+            'atr',
+            symbol,
+            interval=interval,
+            time_period=time_period
+        )
             cached_data = self.cache.get(cache_key)
             
             if cached_data:
