@@ -483,6 +483,154 @@ class DataIngestion:
         print(f"✓ MACD ingestion complete: {records_inserted} inserted, {records_updated} updated")
         return total_records
 
+    def ingest_bbands_data(self, api_response, symbol, interval, time_period,
+                        nbdevup, nbdevdn, matype, series_type):
+        """
+        Ingest Bollinger Bands indicator data into database
+        Phase 5.3: Technical indicator with 3 bands per timestamp
+        
+        Args:
+            api_response: Raw API response from Alpha Vantage
+            symbol: Stock symbol (REQUIRED)
+            interval: Time interval (REQUIRED)
+            time_period: Number of data points (REQUIRED)
+            nbdevup: Upper band std deviations (REQUIRED)
+            nbdevdn: Lower band std deviations (REQUIRED)
+            matype: Moving average type (REQUIRED)
+            series_type: Price type used (REQUIRED)
+        """
+        if not api_response or 'Technical Analysis: BBANDS' not in api_response:
+            print(f"No BBANDS data to ingest for {symbol}")
+            return 0
+        
+        bbands_data = api_response['Technical Analysis: BBANDS']
+        print(f"Processing {len(bbands_data)} BBANDS data points for {symbol}...")
+        
+        records_inserted = 0
+        records_updated = 0
+        
+        with self.engine.connect() as conn:
+            for timestamp_str, bbands_dict in bbands_data.items():
+                try:
+                    # Parse timestamp (format: '2025-08-15 20:00')
+                    timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M')
+                    
+                    # Extract all 3 band values
+                    upper_band = self._to_decimal(bbands_dict.get('Real Upper Band'))
+                    middle_band = self._to_decimal(bbands_dict.get('Real Middle Band'))
+                    lower_band = self._to_decimal(bbands_dict.get('Real Lower Band'))
+                    
+                    if upper_band is None or middle_band is None or lower_band is None:
+                        continue
+                    
+                    # Check if this data point exists
+                    existing = conn.execute(
+                        text("""
+                            SELECT id FROM av_bbands 
+                            WHERE symbol = :symbol 
+                            AND timestamp = :timestamp 
+                            AND interval = :interval 
+                            AND time_period = :time_period
+                            AND nbdevup = :nbdevup
+                            AND nbdevdn = :nbdevdn
+                            AND matype = :matype
+                        """),
+                        {
+                            'symbol': symbol,
+                            'timestamp': timestamp,
+                            'interval': interval,
+                            'time_period': time_period,
+                            'nbdevup': nbdevup,
+                            'nbdevdn': nbdevdn,
+                            'matype': matype
+                        }
+                    ).fetchone()
+                    
+                    if existing:
+                        # Update existing record
+                        conn.execute(
+                            text("""
+                                UPDATE av_bbands 
+                                SET upper_band = :upper_band,
+                                    middle_band = :middle_band,
+                                    lower_band = :lower_band,
+                                    series_type = :series_type,
+                                    updated_at = :updated_at
+                                WHERE symbol = :symbol 
+                                AND timestamp = :timestamp 
+                                AND interval = :interval 
+                                AND time_period = :time_period
+                                AND nbdevup = :nbdevup
+                                AND nbdevdn = :nbdevdn
+                                AND matype = :matype
+                            """),
+                            {
+                                'symbol': symbol,
+                                'timestamp': timestamp,
+                                'interval': interval,
+                                'time_period': time_period,
+                                'nbdevup': nbdevup,
+                                'nbdevdn': nbdevdn,
+                                'matype': matype,
+                                'series_type': series_type,
+                                'upper_band': upper_band,
+                                'middle_band': middle_band,
+                                'lower_band': lower_band,
+                                'updated_at': datetime.now()
+                            }
+                        )
+                        records_updated += 1
+                    else:
+                        # Insert new record
+                        conn.execute(
+                            text("""
+                                INSERT INTO av_bbands 
+                                (symbol, timestamp, upper_band, middle_band, lower_band,
+                                interval, time_period, nbdevup, nbdevdn, matype, series_type,
+                                created_at, updated_at)
+                                VALUES 
+                                (:symbol, :timestamp, :upper_band, :middle_band, :lower_band,
+                                :interval, :time_period, :nbdevup, :nbdevdn, :matype, :series_type,
+                                :created_at, :updated_at)
+                            """),
+                            {
+                                'symbol': symbol,
+                                'timestamp': timestamp,
+                                'upper_band': upper_band,
+                                'middle_band': middle_band,
+                                'lower_band': lower_band,
+                                'interval': interval,
+                                'time_period': time_period,
+                                'nbdevup': nbdevup,
+                                'nbdevdn': nbdevdn,
+                                'matype': matype,
+                                'series_type': series_type,
+                                'created_at': datetime.now(),
+                                'updated_at': datetime.now()
+                            }
+                        )
+                        records_inserted += 1
+                    
+                    # Process in batches to avoid overwhelming
+                    if (records_inserted + records_updated) % 1000 == 0:
+                        conn.commit()
+                        print(f"  Processed {records_inserted + records_updated} records...")
+                        
+                except Exception as e:
+                    print(f"Error processing BBANDS timestamp {timestamp_str}: {e}")
+                    continue
+            
+            conn.commit()
+        
+        # Cache the data after successful ingestion
+        cache_key = f"av:bbands:{symbol}:{interval}_{time_period}_{nbdevup}_{nbdevdn}_{matype}"
+        self.cache.set(cache_key, api_response, ttl=60)
+        print(f"✓ BBANDS data cached for {symbol}")
+        
+        total_records = records_inserted + records_updated
+        print(f"✓ BBANDS ingestion complete: {records_inserted} inserted, {records_updated} updated")
+        return total_records
+
     def ingest_ibkr_bar(self, symbol, timestamp, open_, high, low, close, volume, vwap, count, bar_size='5sec'):
         """
         Ingest IBKR bar data

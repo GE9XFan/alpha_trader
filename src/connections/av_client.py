@@ -33,7 +33,9 @@ class AlphaVantageClient:
             'realtime_options': self.config.av_config['endpoints'].get('realtime_options', {}).get('cache_ttl', 30),
             'historical_options': self.config.av_config['endpoints'].get('historical_options', {}).get('cache_ttl', 86400),
             'rsi': self.config.av_config['endpoints'].get('rsi', {}).get('cache_ttl', 60),
-            'macd': self.config.av_config['endpoints'].get('macd', {}).get('cache_ttl', 60)
+            'macd': self.config.av_config['endpoints'].get('macd', {}).get('cache_ttl', 60),
+            'bbands': self.config.av_config['endpoints'].get('bbands', {}).get('cache_ttl', 60)
+
 
         }
         
@@ -298,6 +300,61 @@ class AlphaVantageClient:
         
         if not use_cache or not cache_key:
             print(f"✓ Successfully retrieved MACD for {symbol}")
+        
+        return data
+
+    def get_bbands(self, symbol, interval, time_period, series_type, nbdevup, nbdevdn, matype, use_cache=True):
+        """
+        Get Bollinger Bands (BBANDS) data for a symbol
+        Phase 5.3: Technical indicator with caching
+        
+        Args:
+            symbol: Stock symbol (REQUIRED)
+            interval: Time interval (REQUIRED)
+            time_period: Number of data points (REQUIRED)
+            series_type: Price type (REQUIRED)
+            nbdevup: Upper band std deviations (REQUIRED)
+            nbdevdn: Lower band std deviations (REQUIRED)
+            matype: Moving average type (REQUIRED)
+            use_cache: Whether to use cache
+        """
+        # Get BBANDS configuration for validation only
+        bbands_config = self.config.av_config['endpoints']['bbands']
+        
+        params = {
+            'function': bbands_config['function'],
+            'symbol': symbol,
+            'interval': interval,
+            'time_period': time_period,
+            'series_type': series_type,
+            'nbdevup': nbdevup,
+            'nbdevdn': nbdevdn,
+            'matype': matype,
+            'apikey': self.api_key,
+            'datatype': bbands_config.get('datatype', 'json')
+        }
+        
+        # Generate cache key
+        cache_key = None
+        cache_ttl = None
+        if use_cache:
+            cache_key = self._make_cache_key(
+                'bbands', 
+                symbol, 
+                f"{interval}_{time_period}_{nbdevup}_{nbdevdn}_{matype}"
+            )
+            cache_ttl = bbands_config.get('cache_ttl', 60)
+        
+        print(f"Calling BBANDS for {symbol} ({interval})...")
+        data = self._make_request(
+            params, 
+            f"BBANDS({symbol}, {interval})",
+            cache_key=cache_key,
+            cache_ttl=cache_ttl
+        )
+        
+        if not use_cache or not cache_key:
+            print(f"✓ Successfully retrieved BBANDS for {symbol}")
         
         return data
 

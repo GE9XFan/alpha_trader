@@ -111,6 +111,7 @@ class DataScheduler:
             if 'indicators_fast' in self.api_groups:
                 self._schedule_rsi_indicators()
                 self._schedule_macd_indicators()
+                self._schedule_bbands_indicators() 
             
             # Schedule daily historical options
             if 'daily' in self.api_groups:
@@ -363,6 +364,86 @@ class DataScheduler:
         
         print(f"    ✓ Tier C: {len(self.tiers['tier_c']['symbols'])} symbols every {indicators_config['tier_c_interval']}s")
 
+    def _schedule_bbands_indicators(self):
+        """Schedule Bollinger Bands indicator data collection"""
+        if 'indicators_fast' not in self.api_groups:
+            return
+            
+        indicators_config = self.api_groups['indicators_fast']
+        
+        # Only schedule if BBANDS is in the apis list
+        if 'BBANDS' not in indicators_config.get('apis', []):
+            print("  BBANDS not configured in indicators_fast group")
+            return
+            
+        print("  Scheduling BBANDS indicators...")
+        
+        # Get BBANDS config for default parameters - NO HARDCODING!
+        bbands_config = self.config.av_config['endpoints']['bbands']['default_params']
+        interval = bbands_config['interval']
+        time_period = bbands_config['time_period']
+        series_type = bbands_config['series_type']
+        nbdevup = bbands_config['nbdevup']
+        nbdevdn = bbands_config['nbdevdn']
+        matype = bbands_config['matype']
+        
+        # Schedule Tier A symbols (every 60 seconds)
+        for symbol in self.tiers['tier_a']['symbols']:
+            if symbol:
+                tier_interval = indicators_config['tier_a_interval']
+                job_id = f"bbands_{symbol}_tier_a"
+                
+                self.scheduler.add_job(
+                    func=self._fetch_bbands,
+                    trigger='interval',
+                    seconds=tier_interval,
+                    args=[symbol, interval, time_period, series_type, nbdevup, nbdevdn, matype],
+                    id=job_id,
+                    name=f"BBANDS {symbol}",
+                    replace_existing=True
+                )
+                self.jobs_created += 1
+        
+        print(f"    ✓ Tier A: {len(self.tiers['tier_a']['symbols'])} symbols every {indicators_config['tier_a_interval']}s")
+        
+        # Schedule Tier B symbols (every 5 minutes)
+        for symbol in self.tiers['tier_b']['symbols']:
+            if symbol:
+                tier_interval = indicators_config['tier_b_interval']
+                job_id = f"bbands_{symbol}_tier_b"
+                
+                self.scheduler.add_job(
+                    func=self._fetch_bbands,
+                    trigger='interval',
+                    seconds=tier_interval,
+                    args=[symbol, interval, time_period, series_type, nbdevup, nbdevdn, matype],
+                    id=job_id,
+                    name=f"BBANDS {symbol}",
+                    replace_existing=True
+                )
+                self.jobs_created += 1
+        
+        print(f"    ✓ Tier B: {len(self.tiers['tier_b']['symbols'])} symbols every {indicators_config['tier_b_interval']}s")
+        
+        # Schedule Tier C symbols (every 10 minutes)
+        for symbol in self.tiers['tier_c']['symbols']:
+            if symbol:
+                tier_interval = indicators_config['tier_c_interval']
+                job_id = f"bbands_{symbol}_tier_c"
+                
+                self.scheduler.add_job(
+                    func=self._fetch_bbands,
+                    trigger='interval',
+                    seconds=tier_interval,
+                    args=[symbol, interval, time_period, series_type, nbdevup, nbdevdn, matype],
+                    id=job_id,
+                    name=f"BBANDS {symbol}",
+                    replace_existing=True
+                )
+                self.jobs_created += 1
+        
+        print(f"    ✓ Tier C: {len(self.tiers['tier_c']['symbols'])} symbols every {indicators_config['tier_c_interval']}s")
+
     def _fetch_realtime_options(self, symbol):
         """
         Fetch realtime options data
@@ -499,6 +580,58 @@ class DataScheduler:
                 
         except Exception as e:
             print(f"  ✗ Error fetching MACD for {symbol}: {e}")
+
+    def _fetch_bbands(self, symbol, interval, time_period, series_type,
+                    nbdevup, nbdevdn, matype):
+        """
+        Fetch Bollinger Bands indicator data
+        Called by scheduler for each symbol
+        Phase 5.3: Technical indicator scheduling
+        """
+        try:
+            # Check if market is open
+            if not self._is_market_hours():
+                print(f"Skipping BBANDS for {symbol} - market closed")
+                return
+            
+            timestamp = datetime.now().strftime('%H:%M:%S')
+            mode_indicator = "🧪" if self.test_mode else "📊"
+            
+            print(f"[{timestamp}] {mode_indicator} Fetching BBANDS for {symbol}")
+            
+            # Initialize clients
+            av_client = AlphaVantageClient()
+            ingestion = DataIngestion()
+            
+            # Fetch BBANDS data (cache-aware automatically)
+            data = av_client.get_bbands(
+                symbol, 
+                interval,
+                time_period,
+                series_type,
+                nbdevup,
+                nbdevdn,
+                matype
+            )
+            
+            if data and 'Technical Analysis: BBANDS' in data:
+                # Ingest into database with ALL parameters
+                records = ingestion.ingest_bbands_data(
+                    data, 
+                    symbol, 
+                    interval,
+                    time_period,
+                    nbdevup,
+                    nbdevdn,
+                    matype,
+                    series_type
+                )
+                print(f"  ✓ {symbol} BBANDS: {records} records processed")
+            else:
+                print(f"  ⚠ {symbol} BBANDS: No data received")
+                
+        except Exception as e:
+            print(f"  ✗ Error fetching BBANDS for {symbol}: {e}")
 
     def _is_market_hours(self):
             """Check if current time is during market hours"""
