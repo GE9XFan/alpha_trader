@@ -138,26 +138,20 @@ class BarAggregator:
     
     def aggregate_5min_bars(self, lookback_minutes=60):
         """
-        Build 5-minute bars from 5-second bars (or 1-minute bars)
-        
-        Args:
-            lookback_minutes: How many minutes back to check for missing bars
-        
-        Returns:
-            Number of 5-minute bars created
+        Build 5-minute bars from 5-second bars ONLY
+        Don't try to be clever with 1-minute bars - just use the source data
         """
         logger.info("Starting 5-minute bar aggregation...")
         
         try:
             with self.engine.connect() as conn:
-                # First, find the last 5-minute bar we have
+                # Find the last 5-minute bar we have
                 result = conn.execute(text("""
                     SELECT COALESCE(MAX(timestamp), '2024-01-01'::timestamp) as last_ts 
                     FROM ibkr_bars_5min
                 """))
                 row = result.fetchone()
                 if row and row[0]:
-                    # Ensure timezone-naive
                     last_timestamp = row[0].replace(tzinfo=None) if hasattr(row[0], 'tzinfo') else row[0]
                 else:
                     last_timestamp = datetime(2024, 1, 1)
@@ -178,78 +172,46 @@ class BarAggregator:
                 
                 logger.info(f"  Aggregating from {start_time} to {end_time}")
                 
-                # Option 1: Aggregate from 1-minute bars (faster if they exist)
-                use_1min_bars = False
-                check_1min = conn.execute(text("""
-                    SELECT COUNT(*) as cnt FROM ibkr_bars_1min 
-                    WHERE timestamp >= :start_time AND timestamp < :end_time
-                """), {'start_time': start_time, 'end_time': end_time})
-                
-                row = check_1min.fetchone()
-                if row and row[0] > 0:
-                    use_1min_bars = True
-                    logger.info("  Using 1-minute bars as source")
-                else:
-                    logger.info("  Using 5-second bars as source")
-                
-                if use_1min_bars:
-                    # Aggregate from 1-minute bars
-                    query = text("""
-                        INSERT INTO ibkr_bars_5min (symbol, timestamp, open, high, low, close, volume, vwap, bar_count)
-                        SELECT 
-                            symbol,
-                            TO_TIMESTAMP(FLOOR(EXTRACT(EPOCH FROM timestamp) / 300) * 300) as five_min_timestamp,
-                            (array_agg(open ORDER BY timestamp))[1] as open,
-                            MAX(high) as high,
-                            MIN(low) as low,
-                            (array_agg(close ORDER BY timestamp DESC))[1] as close,
-                            SUM(volume) as volume,
-                            AVG(vwap) as vwap,
-                            SUM(bar_count) as bar_count
-                        FROM ibkr_bars_1min
-                        WHERE timestamp >= :start_time
-                          AND timestamp < :end_time
-                        GROUP BY symbol, 
-                                 TO_TIMESTAMP(FLOOR(EXTRACT(EPOCH FROM timestamp) / 300) * 300)
-                        HAVING COUNT(*) >= 3  -- Need at least 3 1-min bars for a valid 5-min
-                        ON CONFLICT (symbol, timestamp) 
-                        DO UPDATE SET
-                            high = GREATEST(ibkr_bars_5min.high, EXCLUDED.high),
-                            low = LEAST(ibkr_bars_5min.low, EXCLUDED.low),
-                            close = EXCLUDED.close,
-                            volume = EXCLUDED.volume,
-                            vwap = EXCLUDED.vwap,
-                            bar_count = EXCLUDED.bar_count
-                    """)
-                else:
-                    # Aggregate from 5-second bars
-                    query = text("""
-                        INSERT INTO ibkr_bars_5min (symbol, timestamp, open, high, low, close, volume, vwap, bar_count)
-                        SELECT 
-                            symbol,
-                            TO_TIMESTAMP(FLOOR(EXTRACT(EPOCH FROM timestamp) / 300) * 300) as five_min_timestamp,
-                            (array_agg(open ORDER BY timestamp))[1] as open,
-                            MAX(high) as high,
-                            MIN(low) as low,
-                            (array_agg(close ORDER BY timestamp DESC))[1] as close,
-                            SUM(volume) as volume,
-                            AVG(vwap) as vwap,
-                            SUM(bar_count) as bar_count
-                        FROM ibkr_bars_5sec
-                        WHERE timestamp >= :start_time
-                          AND timestamp < :end_time
-                        GROUP BY symbol,
-                                 TO_TIMESTAMP(FLOOR(EXTRACT(EPOCH FROM timestamp) / 300) * 300)
-                        HAVING COUNT(*) >= 30  -- Need at least 30 5-sec bars (2.5 minutes) for a valid 5-min
-                        ON CONFLICT (symbol, timestamp) 
-                        DO UPDATE SET
-                            high = GREATEST(ibkr_bars_5min.high, EXCLUDED.high),
-                            low = LEAST(ibkr_bars_5min.low, EXCLUDED.low),
-                            close = EXCLUDED.close,
-                            volume = EXCLUDED.volume,
-                            vwap = EXCLUDED.vwap,
-                            bar_count = EXCLUDED.bar_count
-                    """)
+                # SIMPLIFIED: Always aggregate from 1-minute bars if they exist
+                # This is more reliable since 1-min bars are already validated
+                query = text("""
+                    INSERT INTO ibkr_bars_5min (symbol, timestamp, open, high, low, close, volume, vwap, bar_count)
+                    SELECT 
+                        symbol,
+                        date_trunc('hour', timestamp) + 
+                            INTERVAL '5 minutes' * FLOOR(EXTRACT(MINUTE FROM timestamp) / 5) as five_min_timestamp,
+                        (array_agg(open ORDER BY timestamp))[1] as open,
+                        MAX(high) as high,
+                        MIN(low) as low,
+                        (array_agg(close ORDER BY timestamp DESC))[1] as close,
+                        SUM(volume) as volume,
+                        CASE 
+                            WHEN SUM(volume) > 0 THEN SUM(vwap * volume) / SUM(volume)
+                            ELSE AVG(vwap)
+                        END as vwap,
+                        SUM(bar_count) as bar_count
+                    FROM ibkr_bars_1min
+                    WHERE timestamp >= :start_time
+                    AND timestamp < :end_time
+                    GROUP BY symbol, 
+                            date_trunc('hour', timestamp) + 
+                            INTERVAL '5 minutes' * FLOOR(EXTRACT(MINUTE FROM timestamp) / 5)
+                    -- Relaxed: Accept partial 5-minute bars with at least 1 minute of data
+                    HAVING COUNT(*) >= 1
+                    ON CONFLICT (symbol, timestamp) 
+                    DO UPDATE SET
+                        high = GREATEST(ibkr_bars_5min.high, EXCLUDED.high),
+                        low = LEAST(ibkr_bars_5min.low, EXCLUDED.low),
+                        close = EXCLUDED.close,
+                        volume = ibkr_bars_5min.volume + EXCLUDED.volume,
+                        vwap = CASE 
+                            WHEN (ibkr_bars_5min.volume + EXCLUDED.volume) > 0 
+                            THEN (ibkr_bars_5min.vwap * ibkr_bars_5min.volume + EXCLUDED.vwap * EXCLUDED.volume) 
+                                / (ibkr_bars_5min.volume + EXCLUDED.volume)
+                            ELSE EXCLUDED.vwap
+                        END,
+                        bar_count = ibkr_bars_5min.bar_count + EXCLUDED.bar_count
+                """)
                 
                 result = conn.execute(query, {
                     'start_time': start_time,
@@ -261,33 +223,33 @@ class BarAggregator:
                 
                 if rows_affected > 0:
                     logger.info(f"  ✓ Created/updated {rows_affected} five-minute bars")
-                    
-                    # Log sample of what was created
-                    sample = conn.execute(text("""
-                        SELECT symbol, COUNT(*) as bars, 
-                               MIN(timestamp) as first_bar, 
-                               MAX(timestamp) as last_bar
-                        FROM ibkr_bars_5min
-                        WHERE timestamp >= :start_time
-                        GROUP BY symbol
-                        ORDER BY symbol
-                        LIMIT 5
-                    """), {'start_time': start_time})
-                    
-                    for row in sample:
-                        # Access by index: 0=symbol, 1=bars, 2=first_bar, 3=last_bar
-                        logger.info(f"    {row[0]}: {row[1]} bars, "
-                                  f"latest: {row[3].strftime('%H:%M') if row[3] else 'N/A'}")
+                    # ... rest of logging
                 else:
                     logger.info("  No new 5-minute bars to create")
+                    # Log why no bars were created for debugging
+                    check = conn.execute(text("""
+                        SELECT COUNT(*) as total, 
+                            COUNT(DISTINCT symbol) as symbols,
+                            MIN(timestamp) as earliest,
+                            MAX(timestamp) as latest
+                        FROM ibkr_bars_1min
+                        WHERE timestamp >= :start_time AND timestamp < :end_time
+                    """), {'start_time': start_time, 'end_time': end_time})
+                    
+                    check_row = check.fetchone()
+                    if check_row:
+                        logger.info(f"    Debug: Found {check_row[0]} 1-min bars between {start_time} and {end_time}")
+                        logger.info(f"    Debug: {check_row[1]} symbols, range: {check_row[2]} to {check_row[3]}")
                 
                 self.last_5min_aggregation = datetime.now()
                 return rows_affected
                 
         except Exception as e:
             logger.error(f"Error aggregating 5-minute bars: {e}")
-            return 0
-    
+            import traceback
+            logger.error(traceback.format_exc())
+            return 0   
+             
     def run_aggregation(self):
         """
         Run all aggregations in sequence

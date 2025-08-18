@@ -88,11 +88,11 @@ class IBKRConnectionManager(EWrapper, EClient):
     def subscribe_bars(self, symbol, bar_size='5 secs'):
         """
         Subscribe to real-time bars for a symbol
-        Phase 3.2: Real-time bar data
+        Note: IBKR reqRealTimeBars only supports 5-second bars
         
         Args:
             symbol: Stock symbol (e.g., 'SPY')
-            bar_size: '5 secs', '1 min', '5 mins', '15 mins'
+            bar_size: Ignored - IBKR only provides 5-second real-time bars
         """
         if not self.connected:
             print("Not connected to TWS")
@@ -110,37 +110,35 @@ class IBKRConnectionManager(EWrapper, EClient):
         
         print(f"Subscribing to {bar_size} bars for {symbol} (req_id: {req_id})")
         
-        # Request real-time bars
+        # NOTE: reqRealTimeBars only supports 5-second bars
+        # We collect these and aggregate them to larger timeframes
         self.reqRealTimeBars(
             reqId=req_id,
             contract=contract,
-            barSize=5,  # Always 5 seconds for real-time bars
+            barSize=5,  # Always 5 seconds - IBKR limitation
             whatToShow="TRADES",
-            useRTH=False,  # Include extended hours
+            useRTH=False,
             realTimeBarsOptions=[]
         )
         
         self.active_bars[req_id] = symbol
-
         return req_id
-    
     def realtimeBar(self, reqId, time, open_, high, low, close, volume, wap, count):
         """
         Callback for real-time bar data
-        Phase 3.5: Send to ingestion module
         """
         timestamp = datetime.fromtimestamp(time)
         symbol = self.active_bars.get(reqId, f"Unknown_{reqId}")
         
         print(f"[{timestamp.strftime('%H:%M:%S')}] {symbol}: "
-              f"O={open_:.2f} H={high:.2f} L={low:.2f} C={close:.2f} "
-              f"V={volume} VWAP={wap:.2f}")
+            f"O={open_:.2f} H={high:.2f} L={low:.2f} C={close:.2f} "
+            f"V={volume} VWAP={wap:.2f}")
         
-        # Send to ingestion
+        # Always store as 5-second bars since that's what IBKR provides
+        # The aggregator will create 1-min and 5-min bars
         self.ingestion.ingest_ibkr_bar(
             symbol, time, open_, high, low, close, volume, wap, count, '5sec'
         )
-
         
     def get_quotes(self, symbol):
             """
