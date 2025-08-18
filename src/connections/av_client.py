@@ -441,6 +441,98 @@ class AlphaVantageClient:
         
         return response
 
+    def get_adx(self, symbol: str, interval: str = None, time_period: int = None) -> dict:
+        """
+        Get Average Directional Index (ADX) data - Phase 5.6
+        
+        ADX measures trend strength regardless of direction.
+        Values > 25 indicate strong trend, > 50 very strong.
+        
+        Args:
+            symbol: Stock symbol (from config if not provided)
+            interval: Time interval - typically '5min' for ADX
+            time_period: Number of periods for ADX calculation (default 14)
+        
+        Returns:
+            API response dict or cached data
+        """
+        # Get ADX config 
+        adx_config = self.config.av_config['endpoints']['adx']
+        default_params = adx_config['default_params']
+        
+        # Use provided values or fall back to config
+        if interval is None:
+            interval = default_params.get('interval', '5min')
+        if time_period is None:
+            time_period = default_params.get('time_period', 14)
+        
+        # Check cache first
+        cache_key = self._make_cache_key(
+            'adx',
+            symbol,
+            interval=interval,
+            time_period=time_period
+        )
+        cached_data = self.cache.get(cache_key)
+        
+        if cached_data:
+            print(f"  📊 ADX {symbol}: Cache hit (trend strength)")
+            return cached_data
+        
+        # Rate limit check
+        self.rate_limiter.acquire()
+        
+        # Prepare API parameters
+        params = {
+            'function': adx_config['function'],
+            'symbol': symbol,
+            'interval': interval,
+            'time_period': time_period,
+            'apikey': self.api_key,
+            'datatype': adx_config.get('datatype', 'json')
+        }
+        
+        try:
+            # Make API call
+            response = requests.get(
+                self.base_url,
+                params=params,
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            # Check for API errors
+            if 'Error Message' in data:
+                print(f"  ❌ ADX API Error: {data['Error Message']}")
+                return None
+            
+            if 'Note' in data:
+                print(f"  ⚠️ Rate limit warning: {data['Note']}")
+                return None
+            
+            # Validate we got ADX data
+            if 'Technical Analysis: ADX' not in data:
+                print(f"  ❌ No ADX data in response for {symbol}")
+                return None
+            
+            # Cache successful response
+            cache_ttl = adx_config.get('cache_ttl', 300)
+            self.cache.set(cache_key, data, ttl=cache_ttl)
+            
+            # Count data points for logging
+            adx_data = data.get('Technical Analysis: ADX', {})
+            print(f"  ✅ ADX {symbol}: {len(adx_data)} data points fetched")
+            
+            return data
+            
+        except requests.exceptions.RequestException as e:
+            print(f"  ❌ ADX request failed for {symbol}: {e}")
+            return None
+        except Exception as e:
+            print(f"  ❌ Unexpected error getting ADX for {symbol}: {e}")
+            return None
 
     def get_atr(self, symbol, interval=None, time_period=None):
             """

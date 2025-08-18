@@ -154,7 +154,9 @@ def test_scheduler_methods():
         ("_fetch_rsi", ["SPY", "1min", 14]),
         ("_fetch_macd", ["SPY", "1min", 12, 26, 9, "close"]),
         ("_fetch_bbands", ["SPY", "5min", 20, "close", 2, 2, 0]),
-        ("_fetch_vwap", ["SPY", "5min"])
+        ("_fetch_vwap", ["SPY", "5min"]),
+        ("_fetch_atr", ["SPY"]),  # ← Just symbol (uses config defaults)
+        ("_fetch_adx", ["SPY"])   # ← Just symbol (uses config defaults)
     ]
     
     for method_name, args in fetch_tests:

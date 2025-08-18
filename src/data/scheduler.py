@@ -115,8 +115,12 @@ class DataScheduler:
                 self._schedule_vwap_indicators()
             
             if 'indicators_slow' in self.api_groups:
-                self._schedule_atr_indicators()
+                self._schedule_adx_indicators()
             
+            # Handle ATR in daily_volatility group
+            if 'daily_volatility' in self.api_groups:
+                self._schedule_adx_indicators() 
+
             # Schedule daily historical options
             if 'daily' in self.api_groups:
                 self._schedule_historical_options()
@@ -590,6 +594,81 @@ class DataScheduler:
         
         print(f"    Total ATR jobs created: {self.jobs_created}")    
 
+    def _schedule_adx_indicators(self):
+        """
+        Schedule ADX indicator data collection - Phase 5.6
+        
+        ADX updates on slower intervals since trend strength
+        changes more gradually than momentum indicators.
+        """
+        if 'indicators_slow' not in self.api_groups:
+            print("  indicators_slow group not configured")
+            return
+        
+        slow_config = self.api_groups['indicators_slow']
+        
+        if 'ADX' not in slow_config.get('apis', []):
+            print("  ADX not configured in indicators_slow group")
+            return
+        
+        print("\n  Scheduling ADX (trend strength) jobs:")
+        
+        # Tier A: Every 15 minutes
+        for symbol in self.tiers['tier_a']['symbols']:
+            if symbol:
+                job_name = f"ADX_{symbol}_A"
+                self.scheduler.add_job(
+                    func=self._fetch_adx,
+                    trigger='interval',
+                    args=[symbol],
+                    seconds=slow_config.get('tier_a_interval', 900),
+                    id=job_name,
+                    name=job_name,
+                    replace_existing=True,
+                    max_instances=1
+                )
+                self.jobs_created += 1
+        
+        print(f"    ✓ Tier A: {len(self.tiers['tier_a']['symbols'])} symbols every {slow_config.get('tier_a_interval', 900)}s")
+        
+        # Tier B: Every 30 minutes
+        for symbol in self.tiers['tier_b']['symbols']:
+            if symbol:
+                job_name = f"ADX_{symbol}_B"
+                self.scheduler.add_job(
+                    func=self._fetch_adx,
+                    trigger='interval',
+                    args=[symbol],
+                    seconds=slow_config.get('tier_b_interval', 1800),
+                    id=job_name,
+                    name=job_name,
+                    replace_existing=True,
+                    max_instances=1
+                )
+                self.jobs_created += 1
+        
+        print(f"    ✓ Tier B: {len(self.tiers['tier_b']['symbols'])} symbols every {slow_config.get('tier_b_interval', 1800)}s")
+        
+        # Tier C: Every 60 minutes
+        for symbol in self.tiers['tier_c']['symbols']:
+            if symbol:
+                job_name = f"ADX_{symbol}_C"
+                self.scheduler.add_job(
+                    func=self._fetch_adx,
+                    trigger='interval',
+                    args=[symbol],
+                    seconds=slow_config.get('tier_c_interval', 3600),
+                    id=job_name,
+                    name=job_name,
+                    replace_existing=True,
+                    max_instances=1
+                )
+                self.jobs_created += 1
+        
+        print(f"    ✓ Tier C: {len(self.tiers['tier_c']['symbols'])} symbols every {slow_config.get('tier_c_interval', 3600)}s")
+
+
+
     def _fetch_realtime_options(self, symbol):
         """
         Fetch realtime options data
@@ -847,7 +926,50 @@ class DataScheduler:
             else:
                 print(f"  ⚠️ No ATR data for {symbol}")
 
-
+    def _fetch_adx(self, symbol: str) -> None:
+        """
+        Fetch and ingest ADX data for a symbol - Phase 5.6
+        
+        ADX measures trend strength on a 0-100 scale.
+        Runs on slower intervals since trend strength changes gradually.
+        """
+        try:
+            # Check market hours (like other methods)
+            if not self.test_mode and not self._is_market_hours():
+                print(f"Skipping ADX for {symbol} - market closed")
+                return
+                
+            # Initialize clients locally (like ALL other fetch methods)
+            av_client = AlphaVantageClient()
+            ingestion = DataIngestion()
+            
+            # Get ADX config - use config_manager, not config
+            adx_config = self.config_manager.av_config['endpoints'].get('adx', {})
+            interval = adx_config['default_params'].get('interval', '5min')
+            time_period = adx_config['default_params'].get('time_period', 14)
+            
+            # Fetch data using local av_client
+            adx_data = av_client.get_adx(
+                symbol=symbol,
+                interval=interval,
+                time_period=time_period
+            )
+            
+            if adx_data and 'Technical Analysis: ADX' in adx_data:
+                # Ingest using local ingestion
+                records = ingestion.ingest_adx_data(
+                    adx_data, 
+                    symbol,
+                    interval=interval,
+                    time_period=time_period
+                )
+                print(f"  ✅ ADX {symbol}: {records} records updated (trend strength)")
+            else:
+                print(f"  ⚠️ No ADX data received for {symbol}")
+                
+        except Exception as e:
+            print(f"  ❌ Error fetching ADX for {symbol}: {e}")
+            
     def _is_market_hours(self):
             """Check if current time is during market hours"""
             # Override for testing

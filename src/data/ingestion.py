@@ -849,6 +849,99 @@ class DataIngestion:
             
             return total_records    
 
+    def ingest_adx_data(self, api_response: dict, symbol: str, interval: str = None, time_period: int = None) -> int:
+        """
+        Ingest ADX (Average Directional Index) data - Phase 5.6
+        
+        ADX measures trend strength (0-100 scale):
+        - < 25: Weak/no trend
+        - 25-50: Strong trend
+        - 50-75: Very strong trend
+        - > 75: Extremely strong trend
+        
+        Args:
+            api_response: Raw API response from Alpha Vantage
+            symbol: Stock symbol
+            interval: Time interval used
+            time_period: Period used for calculation
+        
+        Returns:
+            Number of records inserted/updated
+        """
+        if not api_response or 'Technical Analysis: ADX' not in api_response:
+            print(f"  ⚠️ No ADX data to ingest for {symbol}")
+            return 0
+        
+        # Extract ADX data
+        adx_data = api_response['Technical Analysis: ADX']
+        
+        # Prepare records for insertion
+        records = []
+        for timestamp_str, values in adx_data.items():
+            try:
+                # Parse timestamp
+                timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M')
+                
+                # Extract ADX value
+                adx_value = float(values.get('ADX', 0))
+                
+                # Skip invalid values
+                if adx_value < 0 or adx_value > 100:
+                    print(f"  ⚠️ Invalid ADX value {adx_value} for {symbol} at {timestamp_str}")
+                    continue
+                
+                record = {
+                    'symbol': symbol,
+                    'timestamp': timestamp,
+                    'adx': adx_value,
+                    'updated_at': datetime.now()
+                }
+                records.append(record)
+                
+            except (ValueError, KeyError) as e:
+                print(f"  ⚠️ Error parsing ADX record for {symbol} at {timestamp_str}: {e}")
+                continue
+        
+        if not records:
+            print(f"  ⚠️ No valid ADX records to insert for {symbol}")
+            return 0
+        
+        # Insert records using upsert pattern
+        inserted_count = 0
+        
+        try:
+            # Process in batches to avoid memory issues
+            batch_size = 1000
+            for i in range(0, len(records), batch_size):
+                batch = records[i:i + batch_size]
+                
+                # Create insert statement with ON CONFLICT
+                stmt = text("""
+                    INSERT INTO av_adx (symbol, timestamp, adx, updated_at)
+                    VALUES (:symbol, :timestamp, :adx, :updated_at)
+                    ON CONFLICT (symbol, timestamp) 
+                    DO UPDATE SET 
+                        adx = EXCLUDED.adx,
+                        updated_at = EXCLUDED.updated_at
+                """)
+                
+                with self.engine.begin() as conn:
+                    result = conn.execute(stmt, batch)
+                    inserted_count += result.rowcount
+            
+            print(f"  ✅ ADX {symbol}: {inserted_count} records processed")
+            
+            # Cache the data after successful ingestion
+            if hasattr(self, 'cache') and self.cache:
+                cache_key = f"av:adx:{symbol}:interval={interval}:time_period={time_period}"
+                self.cache.set(cache_key, api_response, ttl=300)  # 5 min cache
+            
+            return inserted_count
+            
+        except Exception as e:
+            print(f"  ❌ Error inserting ADX data for {symbol}: {e}")
+            return 0
+
     def ingest_ibkr_bar(self, symbol, timestamp, open_, high, low, close, volume, vwap, count, bar_size='5sec'):
         """
         Ingest IBKR bar data

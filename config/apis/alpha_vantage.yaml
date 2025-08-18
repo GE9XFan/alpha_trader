@@ -70,4 +70,12 @@ endpoints:
     cache_ttl: 300  # 5 minutes - longer TTL for daily data
     default_params:
       interval: "daily"  # ATR uses daily, not minute intervals
-      time_period: 14    
+      time_period: 14  
+  
+  adx:
+    function: "ADX"
+    datatype: "json"
+    cache_ttl: 300 
+    default_params:
+      interval: "5min"
+      time_period: 14
