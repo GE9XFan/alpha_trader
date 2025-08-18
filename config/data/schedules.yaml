@@ -75,6 +75,24 @@ api_groups:
     interval: 300  # Every 5 minutes, not per symbol
     calls_per_run: 0.2
 
+ibkr_subscriptions:
+  max_lines: 50
+  subscription_delay: 0.2  # seconds between each subscription
+  symbol_delay: 0.5       # seconds between symbols
+  
+  tier_config:
+    tier_a:
+      quotes: true
+      bar_sizes: ['5 secs', '1 min', '5 mins']  # Full data
+      
+    tier_b:  
+      quotes: true
+      bar_sizes: ['1 min']  # Medium data
+      
+    tier_c:
+      quotes: true
+      bar_sizes: []  # Quotes only
+
 # Smart scheduling rules
 scheduling_rules:
   # Check cache before every API call

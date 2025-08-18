@@ -13,6 +13,23 @@ from src.connections.av_client import AlphaVantageClient
 from src.data.ingestion import DataIngestion
 from src.foundation.config_manager import ConfigManager
 from src.data.rate_limiter import TokenBucketRateLimiter
+import time
+import logging
+from src.data.bar_aggregator import BarAggregator
+
+
+# ===== ADD THIS ENTIRE LOGGING BLOCK HERE =====
+# Configure logging for production
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),  # Console output
+        logging.FileHandler('logs/scheduler.log', mode='a')  # File output
+    ]
+)
+logger = logging.getLogger(__name__)
+# ===== END OF LOGGING BLOCK =====
 
 class DataScheduler:
     """
@@ -21,17 +38,30 @@ class DataScheduler:
     """
     
     def __init__(self, test_mode=False):
+        # Test mode flag
+        self.test_mode = test_mode
+
+        # Set up logging
+        self._setup_logging()
+
         # Load configurations
         self._load_config()
         
+        # Initialize ConfigManager
+        self.config_manager = ConfigManager()
+
         # Initialize scheduler
         self._init_scheduler()
 
-        # Initialize ConfigManager
-        self.config_manager = ConfigManager()
-        
-        # Test mode flag
-        self.test_mode = test_mode
+        ## IBKR connection management
+        self.ibkr_connection = None
+        self.ibkr_connected = False
+        self.ibkr_subscriptions = {}
+        self.ibkr_reconnect_attempts = 0
+        self.max_reconnect_attempts = 5
+        self.ibkr_last_heartbeat = datetime.now()
+        self.bar_aggregator = None
+
         
         # Track state
         self.is_running = False
@@ -79,7 +109,36 @@ class DataScheduler:
             job_defaults=job_defaults,
             timezone=self.timezone
         )
+
+    def _setup_logging(self):
+        """Setup logging configuration"""
+        # Create logger for this class
+        self.logger = logging.getLogger(self.__class__.__name__)
+        
+        # In test mode, also print to console
+        if self.test_mode:
+            self.logger.setLevel(logging.DEBUG)
+        else:
+            self.logger.setLevel(logging.INFO)
     
+    def _log(self, message, level='info'):
+        """Helper method for logging that also prints in test mode"""
+        if level == 'info':
+            logger.info(message)
+            if self.test_mode:
+                print(f"[INFO] {message}")
+        elif level == 'error':
+            logger.error(message)
+            print(f"[ERROR] {message}")  # Always print errors
+        elif level == 'warning':
+            logger.warning(message)
+            if self.test_mode:
+                print(f"[WARNING] {message}")
+        elif level == 'debug':
+            logger.debug(message)
+            if self.test_mode:
+                print(f"[DEBUG] {message}")
+
     def start(self):
         """Start the scheduler"""
         if not self.is_running:
@@ -95,43 +154,518 @@ class DataScheduler:
     def stop(self):
         """Stop the scheduler gracefully"""
         if self.is_running:
+            logger.info("=" * 60)
+            logger.info("SHUTTING DOWN SCHEDULER")
+            
+            # Disconnect IBKR first (CRITICAL - must be before scheduler shutdown)
+            if self.ibkr_connected:
+                logger.info("Disconnecting IBKR...")
+                self._disconnect_ibkr()
+            
+            # Then shutdown scheduler
+            logger.info("Stopping scheduler...")
             self.scheduler.shutdown(wait=True)
             self.is_running = False
-            print("✓ Scheduler stopped")
-        
+            
+            logger.info("✓ Scheduler stopped cleanly")
+            logger.info("=" * 60)
+            
     def _create_jobs(self):
-            """Create scheduled jobs based on configuration"""
-            print(f"Creating scheduled jobs...")
+        """Create scheduled jobs based on configuration"""
+        print(f"Creating scheduled jobs...")
+        
+        # ===== IBKR REAL-TIME DATA SETUP =====
+        # This MUST come first to ensure market data is flowing
+        logger.info("Checking IBKR setup requirements...")
+        
+        # Only connect during market hours or test mode
+        should_connect_ibkr = self.test_mode or self._is_market_hours()
+        
+        if should_connect_ibkr:
+            logger.info("Market is open (or test mode) - setting up IBKR...")
             
-            # Schedule realtime options for critical API group
-            if 'critical' in self.api_groups:
-                self._schedule_realtime_options()
-            
-            # Schedule RSI indicators (NEW - Phase 5.1)
-            if 'indicators_fast' in self.api_groups:
-                self._schedule_rsi_indicators()
-                self._schedule_macd_indicators()
-                self._schedule_bbands_indicators() 
-                self._schedule_vwap_indicators()
-            
-            if 'indicators_slow' in self.api_groups:
-                self._schedule_adx_indicators()
-            
-            # Handle ATR in daily_volatility group
-            if 'daily_volatility' in self.api_groups:
-                self._schedule_adx_indicators() 
-
-            # Schedule daily historical options
-            if 'daily' in self.api_groups:
-                self._schedule_historical_options()
-            
-            print(f"  Created {self.jobs_created} jobs")
-            
-            # List all jobs
-            jobs = self.scheduler.get_jobs()
-            for job in jobs[:10]:  # Show first 10 jobs
-                print(f"    - {job.id}: {job.trigger}")
+            # Connect to IBKR
+            if self._connect_ibkr():
+                # Subscribe to market data
+                subscriptions = self._subscribe_ibkr_data()
+                
+                if subscriptions > 0:
+                    # Schedule connection monitoring
+                    self.scheduler.add_job(
+                        func=self._monitor_ibkr_connection,
+                        trigger='interval',
+                        seconds=30,
+                        id='ibkr_connection_monitor',
+                        name='IBKR Connection Monitor',
+                        replace_existing=True,
+                        max_instances=1
+                    )
+                    self.jobs_created += 1
+                    logger.info("✓ IBKR connection monitor scheduled (every 30s)")
                     
+                    # ===== BAR AGGREGATION JOB =====
+                    logger.info("Setting up bar aggregation...")
+                    
+                    # Create aggregator instance if not exists
+                    if not self.bar_aggregator:
+                        from src.data.bar_aggregator import BarAggregator
+                        self.bar_aggregator = BarAggregator()
+                    
+                    # Schedule aggregation every 60 seconds
+                    self.scheduler.add_job(
+                        func=self.bar_aggregator.run_aggregation,
+                        trigger='interval',
+                        seconds=60,
+                        id='bar_aggregation',
+                        name='IBKR Bar Aggregation',
+                        replace_existing=True,
+                        max_instances=1,
+                        misfire_grace_time=30
+                    )
+                    self.jobs_created += 1
+                    logger.info("✓ Bar aggregation scheduled (every 60s)")
+                else:
+                    logger.error("⚠️ No IBKR subscriptions created - check symbol configuration")
+            else:
+                logger.error("⚠️ IBKR connection failed - will retry at market open")
+        else:
+            logger.info("Market closed - IBKR connection will be established at market open")
+            
+            # Schedule market open connection
+            self.scheduler.add_job(
+                func=self._handle_market_open,
+                trigger='cron',
+                hour=9,
+                minute=25,  # 5 minutes before market open
+                id='ibkr_market_open',
+                name='IBKR Market Open Handler',
+                replace_existing=True
+            )
+            self.jobs_created += 1
+            logger.info("✓ IBKR market open handler scheduled for 9:25 AM ET")
+        
+        # ===== ALPHA VANTAGE SCHEDULING =====
+        # THIS MUST BE AT THE SAME LEVEL AS IBKR, NOT INSIDE ELSE!
+        
+        # Schedule realtime options for critical API group
+        if 'critical' in self.api_groups:
+            self._schedule_realtime_options()
+        
+        # Schedule RSI indicators
+        if 'indicators_fast' in self.api_groups:
+            self._schedule_rsi_indicators()
+            self._schedule_macd_indicators()
+            self._schedule_bbands_indicators() 
+            self._schedule_vwap_indicators()
+        
+        if 'indicators_slow' in self.api_groups:
+            self._schedule_adx_indicators()
+        
+        # Handle ATR in daily_volatility group
+        if 'daily_volatility' in self.api_groups:
+            self._schedule_atr_indicators()
+        
+        # Schedule daily historical options
+        if 'daily' in self.api_groups:
+            self._schedule_historical_options()
+        
+        print(f"  Created {self.jobs_created} jobs")
+        
+        # List all jobs
+        jobs = self.scheduler.get_jobs()
+        for job in jobs[:10]:  # Show first 10 jobs
+            print(f"    - {job.id}: {job.trigger}")
+
+    def _connect_ibkr(self):
+        """
+        Connect to IBKR TWS with production-grade error handling
+        
+        Returns:
+            bool: True if connection successful, False otherwise
+        
+        CRITICAL: This manages real money - connection must be stable
+        """
+        try:
+            logger.info("=" * 60)
+            logger.info("INITIATING IBKR TWS CONNECTION")
+            logger.info(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            logger.info(f"Test Mode: {self.test_mode}")
+            
+            # Import here to avoid circular dependency
+            from src.connections.ibkr_connection import IBKRConnectionManager
+            
+            # Create new connection instance
+            if self.ibkr_connection:
+                logger.warning("Existing IBKR connection found - cleaning up first")
+                self._disconnect_ibkr()
+            
+            self.ibkr_connection = IBKRConnectionManager()
+            
+            # Attempt connection with timeout
+            logger.info(f"Connecting to TWS at {self.ibkr_connection.host}:{self.ibkr_connection.port}")
+            
+            if self.ibkr_connection.connect_tws():
+                self.ibkr_connected = True
+                self.ibkr_reconnect_attempts = 0  # Reset counter on success
+                self.ibkr_last_heartbeat = datetime.now()
+                
+                logger.info("✅ IBKR TWS CONNECTION SUCCESSFUL")
+                logger.info(f"Client ID: {self.ibkr_connection.client_id}")
+                logger.info("=" * 60)
+                return True
+            else:
+                self.ibkr_connected = False
+                logger.error("❌ IBKR TWS CONNECTION FAILED")
+                logger.error("Possible causes:")
+                logger.error("  1. TWS not running")
+                logger.error("  2. API not enabled in TWS")
+                logger.error("  3. Port mismatch (check 7497 for paper)")
+                logger.error("  4. Another client using same ID")
+                logger.error("=" * 60)
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ CRITICAL ERROR connecting to IBKR: {e}")
+            logger.exception("Full traceback:")
+            self.ibkr_connected = False
+            return False
+
+    def _disconnect_ibkr(self):
+        """
+        Safely disconnect from IBKR TWS
+        
+        CRITICAL: Must cancel all subscriptions before disconnecting
+        """
+        if not self.ibkr_connection:
+            logger.info("No IBKR connection to disconnect")
+            return
+        
+        try:
+            logger.info("Disconnecting from IBKR TWS...")
+            
+            # First, cancel all active subscriptions
+            if self.ibkr_subscriptions:
+                logger.info(f"Cancelling {len(self.ibkr_subscriptions)} active subscriptions...")
+                
+                for req_id in list(self.ibkr_subscriptions.keys()):
+                    try:
+                        sub_info = self.ibkr_subscriptions[req_id]
+                        
+                        if 'quotes' in sub_info:
+                            self.ibkr_connection.cancelMktData(req_id)
+                            logger.debug(f"  Cancelled quotes for {sub_info}")
+                        elif 'bars' in sub_info:
+                            self.ibkr_connection.cancelRealTimeBars(req_id)
+                            logger.debug(f"  Cancelled bars for {sub_info}")
+                        
+                        del self.ibkr_subscriptions[req_id]
+                        
+                    except Exception as e:
+                        logger.error(f"  Error cancelling subscription {req_id}: {e}")
+                
+                # Give TWS time to process cancellations
+                time.sleep(1)
+            
+            # Now disconnect
+            self.ibkr_connection.disconnect_tws()
+            self.ibkr_connected = False
+            self.ibkr_connection = None
+            
+            logger.info("✅ IBKR TWS disconnected successfully")
+            
+        except Exception as e:
+            logger.error(f"Error during IBKR disconnection: {e}")
+            # Force cleanup
+            self.ibkr_connected = False
+            self.ibkr_connection = None
+
+    def _handle_market_open(self):
+        """
+        Handle market open - establish IBKR connection
+        
+        CRITICAL: Must be ready before 9:30 AM
+        """
+        logger.info("=" * 60)
+        logger.info(f"MARKET OPEN HANDLER - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        if self.ibkr_connected:
+            logger.info("IBKR already connected")
+        else:
+            logger.info("Establishing IBKR connection for market open...")
+            if self._connect_ibkr():
+                subscriptions = self._subscribe_ibkr_data()
+                if subscriptions > 0:
+                    logger.info(f"✅ READY FOR MARKET OPEN - {subscriptions} data feeds active")
+                else:
+                    logger.error("⚠️ WARNING: No data feeds active!")
+            else:
+                logger.error("❌ CRITICAL: Failed to connect for market open!")
+        
+        logger.info("=" * 60)
+
+    def _handle_market_close(self):
+        """
+        Handle market close - optional disconnect
+        
+        NOTE: Can maintain connection for after-hours data
+        """
+        logger.info("=" * 60)
+        logger.info(f"MARKET CLOSE HANDLER - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        # Decision: Keep connection for after-hours or disconnect?
+        # For now, keeping connection alive
+        if self.ibkr_connected:
+            active_subs = len(self.ibkr_subscriptions)
+            logger.info(f"Maintaining IBKR connection for after-hours")
+            logger.info(f"Active subscriptions: {active_subs}")
+        
+        logger.info("=" * 60)
+
+    def _subscribe_ibkr_data(self):
+        """
+        Subscribe to IBKR real-time data with tier-based differentiation
+        
+        PRODUCTION NOTES:
+        - Maximum 50 concurrent market data lines (IBKR limit)
+        - Tier A: Full data (quotes + all bar types)
+        - Tier B: Medium data (quotes + 1min bars)
+        - Tier C: Basic data (quotes only)
+        - Total usage: ~42 of 50 lines
+        
+        Returns:
+            int: Number of successful subscriptions
+        """
+        if not self.ibkr_connected or not self.ibkr_connection:
+            logger.error("Cannot subscribe - IBKR not connected")
+            return 0
+        
+        logger.info("=" * 60)
+        logger.info("SETTING UP IBKR MARKET DATA SUBSCRIPTIONS")
+        
+        # Get configuration for IBKR subscriptions (add to your config if not exists)
+        # This could be in schedules.yaml or a separate ibkr.yaml
+        ibkr_config = self.yaml_config.get('ibkr_subscriptions', {
+            'max_lines': 50,
+            'subscription_delay': 0.2,  # seconds between subscriptions
+            'symbol_delay': 0.5,  # seconds between symbols
+            'tier_config': {
+                'tier_a': {
+                    'quotes': True,
+                    'bar_sizes': ['5 secs', '1 min', '5 mins']
+                },
+                'tier_b': {
+                    'quotes': True,
+                    'bar_sizes': ['1 min']
+                },
+                'tier_c': {
+                    'quotes': True,
+                    'bar_sizes': []
+                }
+            }
+        })
+        
+        # Get symbols by tier
+        tier_a_symbols = self.tiers['tier_a']['symbols']
+        tier_b_symbols = self.tiers['tier_b']['symbols']
+        tier_c_symbols = self.tiers['tier_c']['symbols']
+        
+        # Calculate expected line usage
+        tier_a_lines = len(tier_a_symbols) * (1 + len(ibkr_config['tier_config']['tier_a']['bar_sizes']))
+        tier_b_lines = len(tier_b_symbols) * (1 + len(ibkr_config['tier_config']['tier_b']['bar_sizes']))
+        tier_c_lines = len(tier_c_symbols) * (1 + len(ibkr_config['tier_config']['tier_c']['bar_sizes']))
+        total_expected_lines = tier_a_lines + tier_b_lines + tier_c_lines
+        
+        # Log the subscription plan
+        logger.info(f"\nSubscription Plan:")
+        logger.info(f"  Tier A: {len(tier_a_symbols)} symbols × {1 + len(ibkr_config['tier_config']['tier_a']['bar_sizes'])} subscriptions = {tier_a_lines} lines")
+        logger.info(f"  Tier B: {len(tier_b_symbols)} symbols × {1 + len(ibkr_config['tier_config']['tier_b']['bar_sizes'])} subscriptions = {tier_b_lines} lines")
+        logger.info(f"  Tier C: {len(tier_c_symbols)} symbols × {1 + len(ibkr_config['tier_config']['tier_c']['bar_sizes'])} subscriptions = {tier_c_lines} lines")
+        logger.info(f"  Total: {total_expected_lines}/{ibkr_config['max_lines']} lines ({total_expected_lines*100/ibkr_config['max_lines']:.1f}% utilization)")
+        
+        if total_expected_lines > ibkr_config['max_lines']:
+            logger.warning(f"⚠️ Plan exceeds IBKR limit! {total_expected_lines} > {ibkr_config['max_lines']}")
+            logger.warning("Consider reducing symbols or data types")
+        
+        successful_subscriptions = 0
+        failed_subscriptions = []
+        subscription_delay = ibkr_config['subscription_delay']
+        symbol_delay = ibkr_config['symbol_delay']
+        
+        # Process each tier
+        tiers_to_process = [
+            ('tier_a', tier_a_symbols),
+            ('tier_b', tier_b_symbols),
+            ('tier_c', tier_c_symbols)
+        ]
+        
+        symbol_counter = 0
+        total_symbols = len(tier_a_symbols) + len(tier_b_symbols) + len(tier_c_symbols)
+        
+        for tier_name, tier_symbols in tiers_to_process:
+            tier_config = ibkr_config['tier_config'][tier_name]
+            
+            logger.info(f"\n{'='*40}")
+            logger.info(f"Processing {tier_name.upper()} ({len(tier_symbols)} symbols)")
+            logger.info(f"  Data: Quotes={tier_config['quotes']}, Bars={tier_config['bar_sizes']}")
+            
+            for symbol in tier_symbols:
+                if not symbol:  # Skip empty symbols
+                    continue
+                    
+                symbol_counter += 1
+                symbol_subscriptions = 0
+                
+                try:
+                    logger.info(f"\n[{symbol_counter}/{total_symbols}] {tier_name.upper()}: {symbol}")
+                    
+                    # Subscribe to quotes if configured
+                    if tier_config['quotes']:
+                        quote_req_id = self.ibkr_connection.get_quotes(symbol)
+                        if quote_req_id:
+                            self.ibkr_subscriptions[quote_req_id] = f"quotes_{symbol}"
+                            logger.info(f"  ✓ Quotes subscription ID: {quote_req_id}")
+                            successful_subscriptions += 1
+                            symbol_subscriptions += 1
+                        else:
+                            logger.error(f"  ✗ Failed to subscribe to quotes")
+                            failed_subscriptions.append(f"{symbol}_quotes")
+                        
+                        time.sleep(subscription_delay)
+                    
+                    # Subscribe to each configured bar size
+                    for bar_size in tier_config['bar_sizes']:
+                        try:
+                            # Create a clean label for the bar size
+                            bar_label = bar_size.replace(' ', '').replace('secs', 's').replace('mins', 'm').replace('min', 'm')
+                            
+                            bar_req_id = self.ibkr_connection.subscribe_bars(symbol, bar_size)
+                            if bar_req_id:
+                                self.ibkr_subscriptions[bar_req_id] = f"bars_{bar_label}_{symbol}"
+                                logger.info(f"  ✓ {bar_size} bars subscription ID: {bar_req_id}")
+                                successful_subscriptions += 1
+                                symbol_subscriptions += 1
+                            else:
+                                logger.error(f"  ✗ Failed to subscribe to {bar_size} bars")
+                                failed_subscriptions.append(f"{symbol}_{bar_size}_bars")
+                            
+                            time.sleep(subscription_delay)
+                            
+                        except Exception as e:
+                            logger.error(f"  ✗ Error subscribing to {bar_size} bars: {e}")
+                            failed_subscriptions.append(f"{symbol}_{bar_size}_bars")
+                    
+                    logger.info(f"  Summary: {symbol_subscriptions} subscriptions successful")
+                    
+                    # Delay between symbols
+                    if symbol_counter < total_symbols:
+                        time.sleep(symbol_delay)
+                        
+                except Exception as e:
+                    logger.error(f"ERROR processing {symbol}: {e}")
+                    failed_subscriptions.append(symbol)
+        
+        # Calculate final statistics
+        quotes_count = sum(1 for v in self.ibkr_subscriptions.values() if 'quotes' in v)
+        bars_5s_count = sum(1 for v in self.ibkr_subscriptions.values() if 'bars_5s' in v)
+        bars_1m_count = sum(1 for v in self.ibkr_subscriptions.values() if 'bars_1m' in v)
+        bars_5m_count = sum(1 for v in self.ibkr_subscriptions.values() if 'bars_5m' in v)
+        
+        # Summary report
+        logger.info("\n" + "=" * 60)
+        logger.info("SUBSCRIPTION SUMMARY")
+        logger.info("=" * 60)
+        logger.info(f"\nOverall Statistics:")
+        logger.info(f"  Total Symbols Processed: {symbol_counter}")
+        logger.info(f"  Successful Subscriptions: {successful_subscriptions}")
+        logger.info(f"  Failed Subscriptions: {len(failed_subscriptions)}")
+        logger.info(f"  Active Market Data Lines: {len(self.ibkr_subscriptions)}/{ibkr_config['max_lines']}")
+        logger.info(f"  Utilization: {len(self.ibkr_subscriptions)*100/ibkr_config['max_lines']:.1f}%")
+        
+        logger.info(f"\nSubscription Breakdown:")
+        logger.info(f"  Quotes: {quotes_count} symbols")
+        logger.info(f"  5-second bars: {bars_5s_count} symbols")
+        logger.info(f"  1-minute bars: {bars_1m_count} symbols")
+        logger.info(f"  5-minute bars: {bars_5m_count} symbols")
+        
+        logger.info(f"\nTier Summary:")
+        tier_a_subs = sum(1 for v in self.ibkr_subscriptions.values() if any(s in v for s in tier_a_symbols))
+        tier_b_subs = sum(1 for v in self.ibkr_subscriptions.values() if any(s in v for s in tier_b_symbols))
+        tier_c_subs = sum(1 for v in self.ibkr_subscriptions.values() if any(s in v for s in tier_c_symbols))
+        logger.info(f"  Tier A subscriptions: {tier_a_subs}")
+        logger.info(f"  Tier B subscriptions: {tier_b_subs}")
+        logger.info(f"  Tier C subscriptions: {tier_c_subs}")
+        
+        if failed_subscriptions:
+            logger.warning(f"\nFailed Subscriptions ({len(failed_subscriptions)}):")
+            for failed in failed_subscriptions[:10]:  # Show first 10
+                logger.warning(f"  - {failed}")
+            if len(failed_subscriptions) > 10:
+                logger.warning(f"  ... and {len(failed_subscriptions) - 10} more")
+        
+        logger.info("=" * 60)
+        
+        return successful_subscriptions
+
+    def _monitor_ibkr_connection(self):
+        """
+        Monitor IBKR connection health and reconnect if needed
+        
+        CRITICAL: This prevents data loss from connection drops
+        Runs every 30 seconds during market hours
+        """
+        try:
+            current_time = datetime.now()
+            
+            # Skip if market is closed (unless test mode)
+            if not self.test_mode and not self._is_market_hours():
+                return
+            
+            # Check if we should have a connection
+            if not self.ibkr_connection:
+                logger.warning("IBKR connection object is None - attempting connection")
+                if self._connect_ibkr():
+                    self._subscribe_ibkr_data()
+                return
+            
+            # Check connection health
+            if not self.ibkr_connection.connected:
+                logger.error(f"🚨 IBKR CONNECTION LOST at {current_time.strftime('%H:%M:%S')}")
+                
+                # Check reconnection attempts
+                if self.ibkr_reconnect_attempts >= self.max_reconnect_attempts:
+                    logger.error(f"MAX RECONNECTION ATTEMPTS ({self.max_reconnect_attempts}) REACHED")
+                    logger.error("Manual intervention required!")
+                    # Could send alert here
+                    return
+                
+                self.ibkr_reconnect_attempts += 1
+                logger.info(f"Reconnection attempt {self.ibkr_reconnect_attempts}/{self.max_reconnect_attempts}")
+                
+                # Wait with exponential backoff
+                wait_time = min(2 ** self.ibkr_reconnect_attempts, 30)  # Max 30 seconds
+                logger.info(f"Waiting {wait_time} seconds before reconnection...")
+                time.sleep(wait_time)
+                
+                # Try to reconnect
+                if self._connect_ibkr():
+                    logger.info("✅ Reconnection successful!")
+                    # Resubscribe to all data
+                    self._subscribe_ibkr_data()
+                else:
+                    logger.error("❌ Reconnection failed")
+            else:
+                # Connection is healthy
+                self.ibkr_last_heartbeat = current_time
+                
+                # Log status every 5 minutes
+                if current_time.minute % 5 == 0 and current_time.second < 30:
+                    active_subs = len(self.ibkr_subscriptions)
+                    logger.info(f"[IBKR Health] Connected | {active_subs} subscriptions | Last HB: {current_time.strftime('%H:%M:%S')}")
+                    
+        except Exception as e:
+            logger.error(f"ERROR in IBKR connection monitor: {e}")
+            logger.exception("Full traceback:")
+
     def _schedule_realtime_options(self):
         """Schedule realtime options data collection"""
         critical_config = self.api_groups['critical']
@@ -729,6 +1263,8 @@ class DataScheduler:
         Called by scheduler for each symbol
         Phase 5.1: Technical indicator scheduling
         """
+        logger.error(f"!!! _fetch_rsi START: symbol={symbol}, interval={interval}, time_period={time_period}")
+
         try:
             # Check if market is open
             if not self._is_market_hours():
