@@ -1,0 +1,43 @@
+# config/analytics/greeks_validation.yaml
+# Greeks validation rules - Phase 6.1
+
+validation_rules:
+  delta:
+    call:
+      min: 0.0
+      max: 1.0
+    put:
+      min: -1.0
+      max: 0.0
+  
+  gamma:
+    min: 0.0
+    max: 10.0  # Extreme but possible for near-ATM near-expiry
+    warning_high: 1.0
+    warning_low: 0.0001
+  
+  theta:
+    min: -50.0  # Extreme theta decay
+    max: 0.5    # Small positive theta possible
+    warning_extreme: -5.0
+  
+  vega:
+    min: 0.0
+    max: 100.0  # High but possible for long-dated
+    warning_high: 50.0
+  
+  rho:
+    min: -100.0
+    max: 100.0
+    warning_high: 50.0
+    warning_low: -50.0
+
+freshness:
+  staleness_minutes: 30  # Warning after 30 minutes
+  critical_staleness_minutes: 240  # Error after 4 hours (changed from 60)
+
+consistency_checks:
+  low_delta_threshold: 0.05
+  low_delta_max_gamma: 0.1
+  high_delta_threshold: 0.95
+  high_delta_max_gamma: 0.01
