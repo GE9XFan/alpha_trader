@@ -1,5 +1,5 @@
 # SSOT-Ops.md – Operational Specification
-**Version:** 2.0 (Updated for Skeleton-First, API-Driven Development)  
+**Version:** 3.0 (Updated for Batch Implementation & Institutional Analytics)  
 **Last Updated:** Current  
 **Audience:** Operations, PM, On-call Staff  
 **Purpose:** Defines **what** the production options trading system must do, **when**, and under what conditions.  
@@ -11,16 +11,19 @@
 ## **1. Introduction & Scope**
 
 ### **1.1 System Type & Platform**
-- **System Type:** Automated Options Trading System – Real Money  
+- **System Type:** Institutional-Grade Automated Options Trading System – Real Money  
 - **Platform:** MacBook Pro (macOS) – Single Instance  
-- **Development Approach:** Skeleton-First, API-Driven, Configuration-Based
+- **Development Approach:** Batch Implementation, API-Driven, Configuration-Based
+- **Analytics Level:** Hedge Fund Quality with Microstructure & Quant Features
 
-### **1.2 Version 2.0 Changes**
-- **IBKR provides ALL intraday pricing** (not Alpha Vantage)
-- **Skeleton-first development** for clear dependencies
-- **API-driven schema evolution** based on actual responses
-- **Configuration-driven architecture** with no hardcoded values
-- **Incremental testing** of each API before proceeding
+### **1.2 Version 3.0 Changes**
+- **Batch API Implementation:** ALL 41 Alpha Vantage APIs implemented together (not incrementally)
+- **IBKR 5-Second Bars Only:** All other timeframes mathematically aggregated
+- **Institutional Analytics Added:** VPIN, GEX, microstructure, market profile
+- **200+ ML Features:** Comprehensive quant-style feature engineering
+- **Advanced ML Models:** LSTM/GRU/Transformer architectures included
+- **Professional Backtesting:** Walk-forward analysis, purged CV standard
+- **Compressed Timeline:** 87 days to production (vs 107 in v2.0)
 
 ### **1.3 MVP Scope**
 - **Tier A Symbols:** `SPY, QQQ, IWM, SPX`  
@@ -31,71 +34,78 @@
   - 1DTE  
   - 14DTE Swing  
   - MOC Imbalance  
-- **Publishing:** Discord webhooks only (Twitter/X, WHOP stubs for future)  
-- **Capital & Risk Defaults:** Fully configurable via YAML files
+- **Publishing:** Discord webhooks, Dashboard API, Educational content (10+ pieces daily)
+- **Analytics:** Institutional-grade with VPIN, GEX, microstructure analysis
+- **Capital & Risk:** Fully configurable via YAML files
 
 ### **1.4 Out of Scope (Phase 2)**
-- Complex ML model training
+- Complex ML model retraining (models are walk-forward tested but not retrained live)
 - Twitter/X automation
 - WHOP integration
-- Advanced dashboard visualizations
 - Multi-account support
 - Pairs trading
 - Crypto integration
+- Additional brokers
 
 ### **1.5 Scope Creep Prevention**
 Do **NOT** add:
 - New strategies without full test cycle
 - Additional symbols beyond initial set
-- Complex UI features
-- Automated model retraining
-- High-frequency trading features
-- Additional brokers
+- Complex UI features beyond dashboard
+- Automated model retraining in production
+- High-frequency trading features (sub-second)
+- Additional data sources
 - Hardcoded configuration values
 
 ---
 
 ## **2. System Overview & Data Architecture**
 
-### **2.1 Data Source Division (UPDATED)**
+### **2.1 Data Source Division (CRITICAL UPDATE)**
 <!-- START: DO NOT EDIT -->
 **IBKR Provides:**
-- **ALL Real-time Pricing:** 1s, 5s, 1m, 5m, 15m, 30m, 1h bars
+- **5-Second Bars ONLY:** All other timeframes (1m, 5m, 10m, 15m, 30m, 1h) are mathematically aggregated
 - Real-time quotes: bid/ask/last with sizes
 - MOC Imbalance feed: NYSE/NASDAQ, 15:40–15:55 ET
 - Trade execution via TWS API
 - Position monitoring and fill confirmation
 - Portfolio state and P&L tracking
 
-**Alpha Vantage Provides (43 APIs):**
+**Alpha Vantage Provides (41 APIs):**
 - Real-time options chains with Greeks (Δ, Γ, Θ, Vega, Rho) - **PRIMARY GREEKS SOURCE**
-- All technical indicators (RSI, MACD, BBANDS, ATR, ADX, VWAP, and 10 more)
+- 16 technical indicators (RSI, MACD, BBANDS, ATR, ADX, VWAP, and 10 more)
 - Advanced analytics: `ANALYTICS_FIXED_WINDOW`, `ANALYTICS_SLIDING_WINDOW`
 - Historical options data for backtesting
-- Fundamentals (11 APIs): Overview, Earnings, Statements, Dividends, Splits
+- Fundamentals (10 APIs): Overview, Earnings, Statements, Dividends, Splits
 - Economic indicators (5 APIs): Treasury Yield, Fed Funds, CPI, Inflation, GDP
 - News sentiment analysis (3 APIs): News Sentiment, Top Gainers/Losers, Insider Transactions
 <!-- END: DO NOT EDIT -->
 
-### **2.2 Core System Flow (UPDATED)**
+### **2.2 Core System Flow with Institutional Analytics**
 <!-- START: DO NOT EDIT -->
-[IBKR Real-time Pricing] + [Alpha Vantage Greeks] + [Alpha Vantage Indicators]
+[IBKR 5-sec Bars] → [Bar Aggregator] → [All Timeframes]
                             ↓
-                    [Data Ingestion & Validation]
+[Alpha Vantage Greeks + Indicators] → [Data Ingestion & Validation]
                             ↓
-                    [ML Feature Engineering]
+                    [Institutional Analytics Engine]
+                    - VPIN Calculation
+                    - GEX Analysis
+                    - Microstructure Metrics
+                    - Market Profile
                             ↓
-                    [ML Models Prediction]
+                    [ML Feature Engineering (200+ features)]
+                            ↓
+                    [ML Models (LSTM/GRU/XGBoost)]
                             ↓
                     [Decision Engine] ← [Strategy Rules from Config]
                             ↓
-                    [Risk Management Check]
+                    [Risk Management (VaR/CVaR)]
                             ↓
                     [IBKR Execution]
                             ↓
                     [Position Monitoring]
                             ↓
-                    [Community Publishing]
+                    [Community Publishing & Education]
 <!-- END: DO NOT EDIT -->
 
 ### **2.3 Configuration-Driven Architecture**
@@ -104,119 +114,142 @@ All operational parameters are externalized to configuration files:
 - **API Settings:** Endpoints, rate limits, retry policies
 - **Data Management:** Symbols, schedules, validation rules
 - **Strategy Parameters:** Entry/exit rules, confidence thresholds
-- **Risk Limits:** Position and portfolio constraints
-- **ML Settings:** Model paths, feature specs, thresholds
+- **Risk Limits:** Position and portfolio constraints with VaR/CVaR
+- **ML Settings:** Model paths, feature specs, thresholds, backtesting params
 - **Execution Rules:** Trading hours, order types, slippage
-- **Monitoring:** Alert thresholds, webhook URLs
+- **Monitoring:** Alert thresholds, webhook URLs, drift detection
+- **Analytics:** VPIN params, GEX calculations, microstructure settings
 
 ---
 
 ## **3. Development & Implementation Procedures**
 
-### **3.1 Skeleton-First Development Process**
+### **3.1 Batch Implementation Process (NEW)**
 <!-- START: DO NOT EDIT -->
-1. Create all module files with empty classes/methods
-2. Establish import structure and dependencies
-3. Verify no circular dependencies exist
-4. Implement base classes for inheritance
-5. Add configuration loading to each module
-6. Test module initialization without functionality
-7. Document interfaces between modules
-8. Commit skeleton to version control
+**Phase 0 (Days 1-2): Foundation**
+1. Create complete project structure
+2. Install all dependencies
+3. Set up configuration system
+4. Initialize database and Redis
+5. Create base logger
+
+**Phase 1 (Days 3-8): ALL 41 Alpha Vantage APIs**
+1. Test ALL APIs with comprehensive script
+2. Document ALL response structures
+3. Design complete database schema
+4. Create ALL tables at once
+5. Implement ALL client methods
+6. Build complete ingestion pipeline
+7. Test entire AV ecosystem
+
+**Phase 2 (Days 9-14): Complete IBKR Implementation**
+1. Test 5-second bar feed
+2. Implement bar aggregation to all timeframes
+3. Create IBKR database schema
+4. Build real-time data pipeline
+5. Test MOC imbalance feed
+6. Validate aggregation accuracy
 <!-- END: DO NOT EDIT -->
 
-### **3.2 API Implementation Process (Per API)**
+### **3.2 API Testing Protocol (Batch Approach)**
 <!-- START: DO NOT EDIT -->
-For each of the 43 Alpha Vantage APIs and IBKR data feeds:
+For ALL 41 Alpha Vantage APIs simultaneously:
 
 **Discovery Phase:**
-1. Read API documentation thoroughly
-2. Make test call with real symbol (e.g., SPY)
-3. Save complete response to JSON file
-4. Analyze response structure and data types
-5. Document actual rate limits observed
-6. Note any special parameters or quirks
+1. Create comprehensive test script for all APIs
+2. Make test calls with multiple symbols
+3. Save ALL responses to JSON files
+4. Analyze response structures collectively
+5. Document rate limits and quirks
+6. Design unified database schema
 
 **Implementation Phase:**
-1. Create API method in appropriate client
-2. Add configuration to config/apis/
-3. Implement error handling and retry logic
-4. Test with multiple symbols and edge cases
+1. Create ALL API methods in av_client.py
+2. Configure ALL endpoints in config/apis/
+3. Implement unified error handling
+4. Test with multiple symbols concurrently
 
-**Schema Evolution:**
-1. Design table schema based on actual response
-2. Create migration script for new table
-3. Run migration to create table
-4. Create indexes for expected query patterns
+**Schema Creation:**
+1. Design complete schema based on ALL responses
+2. Create ALL tables in single migration
+3. Build comprehensive indexes
+4. Optimize for expected query patterns
 
 **Ingestion Phase:**
-1. Implement ingestion method for this API
-2. Add data validation rules
-3. Implement normalization if needed
-4. Test data persistence to database
-5. Verify data retrieval works correctly
-
-**Integration Phase:**
-1. Add to scheduler if recurring calls needed
-2. Configure rate limiting parameters
-3. Update documentation with findings
-4. Commit code with comprehensive tests
+1. Implement ALL ingestion methods
+2. Add unified validation framework
+3. Test complete pipeline end-to-end
+4. Verify data persistence for all APIs
 <!-- END: DO NOT EDIT -->
 
 ### **3.3 Daily Operational Procedures**
 
 #### **3.3.1 Pre-Market Checklist (Before 9:00 AM ET)**
 - Verify IBKR connection active
-- Check Alpha Vantage API key valid
+- Check 5-second bar aggregation working
+- Confirm Alpha Vantage API key valid
 - Review overnight position changes
 - Check earnings calendar for holdings
 - Verify risk parameters loaded from config
+- Confirm VPIN/GEX calculations ready
 - Clear stale cache entries
 - Backup database
 - Start monitoring dashboard
 - Review any overnight alerts
+- Check ML model drift metrics
 
 #### **3.3.2 Market Open Procedures (9:30 AM ET)**
 - Enable trading for all strategies
 - Verify data feeds operational
 - Check initial Greeks validation
+- Confirm bar aggregation accurate
+- Monitor first VPIN calculation
+- Update GEX levels
 - Monitor first decision cycle
 - Verify Discord webhook active
+- Check educational content scheduled
 
 #### **3.3.3 Intraday Monitoring**
 - **Every 5 minutes:**
   - Check portfolio Greeks
   - Verify API usage < 500/min
   - Monitor cache hit rate
+  - Update VPIN metrics
+  - Calculate current GEX
 - **Every 30 minutes:**
   - Review decision quality scores
-  - Check for rejected trades
+  - Check ML model confidence
   - Monitor position P&L
+  - Update VaR calculations
+  - Review microstructure metrics
 - **3:40 PM:** Begin MOC imbalance monitoring
 - **3:50 PM:** Final MOC decision window
 
 #### **3.3.4 Market Close Procedures (4:00 PM ET)**
 - Close all 0DTE positions by 3:30 PM
 - Final MOC execution by 3:55 PM
-- Archive trade data
-- Generate daily performance report
+- Archive trade data with full context
+- Generate daily performance report with SHAP values
+- Calculate final VaR/CVaR metrics
 - Check tomorrow's earnings calendar
 - Run database backup
 - Review error logs
 - Update configuration if needed
+- Generate educational content for distribution
 
 ### **3.4 Emergency Procedures**
 
 #### **3.4.1 Market Crisis Response**
-1. **Detection:** VIX > 40 or SPY down > 3%
+1. **Detection:** VIX > 40 or SPY down > 3% or VPIN > threshold
 2. **Actions:**
    - Hit emergency stop button
    - Close all positions immediately
    - Disable new trade generation
    - Set system to monitor-only mode
+   - Review GEX levels for support
    - Manually manage remaining positions
 3. **Documentation:** Log all actions taken
-4. **Recovery:** Only resume after volatility normalizes
+4. **Recovery:** Only resume after volatility normalizes and VPIN < threshold
 
 #### **3.4.2 System Failure Response**
 1. **Detection:** Any critical module failure
@@ -225,6 +258,7 @@ For each of the 43 Alpha Vantage APIs and IBKR data feeds:
    - Log into IBKR TWS directly
    - Manually manage positions
    - Diagnose issue offline
+   - Check bar aggregation status
 3. **Recovery:** Only restart after fix verified in paper mode
 
 #### **3.4.3 API Failure Response**
@@ -236,6 +270,10 @@ For each of the 43 Alpha Vantage APIs and IBKR data feeds:
    - Attempt reconnection with exponential backoff
    - Alert immediately via Discord
    - Switch to manual trading if down > 5 minutes
+3. **Bar Aggregation Failure:**
+   - Log missing bars
+   - Use last valid aggregated bars
+   - Alert if gap > 1 minute
 
 ---
 
@@ -246,44 +284,48 @@ For each of the 43 Alpha Vantage APIs and IBKR data feeds:
 - **Token Bucket:** 10 tokens/second refill rate
 - **Burst Capacity:** 20 tokens maximum
 - **IBKR Subscriptions:** Maximum 50 concurrent
-- **Priority Order:** Positions > Tier A > Tier B > MOC > Tier C
+- **Priority Order:** Positions > Greeks > Tier A > Tier B > MOC > Tier C
 
-### **4.2 Polling Schedules (Configurable)**
+### **4.2 Data Collection Schedules**
 All schedules defined in `config/data/schedules.yaml`:
 
-**Tier A (SPY, QQQ, IWM, SPX):**
-- Options with Greeks: Every 12 seconds
+**IBKR Real-Time (Continuous):**
+- 5-second bars: Streaming for all active symbols
+- Aggregation: Real-time to 1m, 5m, 10m, 15m, 30m, 1h
+- Quotes: Tick-by-tick for positions
+- MOC Imbalance: 5-second updates (3:40-3:55 PM)
+
+**Alpha Vantage - Tier A (SPY, QQQ, IWM, SPX):**
+- Options with Greeks: Every 30 seconds
 - RSI, MACD, BBANDS, VWAP: Every 60 seconds
 - ATR, ADX: Every 5 minutes
 - Analytics: Every 5 minutes
 
-**Tier B (MAG7 Stocks):**
+**Alpha Vantage - Tier B (MAG7 Stocks):**
 - Options with Greeks: Every 45 seconds
 - Core indicators: Every 5 minutes
 - Analytics: Every 15 minutes
 
-**Tier C (Watchlist):**
+**Alpha Vantage - Tier C (Watchlist):**
 - Options with Greeks: Every 3 minutes
 - Indicator bundle: Every 10 minutes
 
-**MOC Window (3:40-3:55 PM):**
-- Elevate relevant symbols to 5-second updates
-- Increase IBKR subscription priority
-
 ### **4.3 API Call Budget**
 ```
-Tier A: ~240 calls/minute (4 symbols × 60 calls)
-Tier B: ~105 calls/minute (7 symbols × 15 calls)
-Tier C: ~30 calls/minute (variable)
-Other: ~25 calls/minute (news, fundamentals, economic)
-Total: ~400 calls/minute (200 call buffer remaining)
+IBKR: Unlimited 5-second bars (subscription based)
+Alpha Vantage Budget:
+  Tier A: ~240 calls/minute (4 symbols × 60 calls)
+  Tier B: ~105 calls/minute (7 symbols × 15 calls)
+  Tier C: ~30 calls/minute (variable)
+  Other: ~25 calls/minute (news, fundamentals, economic)
+  Total: ~400 calls/minute (200 call buffer remaining)
 ```
 
 ---
 
 ## **5. Risk & Performance Gates**
 
-### **5.1 Configuration-Based Risk Limits**
+### **5.1 Institutional Risk Metrics**
 All limits defined in `config/risk/` directory:
 
 **Position-Level Limits:**
@@ -292,6 +334,7 @@ All limits defined in `config/risk/` directory:
 - Max Gamma: 0.20 (configurable)
 - Max Vega: 200 (configurable)
 - Min Theta Ratio: 0.02 (configurable)
+- Max position VaR (95%): 5% of portfolio
 
 **Portfolio-Level Limits:**
 - Max Net Delta: 0.30
@@ -299,43 +342,86 @@ All limits defined in `config/risk/` directory:
 - Max Net Vega: 1000
 - Max Net Theta: -500
 - Max Capital at Risk: 20%
+- Portfolio VaR (95%): 10%
+- Portfolio CVaR (95%): 15%
+
+**Microstructure Limits:**
+- Max VPIN: 0.6 (high toxicity threshold)
+- Min liquidity score: 0.4
+- Max bid-ask spread: 0.5% (for entry)
 
 **Circuit Breakers:**
 - Daily Loss: 2% (triggers halt)
 - Weekly Loss: 5% (triggers review)
 - Max Drawdown: 10% (triggers shutdown)
+- VPIN > 0.7: Emergency close all
+- Model confidence < 0.3: Halt new trades
 
 ### **5.2 Performance Targets**
 
 #### **5.2.1 System Performance**
 | Metric | Target | Maximum | Test Method |
 |--------|--------|---------|-------------|
+| 5-sec bar latency | < 100ms | 200ms | Time from IBKR to storage |
+| Bar aggregation | < 50ms | 100ms | 5-sec to 1-min conversion |
 | Decision Latency | < 1s | 2s | Time from data to decision |
 | Order Submission | < 500ms | 1s | Decision to IBKR |
 | Greeks Validation | < 100ms | 200ms | Validation cycle time |
+| VPIN Calculation | < 200ms | 500ms | Per symbol calculation |
+| GEX Calculation | < 500ms | 1s | Full chain analysis |
+| Feature Generation | < 500ms | 1s | 200+ features per symbol |
+| ML Prediction | < 200ms | 500ms | Model inference time |
 | Database Query | < 100ms | 500ms | Complex query benchmark |
 | Cache Retrieval | < 10ms | 50ms | Redis GET operation |
-| API Response | < 2s | 5s | Alpha Vantage call |
 
-#### **5.2.2 Trading Performance (Paper Mode)**
+#### **5.2.2 Trading Performance (Paper Mode Minimum)**
 | Metric | Minimum | Target | Excellent |
 |--------|---------|--------|-----------|
 | Win Rate | 45% | 55% | 65% |
 | Profit Factor | 1.2 | 1.5 | 2.0 |
 | Sharpe Ratio | 1.0 | 1.5 | 2.0 |
+| Sortino Ratio | 1.5 | 2.0 | 3.0 |
+| Calmar Ratio | 1.0 | 1.5 | 2.5 |
 | Max Drawdown | 15% | 10% | 5% |
 | Daily VaR (95%) | 3% | 2% | 1% |
+| Information Ratio | 0.5 | 1.0 | 1.5 |
+
+#### **5.2.3 ML Model Performance**
+| Metric | Minimum | Target | Excellent |
+|--------|---------|--------|-----------|
+| Prediction Accuracy | 55% | 60% | 65% |
+| Precision | 60% | 65% | 70% |
+| F1 Score | 0.55 | 0.60 | 0.65 |
+| AUC-ROC | 0.60 | 0.65 | 0.70 |
+| Feature Importance Stability | 70% | 80% | 90% |
+| Model Confidence Average | 0.6 | 0.7 | 0.8 |
 
 ### **5.3 Go/No-Go Production Criteria**
 Must **ALL** be true before production deployment:
 
-**Technical Requirements:**
-- [ ] All module skeletons implemented and tested
-- [ ] All 43 Alpha Vantage APIs working
-- [ ] IBKR real-time data stable for 5 days
+**Data Infrastructure:**
+- [ ] All 41 Alpha Vantage APIs operational
+- [ ] IBKR 5-second bars streaming reliably
+- [ ] Bar aggregation accurate to all timeframes
+- [ ] Complete database schema implemented
 - [ ] Rate limiting never exceeded in testing
 - [ ] All configurations externalized to YAML
-- [ ] Schema matches all API responses exactly
+
+**Analytics Requirements:**
+- [ ] VPIN calculations validated
+- [ ] GEX analysis operational
+- [ ] Market profile generation working
+- [ ] 200+ features generated per symbol
+- [ ] Feature importance analysis complete
+- [ ] Microstructure metrics accurate
+
+**ML Requirements:**
+- [ ] All models (XGBoost, LSTM, GRU) operational
+- [ ] Walk-forward backtesting complete
+- [ ] SHAP values generating correctly
+- [ ] Model confidence scores calibrated
+- [ ] Prediction accuracy > 55%
+- [ ] Model drift detection active
 
 **Operational Requirements:**
 - [ ] 5+ consecutive days successful paper trading
@@ -343,14 +429,17 @@ Must **ALL** be true before production deployment:
 - [ ] All circuit breakers tested and working
 - [ ] Emergency stop procedure validated
 - [ ] Backup and recovery procedures tested
+- [ ] Educational content pipeline active
 - [ ] Documentation complete and current
 
 **Risk Management:**
 - [ ] Greeks validation catching bad data
 - [ ] Position limits enforced correctly
 - [ ] Portfolio limits working
+- [ ] VaR/CVaR calculations accurate
 - [ ] Stop losses executing properly
 - [ ] Daily loss breaker tested
+- [ ] VPIN threshold triggers tested
 - [ ] Manual override procedures working
 
 ---
@@ -360,7 +449,8 @@ Must **ALL** be true before production deployment:
 ### **6.1 Connection Failures**
 | Failure | Detection Method | Recovery Action | Testing Method |
 |---------|-----------------|-----------------|----------------|
-| IBKR Disconnect | No heartbeat 10s | Reconnect with exponential backoff | Kill TWS process |
+| IBKR Disconnect | No 5-sec bars for 10s | Reconnect with exponential backoff | Kill TWS process |
+| Bar Aggregation Fail | Missing timeframes | Use last valid bars, alert | Stop aggregator |
 | AV API Down | HTTP 500/503 errors | Use cached data (max 30s old) | Block API endpoint |
 | Database Down | Connection timeout | Queue writes to Redis | Stop PostgreSQL |
 | Redis Down | Connection refused | Continue without cache | Stop Redis service |
@@ -370,10 +460,12 @@ Must **ALL** be true before production deployment:
 | Failure | Detection Method | Recovery Action | Testing Method |
 |---------|-----------------|-----------------|----------------|
 | Stale Greeks | Age > 30 seconds | Halt new trades, use last valid | Delay API response |
+| Bar Gap | Missing 5-sec bars | Interpolate or use last valid | Skip bars in stream |
 | Price Divergence | IBKR/cached > 0.5% | Use IBKR, log for investigation | Inject divergent prices |
 | Missing Indicators | Null values in response | Skip signal, retry next cycle | Delete from cache |
 | Invalid Greeks | Outside valid bounds | Reject entire chain | Inject invalid values |
-| Incomplete Data | Missing required fields | Use previous valid data | Corrupt API response |
+| VPIN Spike | VPIN > 0.7 | Emergency close positions | Inject toxic flow |
+| Feature NaN | Missing ML features | Use feature median, alert | Corrupt feature data |
 
 ### **6.3 Execution Failures**
 | Failure | Detection Method | Recovery Action | Testing Method |
@@ -386,15 +478,16 @@ Must **ALL** be true before production deployment:
 
 ---
 
-## **7. Strategy Operational Specs**
+## **7. Strategy Operational Specs with Institutional Analytics**
 
 ### **7.1 0DTE Strategy Operations**
 **Entry Window:** 09:45 - 14:00 ET  
 **Auto-Close:** 15:30 ET  
 **Max Positions:** 3 concurrent  
-**Confidence Required:** ≥ 0.75  
+**ML Confidence Required:** ≥ 0.75  
+**VPIN Threshold:** < 0.5  
 
-**Operational Rules (from config):**
+**Entry Requirements (from config):**
 - RSI between 30-70
 - Delta between 0.25-0.75
 - Gamma < 0.20
@@ -402,33 +495,45 @@ Must **ALL** be true before production deployment:
 - IV percentile > 20
 - Volume ≥ 0.5× average
 - Bid-ask spread < 0.10
+- GEX support/resistance identified
+- Market profile value area check
+- Microstructure score > 0.6
 
 **Monitoring Requirements:**
 - Check Greeks every 30 seconds
+- Update VPIN every minute
+- Monitor GEX levels continuously
 - Update stop loss if profitable
-- Close if confidence drops below 0.60
+- Close if ML confidence drops below 0.60
+- Emergency exit if VPIN > 0.6
 
 ### **7.2 1DTE Strategy Operations**
 **Entry Window:** 09:45 - 15:00 ET  
 **Hold Overnight:** Yes  
 **Max Positions:** 5 concurrent  
-**Confidence Required:** ≥ 0.70  
+**ML Confidence Required:** ≥ 0.70  
+**VPIN Threshold:** < 0.55  
 
 **Operational Differences from 0DTE:**
 - Wider delta range: 0.20-0.80
 - Lower theta ratio acceptable: 0.02
 - Can hold overnight with hedging
+- Check overnight GEX shifts
+- Review next day's economic calendar
 
 ### **7.3 14DTE Swing Operations**
 **Entry:** Any time during market hours  
 **Hold Period:** 1-14 days  
 **Max Positions:** 10 concurrent  
-**Confidence Required:** ≥ 0.65  
+**ML Confidence Required:** ≥ 0.65  
+**Regime Alignment:** Required  
 
 **Daily Review Requirements:**
 - Check fundamentals for changes
 - Review upcoming earnings
 - Adjust stops based on volatility
+- Monitor regime shifts
+- Update position VaR
 - Consider rolling if profitable
 
 ### **7.4 MOC Imbalance Operations**
@@ -436,122 +541,156 @@ Must **ALL** be true before production deployment:
 **Decision Time:** By 15:50 ET  
 **Execution:** 15:50 - 15:55 ET  
 **Min Imbalance:** $10M normalized  
+**VPIN Override:** Can trade if VPIN < 0.7  
 
 **Operational Process:**
 1. Begin monitoring at 15:40
 2. Calculate normalized imbalance
 3. Check option setup feasibility
-4. Score opportunity
-5. Execute if score ≥ 0.70
-6. Use straddle if IV low, directional if high
+4. Review closing auction liquidity
+5. Calculate expected slippage
+6. Score opportunity with ML
+7. Execute if score ≥ 0.70
+8. Use straddle if IV low, directional if high
 
 ---
 
 ## **8. Testing & Verification Procedures**
 
-### **8.1 API Testing Protocol**
-Each API must pass these tests before integration:
+### **8.1 Batch API Testing Protocol**
+ALL 41 APIs must pass these tests simultaneously:
 
 1. **Functional Testing:**
-   - Successful call with valid symbol
-   - Correct response parsing
-   - Proper error handling
-   - Retry logic working
+   - Successful calls for all APIs
+   - Correct response parsing for all
+   - Unified error handling working
+   - Retry logic functioning
 
 2. **Rate Limit Testing:**
-   - Stays within limits under load
+   - Combined load stays < 500/min
    - Token bucket prevents bursts
+   - Priority system working
    - Graceful degradation
 
 3. **Data Quality Testing:**
-   - Response matches expected schema
-   - Data types are correct
+   - All responses match schemas
+   - Data types correct across APIs
    - Values within reasonable ranges
-   - Timestamps are valid
+   - Timestamps synchronized
 
 4. **Persistence Testing:**
-   - Data saves to correct table
-   - Indexes work efficiently
-   - Retrieval queries perform well
-   - Cache operations work
+   - All data saves correctly
+   - Indexes perform well
+   - Queries optimized
+   - Cache operations efficient
 
-### **8.2 Integration Testing Requirements**
+### **8.2 Bar Aggregation Testing**
 
-**Phase 1: Skeleton Testing**
-- All modules initialize without errors
-- Dependencies resolve correctly
-- Configuration loads properly
-- No circular imports
+**Accuracy Testing:**
+- 5-sec to 1-min aggregation exact
+- OHLC values correct
+- Volume sums accurate
+- VWAP calculations verified
 
-**Phase 2: API Integration Testing**
-- Each API integrates with ingestion
-- Data flows to database correctly
-- Cache layer works as expected
-- Scheduler triggers appropriately
+**Performance Testing:**
+- Aggregation < 50ms per symbol
+- No data loss under load
+- Memory usage stable
+- CPU usage acceptable
 
-**Phase 3: End-to-End Testing**
-- Complete decision cycle works
-- Risk checks enforce limits
-- Orders route to paper account
-- Monitoring captures all events
+### **8.3 Institutional Analytics Testing**
 
-### **8.3 Paper Trading Validation**
+**VPIN Testing:**
+- Calculate on historical data
+- Compare to academic benchmarks
+- Verify toxicity detection
+- Test threshold triggers
 
-**Week 1: Basic Functionality**
+**GEX Testing:**
+- Validate gamma calculations
+- Verify aggregation across strikes
+- Test support/resistance identification
+- Compare to known services
+
+**ML Model Testing:**
+- Walk-forward validation
+- Out-of-sample performance
+- Feature importance stability
+- Prediction confidence calibration
+
+### **8.4 Paper Trading Validation (Days 52-59)**
+
+**Week 1: Complete System Test**
 - All data feeds working
-- Decisions being made
-- Orders executing
-- Positions tracked
+- All analytics calculating
+- All strategies triggering
+- Risk limits enforcing
 
-**Week 2: Strategy Validation**
-- Each strategy triggers correctly
-- Rules apply as configured
-- Exits work properly
-- P&L calculated accurately
-
-**Week 3: Risk Management**
-- Position limits enforced
-- Portfolio Greeks tracked
-- Stop losses trigger
-- Circuit breakers work
-
-**Week 4: Stress Testing**
-- High volatility scenarios
-- Multiple concurrent positions
-- Rapid market moves
-- API failures handled
-
-**Week 5: Performance Validation**
-- Meet win rate targets
-- Achieve profit factor goals
-- Stay within drawdown limits
-- Complete stability test
+**Week 2: Performance Validation**
+- Win rate tracking
+- Sharpe ratio calculation
+- VaR accuracy check
+- Educational content generation
 
 ---
 
 ## **9. Configuration Management**
 
-### **9.1 Configuration Change Process**
-1. **Propose Change:** Document what and why
-2. **Test in Dev:** Validate in development environment
-3. **Test in Paper:** Run in paper trading for 24 hours
-4. **Review Results:** Analyze impact on performance
-5. **Deploy to Production:** Apply during market close
-6. **Monitor:** Watch closely for first trading day
-7. **Rollback Plan:** Keep previous config for quick revert
-
-### **9.2 Configuration Backup**
-- **Frequency:** Daily after market close
-- **Retention:** 30 days of configs
-- **Location:** Version controlled in Git
-- **Testing:** Monthly restore drill
-
-### **9.3 Environment-Specific Configs**
+### **9.1 Configuration Structure for Batch Implementation**
 ```
-development.yaml: Liberal limits, verbose logging
-paper.yaml: Production-like with safety margins
-production.yaml: Conservative limits, strict validation
+config/
+├── .env                           # API keys and secrets
+├── system/
+│   ├── database.yaml              # Database connections
+│   ├── redis.yaml                 # Cache configuration
+│   ├── logging.yaml               # Logging settings
+│   └── paths.yaml                 # Directory paths
+├── apis/
+│   ├── alpha_vantage.yaml         # ALL 41 endpoints configured
+│   ├── ibkr.yaml                  # IBKR settings with aggregation
+│   └── rate_limits.yaml           # Unified rate limiting
+├── data/
+│   ├── symbols.yaml               # Symbol tiers
+│   ├── schedules.yaml             # Polling schedules for all APIs
+│   └── validation.yaml            # Data validation rules
+├── analytics/
+│   ├── vpin.yaml                  # VPIN parameters
+│   ├── gex.yaml                   # GEX calculation settings
+│   ├── microstructure.yaml        # Microstructure params
+│   └── market_profile.yaml        # Market profile settings
+├── strategies/
+│   ├── 0dte.yaml                  # 0DTE parameters
+│   ├── 1dte.yaml                  # 1DTE parameters
+│   ├── swing_14d.yaml             # Swing parameters
+│   └── moc_imbalance.yaml         # MOC parameters
+├── risk/
+│   ├── position_limits.yaml       # Position limits
+│   ├── portfolio_limits.yaml      # Portfolio limits with VaR
+│   ├── circuit_breakers.yaml      # Emergency stops
+│   └── sizing.yaml                # Position sizing
+├── ml/
+│   ├── models.yaml                # Model paths and weights
+│   ├── features.yaml              # 200+ feature specifications
+│   ├── thresholds.yaml            # ML thresholds
+│   └── backtesting.yaml           # Backtest parameters
+├── execution/
+│   ├── trading_hours.yaml         # Market hours
+│   └── order_types.yaml           # Order settings
+├── monitoring/
+│   ├── alerts.yaml                # Alert rules
+│   ├── discord.yaml               # Discord settings
+│   └── dashboard.yaml             # Dashboard config
+└── environments/
+    ├── development.yaml           # Dev overrides
+    ├── paper.yaml                 # Paper trading settings
+    └── production.yaml            # Production settings
 ```
+
+### **9.2 Configuration Backup Strategy**
+- **Frequency:** Every market close + before any changes
+- **Retention:** 90 days of configs (increased from 30)
+- **Location:** Git with tagged releases
+- **Testing:** Weekly restore drill
 
 ---
 
@@ -559,79 +698,94 @@ production.yaml: Conservative limits, strict validation
 
 ### **10.1 Daily Maintenance Tasks**
 - **Pre-Market:** 
+  - Verify bar aggregation working
   - Clear cache of stale entries
+  - Check ML model drift scores
   - Verify configurations loaded
-  - Check API connectivity
+  - Test VPIN calculation
 - **Post-Market:**
-  - Archive trade data
+  - Archive trade data with context
+  - Calculate daily VaR metrics
+  - Generate SHAP explanations
   - Backup database
   - Review error logs
-  - Update documentation
+  - Update educational content
 
 ### **10.2 Weekly Maintenance Tasks**
+- Review ML model performance
+- Analyze feature importance changes
+- Check VPIN/GEX accuracy
 - Review and tune strategy parameters
 - Analyze losing trades for patterns
-- Check for API changes or updates
 - Performance optimization review
 - Update risk limits if needed
 
 ### **10.3 Monthly Maintenance Tasks**
 - Full system backup and restore test
-- Review ML model performance
+- Walk-forward model retraining
+- Review feature engineering pipeline
 - Analyze strategy effectiveness
 - Update symbol lists
 - Capacity planning review
+- Review institutional metrics accuracy
 
-### **10.4 Monitoring Requirements**
+### **10.4 Real-Time Monitoring Dashboard**
 
-**Real-Time Monitoring:**
-- API call rate (must stay < 500/min)
-- Decision latency (must stay < 2s)
-- Portfolio Greeks (within limits)
-- Position P&L (stop loss levels)
-- System resources (CPU, memory, disk)
+**Critical Metrics:**
+- IBKR 5-sec bar streaming status
+- Bar aggregation accuracy
+- API call rate (< 500/min)
+- Current VPIN levels
+- GEX support/resistance
+- ML model confidence
+- Portfolio Greeks
+- Position P&L with VaR
+- System resources
 
-**Daily Reports:**
-- Trades taken and outcomes
-- Win rate and profit factor
-- API usage statistics
-- Error summary
-- Configuration changes
-
-**Weekly Reports:**
-- Strategy performance breakdown
-- Risk metrics analysis
-- System stability metrics
-- Optimization opportunities
+**Analytics Metrics:**
+- Microstructure scores
+- Market regime indicators
+- Feature quality scores
+- Model drift metrics
+- Prediction accuracy (real-time)
 
 ---
 
-## **11. Phase Deliverables (Updated)**
+## **11. Phase Deliverables (Version 3.0)**
 
-### **11.1 Development Phase Deliverables**
+### **11.1 Development Phase Deliverables - Batch Implementation**
 
-| Phase | Deliverables | Success Criteria |
-|-------|--------------|------------------|
-| **0: Infrastructure** | - Complete module skeleton<br>- Config management system<br>- Base classes implemented<br>- Git repository initialized | All modules import without errors |
-| **1: Connections** | - IBKR connection working<br>- AV client with rate limiting<br>- Connection recovery logic<br>- Test harness for APIs | Can fetch data from both sources |
-| **2: API Implementation** | - All 43 AV APIs tested<br>- IBKR data feeds working<br>- Schema evolved per API<br>- Ingestion pipeline complete | Each API stores data correctly |
-| **3: Data Management** | - Scheduler operational<br>- Cache layer working<br>- Data validation active<br>- Rate limits enforced | Never exceeds 600 calls/min |
-| **4: Analytics** | - Indicator processing<br>- Greeks validation<br>- Analytics engine<br>- Signal generation | Accurate calculations verified |
-| **5: ML Integration** | - Feature builder working<br>- Models loaded<br>- Predictions generated<br>- Confidence scores calculated | Deterministic outputs |
-| **6: Decision Engine** | - All strategies implemented<br>- Decision logic complete<br>- Configuration-driven rules<br>- Decision logging | Correct decisions made |
-| **7: Risk & Execution** | - Risk limits enforced<br>- Position sizing working<br>- Orders execute (paper)<br>- Trade monitoring active | Paper trades successful |
-| **8: Output Layer** | - Discord publishing<br>- Dashboard API<br>- Monitoring active<br>- Alerts working | Real-time updates working |
-| **9: Integration** | - 5-day paper trading<br>- Performance validated<br>- All tests passing<br>- Documentation complete | Ready for production |
+| Phase | Days | Deliverables | Success Criteria |
+|-------|------|--------------|------------------|
+| **0: Foundation** | 1-2 | - Complete project structure<br>- All dependencies installed<br>- Configuration system ready<br>- Database/Redis connected | All components initialize |
+| **1: AV Batch** | 3-8 | - ALL 41 APIs tested & documented<br>- Complete schema created<br>- All ingestion methods working<br>- Scheduler configured for all | 41 APIs storing data |
+| **2: IBKR Complete** | 9-14 | - 5-sec bars streaming<br>- Aggregation to all timeframes<br>- MOC feed operational<br>- Complete IBKR pipeline | Accurate bar aggregation |
+| **3: Integration** | 15-17 | - All data sources validated<br>- Performance optimized<br>- Monitoring active | < 500 API calls/min maintained |
+| **4: Analytics** | 18-24 | - VPIN/GEX operational<br>- Microstructure metrics<br>- Market profile working<br>- All indicators calculating | Institutional metrics accurate |
+| **5: ML Features** | 25-28 | - 200+ features per symbol<br>- Feature importance analysis<br>- Real-time generation<br>- Quality monitoring | SHAP values generating |
+| **6: ML Models** | 29-35 | - XGBoost/LSTM/GRU deployed<br>- Walk-forward tested<br>- Backtesting complete<br>- Drift detection active | Accuracy > 55% |
+| **7: Strategies** | 36-43 | - All 4 strategies implemented<br>- ML integration complete<br>- Config-driven rules | Signals generating correctly |
+| **8: Risk** | 44-47 | - VaR/CVaR implemented<br>- Position sizing working<br>- Limits enforced<br>- Circuit breakers tested | Risk metrics accurate |
+| **9: Execution** | 48-51 | - Orders executing (paper)<br>- Fill monitoring active<br>- Slippage tracked | Paper trades successful |
+| **10: Paper Trading** | 52-59 | - 5+ days paper trading<br>- Performance validated<br>- Win rate > 45%<br>- Educational content started | All strategies profitable |
+| **11: Publishing** | 60-66 | - Discord active<br>- Dashboard operational<br>- Reports automated<br>- WebSocket streaming | Real-time updates working |
+| **12: Education** | 67-73 | - Market analysis automated<br>- Educational engine active<br>- 10+ daily pieces<br>- Community engaged | Content pipeline complete |
+| **13: Testing** | 74-80 | - Full integration tested<br>- Stress testing complete<br>- Performance optimized<br>- Documentation current | All tests passing |
+| **14: Production** | 81-87 | - Go/no-go complete<br>- Production environment ready<br>- Team trained<br>- Rollback plan tested | Ready for live trading |
 
 ### **11.2 Operational Readiness Checklist**
 
 **Before Production Launch:**
-- [ ] All APIs implemented and tested
-- [ ] Configuration fully externalized
+- [ ] All 41 Alpha Vantage APIs batch implemented
+- [ ] IBKR 5-second bar aggregation accurate
+- [ ] VPIN/GEX calculations validated
+- [ ] 200+ ML features generating
+- [ ] Models achieving > 55% accuracy
 - [ ] 5+ days successful paper trading
 - [ ] Performance targets met
 - [ ] Risk management validated
 - [ ] Emergency procedures tested
+- [ ] Educational platform operational
 - [ ] Documentation complete
 - [ ] Team trained on procedures
 - [ ] Rollback plan ready
@@ -642,82 +796,77 @@ production.yaml: Conservative limits, strict validation
 ## **12. Critical Success Factors**
 
 ### **12.1 Technical Success Factors**
-- **Data Quality:** Greeks always validated before use
+- **Data Completeness:** All 41 APIs + IBKR operational before analytics
+- **Aggregation Accuracy:** 5-sec bars correctly aggregated to all timeframes
+- **Greeks Quality:** Always validated, never stale (< 30 seconds)
 - **Rate Limiting:** Never exceed 600 calls/minute
 - **Latency:** Decisions made within 2 seconds
-- **Reliability:** 99.9% uptime during market hours
-- **Accuracy:** Schema matches API responses exactly
+- **ML Confidence:** Models calibrated and interpretable
 
 ### **12.2 Operational Success Factors**
+- **Batch Implementation:** Complete data layer before building on top
 - **Configuration:** No hardcoded values anywhere
-- **Testing:** Each component tested in isolation
-- **Documentation:** Every API response documented
-- **Monitoring:** Real-time visibility into system state
+- **Testing:** Institutional-grade backtesting and validation
+- **Documentation:** Every component thoroughly documented
+- **Monitoring:** Real-time visibility with institutional metrics
 - **Recovery:** Can recover from any failure mode
 
 ### **12.3 Business Success Factors**
-- **Performance:** Win rate > 45% consistently
-- **Risk:** Never exceed position or portfolio limits
-- **Scalability:** Can add new strategies via config
-- **Flexibility:** Can adjust parameters without code changes
-- **Compliance:** All trades logged and auditable
+- **Performance:** Win rate > 45% with Sharpe > 1.0
+- **Risk:** VaR/CVaR limits never exceeded
+- **Analytics:** Institutional-grade metrics providing edge
+- **Education:** 10+ quality pieces daily building community
+- **Scalability:** Can add strategies/symbols via config
+- **Compliance:** All trades logged with full context
 
 ---
 
-## **Appendix A: Configuration File Locations**
+## **Appendix A: Institutional Metrics Reference**
 
-```
-config/
-├── .env                           # API keys and secrets
-├── system/database.yaml           # Database connections
-├── system/redis.yaml              # Cache configuration
-├── system/logging.yaml            # Logging settings
-├── system/paths.yaml              # Directory paths
-├── apis/alpha_vantage.yaml        # AV API settings
-├── apis/ibkr.yaml                 # IBKR settings
-├── apis/rate_limits.yaml          # Rate limiting
-├── data/symbols.yaml              # Symbol tiers
-├── data/schedules.yaml            # Polling schedules
-├── data/validation.yaml           # Validation rules
-├── strategies/0dte.yaml           # 0DTE parameters
-├── strategies/1dte.yaml           # 1DTE parameters
-├── strategies/swing_14d.yaml      # Swing parameters
-├── strategies/moc_imbalance.yaml  # MOC parameters
-├── risk/position_limits.yaml      # Position limits
-├── risk/portfolio_limits.yaml     # Portfolio limits
-├── risk/circuit_breakers.yaml     # Emergency stops
-├── risk/sizing.yaml               # Position sizing
-├── ml/models.yaml                 # Model paths
-├── ml/features.yaml               # Feature specs
-├── ml/thresholds.yaml             # ML thresholds
-├── execution/trading_hours.yaml   # Market hours
-├── execution/order_types.yaml     # Order settings
-├── monitoring/alerts.yaml         # Alert rules
-├── monitoring/discord.yaml        # Discord settings
-└── environments/*.yaml            # Environment overrides
-```
+### **VPIN (Volume-Synchronized Probability of Informed Trading)**
+- **Purpose:** Detect toxic order flow
+- **Calculation:** Volume-bucketed price changes
+- **Threshold:** > 0.6 indicates high toxicity
+- **Action:** Reduce position size or halt trading
+
+### **GEX (Gamma Exposure)**
+- **Purpose:** Identify support/resistance from options
+- **Calculation:** Net gamma across all strikes
+- **Use:** Predict dealer hedging flows
+- **Interpretation:** Negative GEX = volatile, Positive = stable
+
+### **Market Profile**
+- **Purpose:** Identify value areas and POC
+- **TPO:** Time Price Opportunity
+- **Value Area:** 70% of volume traded
+- **Use:** Support/resistance identification
+
+### **Microstructure Metrics**
+- **Kyle's Lambda:** Price impact coefficient
+- **Amihud Illiquidity:** Price change per dollar volume
+- **Roll's Spread:** Effective spread from serial covariance
+- **Use:** Assess execution costs and market quality
 
 ---
 
-## **Appendix B: API Implementation Order**
+## **Appendix B: Implementation Timeline Summary**
 
-Priority 1 (Week 1-2):
-1. IBKR Quotes
-2. IBKR 1-min bars
-3. IBKR 5-min bars
-4. AV REALTIME_OPTIONS (Greeks)
+**Week 1 (Days 1-7):** Foundation + Start API Testing  
+**Week 2 (Days 8-14):** Complete Data Foundation (AV + IBKR)  
+**Week 3 (Days 15-21):** Integration + Start Analytics  
+**Week 4 (Days 22-28):** Complete Analytics + ML Features  
+**Week 5 (Days 29-35):** ML Models + Backtesting  
+**Week 6 (Days 36-42):** Strategy Implementation  
+**Week 7 (Days 43-49):** Risk + Start Execution  
+**Week 8 (Days 50-56):** Paper Trading Week 1  
+**Week 9 (Days 57-63):** Paper Trading Week 2 + Publishing  
+**Week 10 (Days 64-70):** Educational Platform  
+**Week 11 (Days 71-77):** Full Integration Testing  
+**Week 12 (Days 78-84):** Production Preparation  
+**Week 13 (Days 85-87):** Final Validation  
 
-Priority 2 (Week 3-4):
-5. AV RSI
-6. AV MACD
-7. AV BBANDS
-8. AV VWAP
-9. AV ATR
-10. AV ADX
-
-Priority 3 (Week 5-6):
-[Continue through all 43 APIs...]
+**Total: 87 days to production with institutional-grade analytics**
 
 ---
 
-## **END OF SSOT-OPS.MD v2.0**
+## **END OF SSOT-OPS.MD v3.0**

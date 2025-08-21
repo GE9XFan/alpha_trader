@@ -1,112 +1,264 @@
-# Incremental Implementation Plan - Version 3.0
-**Approach:** Vertical Slices → Horizontal Expansion → Complete System  
-**Philosophy:** Start with one working pipeline, expand systematically  
-**Final Scope:** 100% of original functionality delivered incrementally  
-**Core Components:** Automated trading, comprehensive market analysis, educational content platform  
-**Key Change:** IBKR provides ALL real-time pricing; Alpha Vantage provides Greeks, indicators, analytics
+# Granular Phase Plan v4.0 - Institutional-Grade Batch Implementation
+**Approach:** Complete Data Foundation → Quant Analytics → ML/Strategies → Production  
+**Philosophy:** Implement ALL data sources comprehensively, then build institutional-grade analytics  
+**Key Change:** Scale the proven 8-step API process to handle all 41 Alpha Vantage APIs and IBKR feeds at once  
+**Quality Level:** Hedge fund grade analytics with VPIN, GEX, microstructure, 200+ ML features  
+**Timeline:** ~12.5 weeks to production (down from 15 weeks)
 
 ---
 
-## **Critical Updates from v2.0**
-- **REMOVED APIs:** `LISTING_STATUS` and `TIME_SERIES_INTRADAY` from Alpha Vantage
-- **IBKR Provides:** ALL real-time bars (1-min, 5-min, 10-min, 15-min, 30-min, 1-hour)
-- **Alpha Vantage:** Focus on OPTIONS, GREEKS, INDICATORS, ANALYTICS, FUNDAMENTALS
-- **Educational Platform:** Comprehensive market analysis and educational content generation
-- **Total Alpha Vantage APIs:** 41 (down from 43)
+## **Critical Updates from v3.0**
+- **Batch Implementation:** ALL 41 Alpha Vantage APIs implemented together (Phase 1)
+- **IBKR Aggregation:** 5-second bars aggregated to all timeframes mathematically
+- **Complete Database First:** Entire schema created upfront for coherence
+- **Compressed Timeline:** Data foundation complete by Day 14 (vs Day 74 in v3.0)
+- **Institutional Analytics:** VPIN, GEX, microstructure, market profile added
+- **Quant ML Features:** 200+ features per symbol (vs 100+ in v3.0)
+- **Advanced Models:** LSTM/GRU/Transformer architectures included
+- **Professional Backtesting:** Walk-forward analysis, purged CV, Monte Carlo
+- **Risk Analytics:** VaR, CVaR, stress testing standard
 
 ---
 
-## **Phase 0: Minimal Foundation (Days 1-3)**
-**Goal:** Absolute minimum to support first API
+## **Phase 0: Foundation Setup (Days 1-2)**
+**Goal:** Minimal infrastructure to support comprehensive API testing
 
-### **0.1: Project Setup**
+### **0.1: Project Structure**
 ```
 /project-root/
 ├── src/
 │   ├── foundation/
-│   │   └── config_manager.py      # Minimal version
+│   │   ├── __init__.py
+│   │   └── config_manager.py      # Full version for all configs
 │   ├── connections/
-│   │   └── av_client.py          # Shell with one method
-│   └── data/
-│       └── ingestion.py          # Basic ingestion
+│   │   ├── __init__.py
+│   │   ├── av_client.py          # Shell for 41 methods
+│   │   └── ibkr_connection.py    # Shell for IBKR
+│   ├── data/
+│   │   ├── __init__.py
+│   │   ├── ingestion.py          # Base ingestion class
+│   │   ├── rate_limiter.py       # Complete rate limiter
+│   │   ├── cache_manager.py      # Redis cache manager
+│   │   └── scheduler.py          # Scheduling framework
+│   └── database/
+│       ├── __init__.py
+│       └── db_manager.py         # Database connection manager
 ├── config/
 │   ├── .env.example
-│   └── apis/
-│       └── alpha_vantage.yaml    # Just REALTIME_OPTIONS
+│   ├── apis/
+│   │   ├── alpha_vantage.yaml    # Will hold all 41 endpoints
+│   │   └── ibkr.yaml             # IBKR configuration
+│   ├── data/
+│   │   └── schedules.yaml        # Scheduling for all APIs
+│   └── system/
+│       ├── database.yaml
+│       └── redis.yaml
 ├── scripts/
-│   └── test_api.py               # Test harness
+│   ├── test_all_av_apis.py       # Comprehensive AV testing
+│   ├── test_ibkr_feeds.py        # IBKR testing
+│   └── create_all_tables.sql     # Complete schema
+├── data/
+│   └── api_responses/             # Store test responses
 ├── requirements.txt
 └── README.md
 ```
 
-### **0.2: Core Dependencies Only**
+### **0.2: Complete Dependencies**
 ```bash
-pip install psycopg2-binary sqlalchemy python-dotenv pyyaml
-pip install requests pandas numpy
-pip install pytest
+# Database & Cache
+psycopg2-binary sqlalchemy redis
+
+# Configuration & Data
+python-dotenv pyyaml pandas numpy
+
+# API & Networking
+requests aiohttp websocket-client
+
+# IBKR
+ib_insync
+
+# Scheduling & Processing
+APScheduler
+
+# ML (for later phases)
+scikit-learn xgboost joblib
+
+# Testing & Monitoring
+pytest discord-webhook
+
+# Analytics
+scipy statsmodels
 ```
 
-### **0.3: Database - System Tables Only**
-```sql
-CREATE TABLE system_config (
-    key VARCHAR(50) PRIMARY KEY,
-    value TEXT,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE api_response_log (
-    id SERIAL PRIMARY KEY,
-    api_name VARCHAR(50),
-    response_sample JSONB,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-```
-
-### **0.4: Minimal ConfigManager**
-```python
-# Just enough to load .env and one YAML file
-class ConfigManager:
-    def __init__(self):
-        load_dotenv()
-        self.av_api_key = os.getenv('AV_API_KEY')
-        self.db_url = os.getenv('DATABASE_URL')
-```
+### **0.3: System Configuration**
+- Complete ConfigManager implementation
+- Load all configuration files
+- Set up database connection
+- Initialize Redis connection
+- Create base logger
 
 **Deliverables:**
-- Working Python environment
-- PostgreSQL connected
-- Can load configuration
-- **Time:** 3 days
+- Complete project structure
+- All dependencies installed
+- Configuration system operational
+- Database and Redis connected
+- **Time:** 2 days
 
 ---
 
-## **Phase 1: First Working Pipeline (Days 4-7)**
-**Goal:** REALTIME_OPTIONS → Database (Complete flow for ONE API)
+## **Phase 1: Complete Alpha Vantage Implementation (Days 3-8)**
+**Goal:** ALL 41 Alpha Vantage APIs operational with complete database schema
 
-### **1.1: Implement REALTIME_OPTIONS Client**
+### **Step 1: Test ALL APIs (Day 3)**
+Create `scripts/test_all_av_apis.py`:
 ```python
-# av_client.py - Just one method
-def get_realtime_options(self, symbol='SPY'):
-    # Make API call
-    # Return raw response
+# Test all 41 APIs systematically
+api_groups = {
+    'options': ['REALTIME_OPTIONS', 'HISTORICAL_OPTIONS'],
+    'indicators': ['RSI', 'MACD', 'BBANDS', 'VWAP', 'ATR', 'ADX', 
+                   'STOCH', 'AROON', 'CCI', 'MFI', 'WILLR', 'MOM',
+                   'EMA', 'SMA', 'OBV', 'AD'],
+    'analytics': ['ANALYTICS_FIXED_WINDOW', 'ANALYTICS_SLIDING_WINDOW'],
+    'sentiment': ['NEWS_SENTIMENT', 'TOP_GAINERS_LOSERS', 'INSIDER_TRANSACTIONS'],
+    'fundamentals': ['OVERVIEW', 'EARNINGS', 'EARNINGS_ESTIMATES', 
+                    'EARNINGS_CALENDAR', 'EARNINGS_CALL_TRANSCRIPT',
+                    'INCOME_STATEMENT', 'BALANCE_SHEET', 'CASH_FLOW',
+                    'DIVIDENDS', 'SPLITS'],
+    'economic': ['TREASURY_YIELD', 'FEDERAL_FUNDS_RATE', 'CPI', 
+                'INFLATION', 'REAL_GDP']
+}
+
+# For each API:
+# 1. Make test call with SPY (or appropriate symbol)
+# 2. Save complete response to data/api_responses/
+# 3. Document structure, data types, special fields
+# 4. Note actual rate limits and response times
+# 5. Identify any quirks or special parameters
 ```
 
-### **1.2: Test & Document Response**
-- Call API with SPY
-- Save complete response to JSON
-- Analyze structure
-- Document all fields
+**Output:** 41 JSON response files + structure documentation
 
-### **1.3: Create Schema Based on ACTUAL Response**
+### **Step 2: Analyze & Document (Day 3-4)**
+```python
+# scripts/analyze_api_responses.py
+# For each saved response:
+# - Extract field names and types
+# - Identify common patterns
+# - Design optimal table structures
+# - Document relationships between APIs
+# - Create data dictionary
+```
+
+**Output:** Complete API documentation + proposed schema
+
+### **Step 3: Configure ALL Endpoints (Day 4)**
+Update `config/apis/alpha_vantage.yaml`:
+```yaml
+base_url: "https://www.alphavantage.co/query"
+rate_limit: 
+  calls_per_minute: 600
+  target_usage: 500
+
+endpoints:
+  # OPTIONS & GREEKS (2 APIs)
+  realtime_options:
+    function: "REALTIME_OPTIONS"
+    cache_ttl: 30
+    priority: "critical"
+    
+  historical_options:
+    function: "HISTORICAL_OPTIONS"
+    cache_ttl: 86400
+    priority: "daily"
+  
+  # INDICATORS (16 APIs)
+  rsi:
+    function: "RSI"
+    cache_ttl: 60
+    default_params:
+      interval: "1min"
+      time_period: 14
+      series_type: "close"
+  
+  # ... all 41 endpoints configured
+```
+
+### **Step 4: Schedule Configuration (Day 4)**
+Update `config/data/schedules.yaml`:
+```yaml
+# Optimized scheduling for all APIs
+tier_a_symbols: ['SPY', 'QQQ', 'IWM', 'SPX']
+tier_b_symbols: ['AAPL', 'MSFT', 'NVDA', 'GOOGL', 'AMZN', 'META', 'TSLA']
+tier_c_symbols: ['BABA', 'AMD', 'NFLX', 'BA', 'GS', 'MS', 'JPM', 'BAC']
+
+api_schedules:
+  critical:
+    - realtime_options: 30s
+  
+  fast_indicators:
+    - rsi: 60s
+    - macd: 60s
+    - bbands: 60s
+    - vwap: 60s
+  
+  medium_indicators:
+    - atr: 300s
+    - adx: 300s
+    # ... etc
+  
+  analytics:
+    - fixed_window: 300s
+    - sliding_window: 300s
+  
+  sentiment:
+    - news_sentiment: 600s
+    - top_gainers_losers: 600s
+  
+  fundamentals:
+    - overview: daily
+    - earnings_calendar: daily
+    # ... etc
+  
+  economic:
+    - all: weekly
+```
+
+### **Step 5: Implement ALL Client Methods (Day 5)**
+Update `src/connections/av_client.py`:
+```python
+class AlphaVantageClient:
+    def __init__(self):
+        # Initialize with rate limiter
+        # Load all endpoint configs
+        # Set up cache connections
+    
+    # 41 methods, one for each API
+    def get_realtime_options(self, symbol, ...):
+    def get_historical_options(self, symbol, ...):
+    def get_rsi(self, symbol, ...):
+    def get_macd(self, symbol, ...):
+    # ... all 41 methods
+    
+    # Generic method for common pattern
+    def _make_av_request(self, endpoint_name, params, use_cache=True):
+        # Rate limiting
+        # Cache checking
+        # API call
+        # Response validation
+        # Cache storage
+```
+
+### **Step 6: Create Complete Database Schema (Day 5-6)**
+Create `scripts/create_all_tables.sql`:
 ```sql
--- Created AFTER seeing real response
+-- OPTIONS TABLES
 CREATE TABLE av_realtime_options (
     id SERIAL PRIMARY KEY,
     symbol VARCHAR(10),
     contract_id VARCHAR(50),
     strike DECIMAL(10,2),
     expiration DATE,
-    type VARCHAR(4),
+    option_type VARCHAR(4),
     delta DECIMAL(6,4),
     gamma DECIMAL(6,4),
     theta DECIMAL(8,4),
@@ -115,91 +267,165 @@ CREATE TABLE av_realtime_options (
     implied_volatility DECIMAL(6,4),
     bid DECIMAL(10,2),
     ask DECIMAL(10,2),
-    last DECIMAL(10,2),
-    volume INTEGER,
+    volume BIGINT,
     open_interest INTEGER,
     timestamp TIMESTAMP,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(symbol, contract_id, timestamp)
 );
-```
 
-### **1.4: Basic Ingestion**
-```python
-# ingestion.py - Simple version
-def ingest_options_data(api_response):
-    # Parse response
-    # Validate data
-    # Store in database
-```
-
-### **1.5: Manual Test Flow**
-```bash
-python scripts/test_api.py --api=realtime_options --symbol=SPY
-# Verify data in database
-```
-
-**Deliverables:**
-- One API fully working end-to-end
-- Data successfully stored
-- Schema matches reality
-- **Success Metric:** Can query options data for SPY
-- **Time:** 4 days
-
----
-
-## **Phase 2: Add Rate Limiting & Second API (Days 8-10)**
-**Goal:** Add rate limiter, then HISTORICAL_OPTIONS
-
-### **2.1: Implement Rate Limiter**
-```python
-# data/rate_limiter.py
-class TokenBucketRateLimiter:
-    # 600 calls/minute max
-    # 10 tokens/second refill
-    # Burst to 20
-```
-
-### **2.2: Integrate Rate Limiter**
-- Add to av_client.py
-- Test with rapid calls
-- Verify limits enforced
-
-### **2.3: Add HISTORICAL_OPTIONS**
-- Add method to av_client.py
-- Test with real call
-- Create new table based on response
-- Extend ingestion.py
-- Test end-to-end
-
-**Deliverables:**
-- Rate limiting operational
-- Two APIs working
-- **Time:** 3 days
-
----
-
-## **Phase 3: IBKR Connection & Real-Time Pricing (Days 11-14)**
-**Goal:** Add IBKR for ALL real-time price data
-
-### **3.1: Create IBKR Connection**
-```python
-# connections/ibkr_connection.py
-class IBKRConnectionManager:
-    def connect_tws(self)
-    def subscribe_bars(self, symbol, bar_size)
-    def get_quotes(self, symbol)
-```
-
-### **3.2: Implement Bar Subscriptions**
-- 1-minute bars
-- 5-minute bars  
-- 10-minute bars
-- 15-minute bars
-
-### **3.3: Create Pricing Tables**
-```sql
-CREATE TABLE ibkr_bars_1min (
+-- INDICATOR TABLES (one per indicator)
+CREATE TABLE av_rsi (
     id SERIAL PRIMARY KEY,
+    symbol VARCHAR(10),
+    timestamp TIMESTAMP,
+    rsi DECIMAL(10,4),
+    interval VARCHAR(10),
+    time_period INTEGER,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(symbol, timestamp, interval, time_period)
+);
+
+CREATE TABLE av_macd (
+    id SERIAL PRIMARY KEY,
+    symbol VARCHAR(10),
+    timestamp TIMESTAMP,
+    macd DECIMAL(10,4),
+    macd_signal DECIMAL(10,4),
+    macd_hist DECIMAL(10,4),
+    interval VARCHAR(10),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(symbol, timestamp, interval)
+);
+
+-- ... tables for all 41 APIs
+
+-- INDEXES for performance
+CREATE INDEX idx_options_symbol_exp ON av_realtime_options(symbol, expiration);
+CREATE INDEX idx_rsi_symbol_time ON av_rsi(symbol, timestamp DESC);
+-- ... indexes for all tables
+```
+
+**Execute:** `psql -U username -d trading_system_db -f scripts/create_all_tables.sql`
+
+### **Step 7: Implement Ingestion Methods (Day 6-7)**
+Update `src/data/ingestion.py`:
+```python
+class DataIngestion:
+    def __init__(self):
+        self.db = DatabaseManager()
+        self.cache = CacheManager()
+    
+    # 41 ingestion methods
+    def ingest_realtime_options(self, data, symbol):
+    def ingest_historical_options(self, data, symbol):
+    def ingest_rsi(self, data, symbol, interval, time_period):
+    def ingest_macd(self, data, symbol, interval):
+    # ... all 41 ingestion methods
+    
+    # Common patterns
+    def _batch_insert(self, table_name, records):
+    def _upsert_record(self, table_name, record, unique_keys):
+```
+
+### **Step 8: Test Complete Pipeline (Day 7-8)**
+Create `scripts/test_av_pipeline_complete.py`:
+```python
+# Test each API end-to-end:
+# 1. API call
+# 2. Rate limiting verification
+# 3. Cache operations
+# 4. Database ingestion
+# 5. Data retrieval
+# 6. Scheduler integration
+
+# Verify:
+# - All 41 APIs storing data correctly
+# - Rate limits never exceeded
+# - Cache working properly
+# - Scheduler running all jobs
+# - Database queries performant
+```
+
+**Deliverables:**
+- All 41 Alpha Vantage APIs operational
+- Complete database schema for AV data
+- Full ingestion pipeline working
+- Scheduler managing all API calls
+- Rate limiting verified < 500 calls/min
+- **Time:** 6 days
+
+---
+
+## **Phase 2: Complete IBKR Implementation (Days 9-14)**
+**Goal:** IBKR real-time data with aggregation to all timeframes
+
+### **2.1: Test IBKR Feeds (Day 9)**
+Create `scripts/test_ibkr_feeds.py`:
+```python
+# Test IBKR data feeds:
+# 1. Connect to TWS/Gateway
+# 2. Subscribe to 5-second bars
+# 3. Get real-time quotes
+# 4. Test MOC imbalance feed
+# 5. Document data structure
+# 6. Measure latency
+```
+
+### **2.2: Implement Bar Aggregation (Day 9-10)**
+**Critical Note:** IBKR provides ONLY 5-second bars. All other timeframes are mathematically aggregated.
+
+Create `src/data/bar_aggregator.py`:
+```python
+class BarAggregator:
+    """Aggregate 5-second bars to all timeframes"""
+    
+    def __init__(self):
+        self.buffers = {
+            '1min': {},   # 12 x 5-sec bars
+            '5min': {},   # 60 x 5-sec bars  
+            '10min': {},  # 120 x 5-sec bars
+            '15min': {},  # 180 x 5-sec bars
+            '30min': {},  # 360 x 5-sec bars
+            '1hour': {}   # 720 x 5-sec bars
+        }
+    
+    def process_5sec_bar(self, symbol, bar):
+        """Process incoming 5-second bar"""
+        # Add to all relevant buffers
+        # Check if any timeframe complete
+        # Return list of completed bars
+        
+    def aggregate_bars(self, bars_5sec):
+        """Core aggregation logic"""
+        return {
+            'open': bars_5sec[0].open,
+            'high': max(bar.high for bar in bars_5sec),
+            'low': min(bar.low for bar in bars_5sec),
+            'close': bars_5sec[-1].close,
+            'volume': sum(bar.volume for bar in bars_5sec),
+            'vwap': self.calculate_vwap(bars_5sec),
+            'bar_count': len(bars_5sec)
+        }
+    
+    def aggregate_to_1min(self, bars_5sec):
+        """12 bars = 1 minute"""
+        if len(bars_5sec) == 12:
+            return self.aggregate_bars(bars_5sec)
+    
+    def aggregate_to_5min(self, bars_5sec):
+        """60 bars = 5 minutes"""
+        if len(bars_5sec) == 60:
+            return self.aggregate_bars(bars_5sec)
+    
+    # ... other timeframe methods
+```
+
+### **2.3: IBKR Database Schema (Day 10)**
+Add to `scripts/create_all_tables.sql`:
+```sql
+-- IBKR TABLES
+CREATE TABLE ibkr_bars_5sec (
     symbol VARCHAR(10),
     timestamp TIMESTAMP,
     open DECIMAL(10,2),
@@ -208,1023 +434,1154 @@ CREATE TABLE ibkr_bars_1min (
     close DECIMAL(10,2),
     volume BIGINT,
     vwap DECIMAL(10,2),
-    bar_count INTEGER
+    bar_count INTEGER,
+    PRIMARY KEY (symbol, timestamp)
+) PARTITION BY RANGE (timestamp);
+
+-- Aggregated bars tables
+CREATE TABLE ibkr_bars_1min (...);
+CREATE TABLE ibkr_bars_5min (...);
+CREATE TABLE ibkr_bars_10min (...);
+CREATE TABLE ibkr_bars_15min (...);
+CREATE TABLE ibkr_bars_30min (...);
+CREATE TABLE ibkr_bars_1hour (...);
+
+-- Real-time quotes
+CREATE TABLE ibkr_quotes (
+    symbol VARCHAR(10),
+    timestamp TIMESTAMP,
+    bid DECIMAL(10,2),
+    ask DECIMAL(10,2),
+    bid_size INTEGER,
+    ask_size INTEGER,
+    last DECIMAL(10,2),
+    last_size INTEGER,
+    PRIMARY KEY (symbol, timestamp)
 );
--- Similar for 5min, 10min, 15min
+
+-- MOC Imbalance
+CREATE TABLE ibkr_moc_imbalance (
+    symbol VARCHAR(10),
+    timestamp TIMESTAMP,
+    imbalance_qty BIGINT,
+    reference_price DECIMAL(10,2),
+    paired_qty BIGINT,
+    imbalance_side VARCHAR(4),
+    PRIMARY KEY (symbol, timestamp)
+);
 ```
 
-### **3.4: Test Real-Time Flow**
-- Connect to paper account
-- Subscribe to SPY
-- Verify data flowing
-- Check all bar sizes
+### **2.4: IBKR Connection Manager (Day 11)**
+Complete `src/connections/ibkr_connection.py`:
+```python
+class IBKRConnectionManager:
+    def __init__(self):
+        self.ib = IB()
+        self.aggregator = BarAggregator()
+        self.subscriptions = {}
+    
+    def connect(self):
+        # Connect to TWS/Gateway
+        # Set up event handlers
+        # Initialize subscriptions
+    
+    def subscribe_5sec_bars(self, symbols):
+        # Subscribe to 5-second bars
+        # Set up aggregation
+    
+    def on_5sec_bar(self, bars):
+        # Store 5-second bar
+        # Run aggregation
+        # Store aggregated bars
+    
+    def subscribe_quotes(self, symbols):
+        # Real-time quote subscription
+    
+    def subscribe_moc_imbalance(self):
+        # MOC imbalance feed (3:40-3:55 PM)
+```
+
+### **2.5: IBKR Ingestion (Day 12)**
+Add to `src/data/ingestion.py`:
+```python
+def ingest_5sec_bar(self, symbol, bar):
+    # Store 5-second bar
+    # Trigger aggregation
+    
+def ingest_aggregated_bars(self, timeframe, bars):
+    # Store aggregated bars
+    
+def ingest_quote(self, symbol, quote):
+    # Store real-time quote
+    
+def ingest_moc_imbalance(self, symbol, imbalance):
+    # Store MOC imbalance data
+```
+
+### **2.6: Test Complete IBKR Pipeline (Day 13-14)**
+```python
+# scripts/test_ibkr_complete.py
+# Test:
+# 1. Connection stability
+# 2. 5-second bar streaming
+# 3. Aggregation accuracy
+# 4. Quote updates
+# 5. MOC imbalance window
+# 6. Database storage
+# 7. Query performance
+```
 
 **Deliverables:**
 - IBKR connection stable
-- Real-time pricing working
-- Multiple bar sizes stored
-- **Time:** 4 days
-
----
-
-## **Phase 4: Add Scheduler & Cache (Days 15-17)**
-**Goal:** Automated polling and caching
-
-### **4.1: Simple Scheduler**
-```python
-# data/scheduler.py
-class DataScheduler:
-    def schedule_api_call(self, api_name, interval)
-    def run_scheduled_tasks(self)
-```
-
-### **4.2: Redis Cache**
-```python
-# data/cache_manager.py
-class CacheManager:
-    def get(self, key)
-    def set(self, key, value, ttl)
-```
-
-### **4.3: Schedule Current APIs**
-- REALTIME_OPTIONS: Every 30 seconds
-- HISTORICAL_OPTIONS: Daily
-- IBKR bars: Real-time stream
-
-**Deliverables:**
-- Automated data collection
-- Redis caching working
-- **Time:** 3 days
-
----
-
-## **Phase 5: Core Technical Indicators (Days 18-24)**
-**Goal:** Add RSI, MACD, BBANDS, VWAP one by one
-
-### **5.1: For EACH Indicator**
-1. Add method to av_client.py
-2. Test API call
-3. Create table from response
-4. Update ingestion
-5. Add to scheduler
-6. Verify end-to-end
-
-### **5.2: Indicators Order**
-- Day 18: RSI
-- Day 19: MACD  
-- Day 20: BBANDS
-- Day 21: VWAP
-- Day 22: ATR
-- Day 23: ADX
-- Day 24: Testing & cleanup
-
-**Deliverables:**
-- 6 core indicators operational
-- All properly scheduled
-- **Time:** 7 days
-
----
-
-## **Phase 6: Analytics & Greeks Validation (Days 25-28)**
-**Goal:** Add analytics layer and Greeks validation
-
-### **6.1: Greeks Validator**
-```python
-# analytics/greeks_validator.py
-class GreeksValidator:
-    def validate_delta(self, value)
-    def validate_gamma(self, value)
-    def check_freshness(self, timestamp)
-```
-
-### **6.2: Analytics APIs**
-- ANALYTICS_FIXED_WINDOW
-- ANALYTICS_SLIDING_WINDOW
-
-### **6.3: Basic Analytics Engine**
-```python
-# analytics/analytics_engine.py
-class AnalyticsEngine:
-    def calculate_ratios(self)
-    def aggregate_indicators(self)
-```
-
-**Deliverables:**
-- Greeks validation working
-- Analytics APIs integrated
-- **Time:** 4 days
-
----
-
-## **Phase 7: First Strategy - 0DTE (Days 29-35)**
-**Goal:** Implement complete 0DTE strategy with config
-
-### **7.1: Strategy Framework**
-```python
-# strategies/base_strategy.py
-class BaseStrategy:
-    def evaluate(self, data)
-    def generate_signal(self)
-```
-
-### **7.2: 0DTE Implementation**
-```python
-# strategies/zero_dte.py
-class ZeroDTEStrategy(BaseStrategy):
-    # Load rules from config
-    # Evaluate all conditions
-    # Generate confidence score
-```
-
-### **7.3: Configuration Structure**
-```yaml
-# config/strategies/0dte.yaml
-confidence:
-  minimum: 0.75
-timing:
-  entry_window: "09:45-14:00"
-rules:
-  rsi: 
-    min: 30
-    max: 70
-  delta:
-    min: 0.25
-    max: 0.75
-```
-
-### **7.4: Start Trade Documentation**
-```python
-# reports/basic_documentation.py
-class BasicDocumentation:
-    def log_decision_process(self, signal)
-    def capture_market_context(self)
-    def document_entry_rationale(self)
-```
-
-**Note:** Begin building educational content library from first strategy
-
-**Deliverables:**
-- 0DTE strategy fully configured
-- Generating trade signals
-- Basic documentation started
-- **Time:** 7 days
-
----
-
-## **Phase 8: Risk Management (Days 36-39)**
-**Goal:** Add risk checks before we add execution
-
-### **8.1: Risk Manager**
-```python
-# risk/risk_manager.py
-class RiskManager:
-    def check_position_limits(self)
-    def check_portfolio_greeks(self)
-    def calculate_position_size(self)
-```
-
-### **8.2: Position Sizer**
-```python
-# risk/position_sizer.py
-class PositionSizer:
-    def kelly_criterion(self)
-    def fixed_fractional(self)
-```
-
-### **8.3: Risk Configuration**
-```yaml
-# config/risk/limits.yaml
-position_limits:
-  max_delta: 0.80
-  max_gamma: 0.20
-portfolio_limits:
-  max_capital_at_risk: 0.20
-```
-
-**Deliverables:**
-- Risk checks operational
-- Position sizing working
-- **Time:** 4 days
-
----
-
-## **Phase 9: Paper Trading Execution (Days 40-43)**
-**Goal:** Execute trades in paper account
-
-### **9.1: IBKR Executor**
-```python
-# execution/ibkr_executor.py
-class IBKRExecutor:
-    def submit_order(self, signal)
-    def monitor_fill(self)
-    def get_execution_report(self)
-```
-
-### **9.2: Trade Monitor**
-```python
-# monitoring/trade_monitor.py
-class TradeMonitor:
-    def track_position(self)
-    def calculate_pnl(self)
-```
-
-### **9.3: Basic Trade Documentation**
-```python
-# reports/trade_documentation.py
-class TradeDocumentation:
-    def document_trade_entry(self, signal)
-    def capture_trade_rationale(self)
-    def log_market_conditions(self)
-    def track_trade_outcome(self)
-```
-
-**Note:** Start capturing educational content from Day 1 of paper trading
-
-**Deliverables:**
-- Orders executing in paper
-- Positions tracked
-- P&L calculated
-- Trade documentation started
-- **Time:** 4 days
-
----
-
-## **Phase 10: Add Remaining Indicators (Days 44-50)**
-**Goal:** Complete all 16 technical indicators
-
-### **10.1: Remaining Indicators**
-Each follows same pattern as Phase 5:
-- STOCH
-- AROON
-- CCI
-- MFI
-- WILLR
-- MOM
-- EMA
-- SMA
-- OBV
-- AD
-
-### **10.2: Indicator Processor**
-```python
-# analytics/indicator_processor.py
-class IndicatorProcessor:
-    def aggregate_signals(self)
-    def normalize_values(self)
-```
-
-**Deliverables:**
-- All 16 indicators working
-- Properly scheduled
-- **Time:** 7 days
-
----
-
-## **Phase 11: Additional Strategies (Days 51-57)**
-**Goal:** Add 1DTE, 14DTE Swing, MOC Imbalance
-
-### **11.1: 1DTE Strategy**
-- Similar to 0DTE but holds overnight
-- Add to strategy engine
-
-### **11.2: 14DTE Swing Strategy**
-- Longer timeframe
-- Different indicators weighted
-
-### **11.3: MOC Imbalance Strategy**
-- Add IBKR MOC data feed
-- 3:40-3:55 PM window
-- Special scheduling
-
-### **11.5: Basic Discord Publishing**
-```python
-# publishing/basic_discord.py
-class BasicDiscordPublisher:
-    def send_trade_alert(self, trade)
-    def post_daily_summary(self)
-    def share_educational_insight(self)
-```
-
-**Note:** Start community engagement early with basic publishing
-
-**Deliverables:**
-- All 4 strategies operational
-- Strategy selection logic
-- Basic Discord alerts working
-- **Time:** 7 days
-
----
-
-## **Phase 12: ML Integration (Days 58-63)**
-**Goal:** Add ML layer (frozen models)
-
-### **12.1: Feature Builder**
-```python
-# ml/feature_builder.py
-class FeatureBuilder:
-    def extract_features(self, data)
-    def engineer_features(self)
-```
-
-### **12.2: Model Suite**
-```python
-# ml/model_suite.py
-class ModelSuite:
-    def load_models(self)
-    def predict(self, features)
-    def get_confidence(self)
-```
-
-### **12.3: ML Configuration**
-```yaml
-# config/ml/models.yaml
-models:
-  xgboost:
-    path: "models/xgb_v1.pkl"
-    weight: 0.4
-  random_forest:
-    path: "models/rf_v1.pkl"
-    weight: 0.3
-```
-
-**Deliverables:**
-- Feature engineering working
-- Models integrated
-- Predictions generated
+- 5-second bars streaming
+- Aggregation to all timeframes working
+- Real-time quotes operational
+- MOC imbalance feed ready
+- Complete IBKR database schema
 - **Time:** 6 days
 
 ---
 
-## **Phase 13: Sentiment & News APIs (Days 64-67)**
-**Goal:** Add news and sentiment analysis
+## **Phase 3: Full Data Integration & Validation (Days 15-17)**
+**Goal:** Ensure complete data foundation is operational
 
-### **13.1: News APIs**
-- NEWS_SENTIMENT
-- TOP_GAINERS_LOSERS
-- INSIDER_TRANSACTIONS
+### **3.1: Integration Testing**
+- Run all Alpha Vantage APIs concurrently
+- Run all IBKR feeds concurrently
+- Verify rate limits maintained
+- Check data quality
+- Validate cache performance
+- Test failure recovery
 
-### **13.2: Integration**
-- Add to av_client
-- Create tables
-- Schedule appropriately
-- Weight in decisions
+### **3.2: Performance Optimization**
+- Database query optimization
+- Index tuning
+- Cache strategy refinement
+- Connection pooling
+- Parallel processing where applicable
+
+### **3.3: Data Quality Validation**
+```python
+# scripts/validate_data_quality.py
+# For each data source:
+# - Check completeness
+# - Validate ranges
+# - Verify timestamps
+# - Check for gaps
+# - Validate relationships
+```
+
+### **3.4: Monitoring Setup**
+- Set up logging for all components
+- Create data quality dashboards
+- Set up alerts for failures
+- Monitor API usage
+- Track storage growth
 
 **Deliverables:**
-- Sentiment analysis working
-- News integrated
+- Complete data foundation operational
+- All 41 AV APIs + IBKR feeds running
+- Data quality validated
+- Performance optimized
+- Monitoring active
+- **Time:** 3 days
+
+---
+
+## **Phase 4: Institutional-Grade Analytics Engine (Days 18-24)**
+**Goal:** Build hedge fund quality analytics on complete data foundation
+
+### **4.1: Greeks & Options Analytics**
+```python
+class OptionsAnalytics:
+    def validate_all_greeks(self, options_data):
+        # Validate bounds and freshness
+        # Cross-validate with underlying
+        
+    def calculate_gex(self, symbol):
+        # Gamma Exposure (GEX) calculations
+        # Net dealer gamma positioning
+        # Identify key gamma levels
+        
+    def analyze_options_flow(self, symbol):
+        # Unusual options activity detection
+        # Put/Call ratio analysis
+        # Open interest changes
+        # Smart money vs retail flow
+        
+    def calculate_iv_metrics(self):
+        # IV rank and percentile
+        # Volatility skew analysis
+        # Term structure analysis
+        # Volatility surface modeling
+```
+
+### **4.2: Market Microstructure Analytics**
+```python
+class MicrostructureAnalytics:
+    def calculate_vpin(self, symbol):
+        # Volume-Synchronized Probability of Informed Trading
+        # Order flow toxicity metrics
+        # Trade size classification
+        
+    def analyze_order_flow(self, symbol):
+        # Cumulative delta analysis
+        # Buy/sell pressure metrics
+        # Large trade detection
+        # Sweep detection
+        
+    def compute_liquidity_metrics(self):
+        # Bid-ask spread analysis
+        # Market depth assessment
+        # Quote stability metrics
+        # Slippage estimation
+```
+
+### **4.3: Advanced Technical Analysis**
+```python
+class AdvancedTechnicalAnalyzer:
+    def __init__(self):
+        # All 16 standard indicators
+        # Plus institutional indicators
+    
+    def calculate_anchored_vwap(self, symbol, anchor_point):
+        # Anchored VWAP from events
+        
+    def generate_market_profile(self, symbol):
+        # TPO (Time Price Opportunity)
+        # Value area calculations
+        # Point of Control (POC)
+        
+    def analyze_volume_profile(self, symbol):
+        # Volume by price level
+        # High volume nodes (HVN)
+        # Low volume nodes (LVN)
+        
+    def calculate_internals(self):
+        # ADD (Advance-Decline)
+        # VOLD (Volume Difference)
+        # TICK analysis
+        # TRIN calculation
+        
+    def generate_signals(self, symbol):
+        # 20+ indicator confluence
+        # Multi-timeframe analysis
+        # Regime-adjusted weighting
+```
+
+### **4.4: Risk Analytics**
+```python
+class RiskAnalytics:
+    def calculate_var(self, portfolio, confidence=0.95):
+        # Value at Risk (parametric, historical, Monte Carlo)
+        
+    def calculate_cvar(self, portfolio, confidence=0.95):
+        # Conditional VaR (Expected Shortfall)
+        
+    def run_monte_carlo(self, portfolio, simulations=10000):
+        # Monte Carlo risk simulations
+        # Stress testing scenarios
+        
+    def calculate_risk_metrics(self, portfolio):
+        # Sharpe ratio
+        # Sortino ratio
+        # Calmar ratio
+        # Maximum drawdown
+        # Beta vs benchmarks
+        # Tracking error
+        # Information ratio
+```
+
+### **4.5: Market Structure & Regime Analysis**
+```python
+class MarketStructureAnalyzer:
+    def analyze_breadth(self):
+        # McClellan Oscillator
+        # Advance/Decline ratios
+        # New highs/lows
+        # Sector rotation metrics
+        
+    def detect_regime(self):
+        # Volatility regime classification
+        # Trend regime detection
+        # Risk-on/Risk-off indicators
+        # Correlation regime shifts
+        
+    def calculate_correlations(self):
+        # Rolling correlation matrices
+        # Cross-asset correlations
+        # Lead-lag relationships
+        # Principal component analysis
+        
+    def analyze_market_internals(self):
+        # Dollar volume flows
+        # Sector performance dispersion
+        # Market concentration metrics
+        # Breadth thrust indicators
+```
+
+### **4.6: Fundamental & Sentiment Analytics**
+```python
+class FundamentalAnalyzer:
+    def analyze_earnings_impact(self, symbol):
+        # Earnings surprise history
+        # Analyst revisions momentum
+        # Forward guidance analysis
+        
+    def assess_valuation(self, symbol):
+        # Multiple valuation metrics
+        # Peer comparison
+        # Historical percentiles
+        
+    def analyze_smart_money(self, symbol):
+        # Insider transaction scoring
+        # Institutional ownership changes
+        # 13F filing analysis
+        
+    def calculate_factor_exposures(self, symbol):
+        # Value, Growth, Momentum factors
+        # Quality metrics
+        # Low volatility factor
+```
+
+### **4.7: Integrated Analytics Engine**
+```python
+class InstitutionalAnalyticsEngine:
+    def __init__(self):
+        self.options = OptionsAnalytics()
+        self.microstructure = MicrostructureAnalytics()
+        self.technical = AdvancedTechnicalAnalyzer()
+        self.risk = RiskAnalytics()
+        self.market = MarketStructureAnalyzer()
+        self.fundamental = FundamentalAnalyzer()
+    
+    def comprehensive_analysis(self, symbol):
+        # Run all analyzers
+        # Weight by market regime
+        # Generate institutional-grade signals
+        # Calculate confidence scores
+        # Produce risk-adjusted recommendations
+```
+
+**Deliverables:**
+- GEX and options flow analytics
+- VPIN and microstructure metrics
+- Market profile and volume profile
+- VaR/CVaR risk calculations
+- Market regime detection
+- 30+ institutional indicators
+- Correlation analysis system
+- Complete quant analytics pipeline
+- **Time:** 7 days
+
+---
+
+## **Phase 5: Institutional ML Feature Engineering (Days 25-28)**
+**Goal:** Create 200+ quant features per symbol
+
+### **5.1: Comprehensive Feature Builder**
+```python
+class InstitutionalFeatureBuilder:
+    def __init__(self):
+        # Access to all data sources
+        self.feature_count = 0
+        
+    def extract_price_features(self, symbol):
+        """50+ price-based features"""
+        # Returns: 1m, 5m, 15m, 30m, 1h, 1d, 5d, 20d
+        # Log returns for all periods
+        # Volatility: realized, GARCH, EWMA
+        # Price momentum indicators
+        # Mean reversion metrics
+        # High/low/close ratios
+        # Gap analysis
+        # Price efficiency ratios
+        
+    def extract_microstructure_features(self, symbol):
+        """30+ microstructure features"""
+        # Bid-ask spreads (raw, percentage, rolling)
+        # Quote imbalance ratios
+        # Trade size distribution
+        # Kyle's lambda
+        # Amihud illiquidity measure
+        # Roll's implied spread
+        # Effective spread metrics
+        
+    def extract_greek_features(self, symbol):
+        """40+ options features"""
+        # All Greeks and ratios
+        # Greeks momentum (1h, 1d changes)
+        # Cross-Greeks relationships
+        # Implied volatility features
+        # Skew metrics
+        # Term structure features
+        # Put-call parity deviations
+        # Options flow imbalance
+        
+    def extract_technical_features(self, symbol):
+        """50+ technical features"""
+        # All 16 indicator values
+        # Indicator derivatives and ratios
+        # Multi-timeframe indicators
+        # Divergence signals
+        # Support/resistance distances
+        # Pattern recognition scores
+        # Fibonacci retracement levels
+        
+    def extract_market_features(self):
+        """30+ market structure features"""
+        # Correlation to SPY, QQQ, VIX
+        # Beta calculations (rolling)
+        # Sector relative strength
+        # Market regime indicators
+        # Breadth metrics
+        # Risk on/off scores
+        # Cross-asset signals
+        
+    def extract_fundamental_features(self, symbol):
+        """20+ fundamental features"""
+        # Valuation ratios and percentiles
+        # Earnings momentum
+        # Analyst revision trends
+        # Insider transaction scores
+        # Economic sensitivity scores
+        
+    def extract_alternative_features(self, symbol):
+        """30+ alternative data features"""
+        # News sentiment scores
+        # Social media mentions
+        # Options flow signals
+        # Dark pool indicators
+        # Smart money positioning
+        # Seasonal patterns
+        # Time-based features (hour, day, month effects)
+        
+    def engineer_interaction_features(self, base_features):
+        """Create interaction and polynomial features"""
+        # Key feature interactions
+        # Polynomial features for non-linear relationships
+        # Ratio features
+        # Difference features
+        
+    def build_feature_vector(self, symbol):
+        """Combine all features into 200+ dimensional vector"""
+        features = {}
+        features.update(self.extract_price_features(symbol))
+        features.update(self.extract_microstructure_features(symbol))
+        features.update(self.extract_greek_features(symbol))
+        features.update(self.extract_technical_features(symbol))
+        features.update(self.extract_market_features())
+        features.update(self.extract_fundamental_features(symbol))
+        features.update(self.extract_alternative_features(symbol))
+        features.update(self.engineer_interaction_features(features))
+        return features  # 200+ features
+```
+
+### **5.2: Feature Pipeline & Storage**
+```python
+class FeaturePipeline:
+    def __init__(self):
+        self.feature_builder = InstitutionalFeatureBuilder()
+        self.feature_selector = FeatureSelector()
+        
+    def process_features(self, symbol):
+        # Generate raw features
+        # Handle missing values
+        # Normalize/standardize
+        # Feature selection
+        # Dimensionality reduction if needed
+        
+    def calculate_feature_importance(self, features, target):
+        # SHAP values
+        # Permutation importance
+        # Mutual information scores
+        # Recursive feature elimination
+```
+
+```sql
+-- Enhanced feature storage
+CREATE TABLE ml_features (
+    symbol VARCHAR(10),
+    timestamp TIMESTAMP,
+    features JSONB,  -- 200+ features
+    feature_version INTEGER,
+    feature_importance JSONB,
+    quality_score DECIMAL(3,2),
+    PRIMARY KEY (symbol, timestamp)
+) PARTITION BY RANGE (timestamp);
+
+CREATE TABLE feature_metadata (
+    feature_name VARCHAR(100),
+    feature_type VARCHAR(50),
+    calculation_method TEXT,
+    importance_score DECIMAL(5,4),
+    update_frequency VARCHAR(20),
+    created_at TIMESTAMP
+);
+```
+
+### **5.3: Feature Quality & Monitoring**
+```python
+class FeatureQualityMonitor:
+    def check_feature_stability(self):
+        # Population Stability Index (PSI)
+        # Feature drift detection
+        # Correlation stability
+        
+    def validate_features(self, features):
+        # Range checks
+        # Outlier detection
+        # Missing value analysis
+        # Cross-validation with known good features
+```
+
+**Deliverables:**
+- 200+ institutional-grade features per symbol
+- Feature importance analysis with SHAP
+- Real-time feature generation pipeline
+- Feature quality monitoring
+- Feature versioning and metadata
 - **Time:** 4 days
 
 ---
 
-## **Phase 14: Fundamental APIs (Days 68-74)**
-**Goal:** Add all fundamental data APIs
+## **Phase 6: Institutional ML Models & Backtesting (Days 29-35)**
+**Goal:** Deploy quant-grade ML models with rigorous backtesting
 
-### **14.1: Company Fundamentals**
-Each API same pattern:
-- OVERVIEW
-- EARNINGS
-- EARNINGS_ESTIMATES
-- EARNINGS_CALENDAR
-- INCOME_STATEMENT
-- BALANCE_SHEET
-- CASH_FLOW
-- DIVIDENDS
-- SPLITS
+### **6.1: Advanced Model Suite**
+```python
+class InstitutionalModelSuite:
+    def __init__(self):
+        self.models = {
+            # Tree-based ensemble
+            'xgboost': XGBClassifier(),
+            'lightgbm': LGBMClassifier(), 
+            'catboost': CatBoostClassifier(),
+            'random_forest': RandomForestClassifier(),
+            
+            # Deep learning
+            'lstm': self.build_lstm_model(),
+            'gru': self.build_gru_model(),
+            'transformer': self.build_transformer_model(),
+            
+            # Statistical models
+            'logistic_regression': LogisticRegression(),
+            'svm': SVC(probability=True),
+            
+            # Regime-specific models
+            'high_vol_model': None,  # Trained on high volatility periods
+            'low_vol_model': None,   # Trained on low volatility periods
+            'trend_model': None,     # Trained on trending markets
+            'range_model': None,     # Trained on ranging markets
+        }
+        
+    def build_lstm_model(self):
+        """LSTM for time series prediction"""
+        # Multi-layer LSTM with attention
+        # Sequence length: 60 periods
+        # Dropout for regularization
+        
+    def build_transformer_model(self):
+        """Transformer architecture for sequences"""
+        # Self-attention mechanism
+        # Positional encoding
+        # Multi-head attention
+```
 
-### **14.2: Economic Indicators**
-- TREASURY_YIELD
-- FEDERAL_FUNDS_RATE
-- CPI
-- INFLATION
-- REAL_GDP
+### **6.2: Ensemble & Meta-Learning**
+```python
+class EnsemblePredictor:
+    def __init__(self):
+        self.base_models = InstitutionalModelSuite()
+        self.meta_model = None  # Stacking ensemble
+        
+    def train_meta_model(self, predictions, targets):
+        """Train meta-model on base model predictions"""
+        # Stacking with cross-validation
+        # Optimal weight calculation
+        # Dynamic weighting based on regime
+        
+    def predict_with_confidence(self, features):
+        """Generate predictions with confidence intervals"""
+        # Base model predictions
+        # Meta-model ensemble
+        # Confidence calculation
+        # Prediction intervals
+        return {
+            'prediction': ensemble_pred,
+            'confidence': confidence_score,
+            'lower_bound': lower_ci,
+            'upper_bound': upper_ci,
+            'model_agreement': agreement_score
+        }
+```
+
+### **6.3: Backtesting Framework**
+```python
+class InstitutionalBacktester:
+    def __init__(self):
+        self.results = {}
+        
+    def walk_forward_analysis(self, data, model, window_size=252, step_size=21):
+        """Walk-forward optimization"""
+        # Train on window_size days
+        # Test on step_size days
+        # Roll forward
+        # Collect out-of-sample results
+        
+    def purged_cross_validation(self, data, model, n_splits=5, purge_gap=10):
+        """Purged and embargoed CV for time series"""
+        # Prevent data leakage
+        # Add embargo period
+        # Calculate robust metrics
+        
+    def calculate_performance_metrics(self, predictions, actuals, prices):
+        """Comprehensive performance metrics"""
+        return {
+            # Classification metrics
+            'accuracy': accuracy_score(actuals, predictions),
+            'precision': precision_score(actuals, predictions),
+            'recall': recall_score(actuals, predictions),
+            'f1': f1_score(actuals, predictions),
+            'auc_roc': roc_auc_score(actuals, predictions),
+            
+            # Trading metrics
+            'sharpe_ratio': self.calculate_sharpe(returns),
+            'sortino_ratio': self.calculate_sortino(returns),
+            'calmar_ratio': self.calculate_calmar(returns),
+            'max_drawdown': self.calculate_max_dd(returns),
+            'win_rate': self.calculate_win_rate(trades),
+            'profit_factor': self.calculate_profit_factor(trades),
+            'expected_value': self.calculate_ev(trades),
+            
+            # Risk metrics
+            'var_95': self.calculate_var(returns, 0.95),
+            'cvar_95': self.calculate_cvar(returns, 0.95),
+            'downside_deviation': self.calculate_downside_dev(returns),
+            'tail_ratio': self.calculate_tail_ratio(returns),
+            
+            # Statistical tests
+            't_statistic': self.calculate_t_stat(returns),
+            'p_value': self.calculate_p_value(returns),
+            'information_ratio': self.calculate_ir(returns, benchmark)
+        }
+    
+    def monte_carlo_simulation(self, strategy, n_simulations=10000):
+        """Monte Carlo simulation for strategy robustness"""
+        # Random sampling with replacement
+        # Generate return distributions
+        # Calculate confidence intervals
+        # Stress testing
+```
+
+### **6.4: Feature Importance & Interpretability**
+```python
+class ModelInterpretability:
+    def calculate_shap_values(self, model, features):
+        """SHAP values for feature importance"""
+        # Global feature importance
+        # Local explanations for predictions
+        # Feature interaction effects
+        
+    def generate_feature_importance_report(self):
+        """Comprehensive feature analysis"""
+        # Top features by model
+        # Feature stability over time
+        # Feature interaction heatmap
+        # Partial dependence plots
+```
+
+### **6.5: Model Monitoring & Retraining**
+```python
+class ModelMonitor:
+    def __init__(self):
+        self.performance_history = []
+        self.drift_threshold = 0.1
+        
+    def detect_model_drift(self, recent_performance):
+        """Detect when model needs retraining"""
+        # Performance degradation detection
+        # Feature drift analysis
+        # Prediction distribution shift
+        
+    def trigger_retraining(self):
+        """Automated retraining pipeline"""
+        # Collect recent data
+        # Retrain with new data
+        # Validate on holdout
+        # A/B test new vs old model
+```
+
+### **6.6: Prediction Storage & Analysis**
+```sql
+CREATE TABLE ml_predictions (
+    id SERIAL PRIMARY KEY,
+    symbol VARCHAR(10),
+    timestamp TIMESTAMP,
+    model_version VARCHAR(20),
+    prediction DECIMAL(5,4),
+    confidence DECIMAL(5,4),
+    feature_vector JSONB,
+    model_outputs JSONB,
+    actual_outcome DECIMAL(5,4),  -- For later analysis
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_predictions_symbol_time (symbol, timestamp)
+);
+
+CREATE TABLE backtest_results (
+    backtest_id UUID PRIMARY KEY,
+    strategy VARCHAR(50),
+    start_date DATE,
+    end_date DATE,
+    metrics JSONB,  -- All performance metrics
+    trades JSONB,   -- Trade log
+    parameters JSONB,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
 
 **Deliverables:**
-- All fundamental APIs working
-- Economic data integrated
-- **Time:** 7 days
+- 10+ ML models including LSTM/GRU
+- Walk-forward backtesting framework
+- Purged cross-validation implementation
+- SHAP-based interpretability
+- Monte Carlo simulations
+- Model drift detection
+- Comprehensive performance metrics
+- A/B testing framework
+- **Time:** 7 days (extended from 4)
 
 ---
 
-## **Phase 15: Output, Monitoring & Educational Content (Days 75-82)**
-**Goal:** Discord alerts, dashboard, and comprehensive market analysis
+## **Phase 7: Strategy Implementation (Days 36-43)**
+**Goal:** Implement all trading strategies
 
-### **15.1: Market Analysis Engine**
+### **7.1: Strategy Framework**
 ```python
-# analytics/market_analyzer.py
-class MarketAnalyzer:
-    def generate_daily_analysis(self)
-    def identify_market_trends(self)
-    def detect_unusual_activity(self)
-    def create_educational_insights(self)
+class BaseStrategy:
+    def evaluate(self, market_data, predictions):
+    def generate_signal(self):
+    def calculate_confidence(self):
 ```
 
-### **15.2: Content Generator**
+### **7.2: Strategy Implementations**
+- 0DTE Strategy
+- 1DTE Strategy
+- 14DTE Swing Strategy
+- MOC Imbalance Strategy
+
+### **7.3: Strategy Engine**
 ```python
-# publishing/content_generator.py
-class ContentGenerator:
-    def create_market_report(self)
-    def generate_strategy_explanation(self)
-    def build_educational_post(self)
-    def format_trade_analysis(self)
-    def create_performance_summary(self)
+class StrategyEngine:
+    def run_all_strategies(self):
+    def select_best_signals(self):
+    def apply_filters(self):
 ```
 
-### **15.3: Educational Report Builder**
+### **7.4: Decision Engine**
 ```python
-# reports/educational_reports.py
-class EducationalReportBuilder:
-    def daily_market_overview(self)
-    def options_education_series(self)
-    def strategy_deep_dives(self)
-    def risk_management_lessons(self)
-    def technical_analysis_tutorials(self)
-```
-
-### **15.4: Discord Publisher Enhanced**
-```python
-# publishing/discord_publisher.py
-class DiscordPublisher:
-    # Trade Alerts
-    def send_trade_alert(self)
-    def send_position_update(self)
-    
-    # Educational Content
-    def publish_market_analysis(self)
-    def share_educational_content(self)
-    def post_strategy_explanation(self)
-    
-    # Performance & Analytics
-    def send_daily_summary(self)
-    def share_weekly_performance(self)
-    def publish_market_insights(self)
-    
-    # Community Engagement
-    def answer_common_questions(self)
-    def share_learning_resources(self)
-```
-
-### **15.5: Dashboard API with Analytics**
-```python
-# api/dashboard_api.py
-@app.get("/positions")
-@app.get("/performance")
-@app.get("/market-analysis")
-@app.get("/educational-content")
-@app.get("/reports/daily")
-@app.get("/reports/weekly")
-@app.websocket("/stream")
-```
-
-### **15.6: Automated Report Generation**
-```yaml
-# config/reports/schedules.yaml
-daily_reports:
-  market_overview:
-    time: "06:00"
-    content:
-      - pre_market_analysis
-      - key_levels
-      - volatility_forecast
-      - educational_tip
-  
-  end_of_day:
-    time: "16:30"
-    content:
-      - trade_summary
-      - performance_metrics
-      - market_lessons
-      - tomorrow_outlook
-
-weekly_reports:
-  comprehensive_analysis:
-    day: "Sunday"
-    time: "18:00"
-    content:
-      - weekly_performance
-      - strategy_effectiveness
-      - market_education
-      - upcoming_catalysts
+class DecisionEngine:
+    def process_signals(self, signals):
+    def apply_risk_checks(self):
+    def generate_orders(self):
 ```
 
 **Deliverables:**
-- Market analysis engine working
-- Educational content generated daily
-- Discord publishing comprehensive content
-- Dashboard with full analytics
-- Automated report generation
-- WebSocket streaming
+- All 4 strategies implemented
+- Strategy selection logic
+- Decision engine operational
+- Signal generation working
 - **Time:** 8 days
 
 ---
 
-## **Phase 16: Comprehensive Market Analysis System (Days 83-89)**
-**Goal:** Build complete market analysis and educational content pipeline
+## **Phase 8: Risk Management (Days 44-47)**
+**Goal:** Comprehensive risk management
 
-### **16.1: Market Analysis Framework**
+### **8.1: Risk Manager**
 ```python
-# analytics/comprehensive_market_analysis.py
-class ComprehensiveMarketAnalysis:
-    def __init__(self):
-        self.technical_analyzer = TechnicalAnalyzer()
-        self.fundamental_analyzer = FundamentalAnalyzer()
-        self.sentiment_analyzer = SentimentAnalyzer()
-        self.options_flow_analyzer = OptionsFlowAnalyzer()
-    
-    def generate_pre_market_report(self):
-        # Overnight moves analysis
-        # Key support/resistance levels
-        # Expected volatility
-        # Economic calendar impact
-        # Educational context
-    
-    def intraday_market_updates(self):
-        # Sector rotation analysis
-        # Unusual options activity
-        # Volume analysis
-        # Trend changes
-        # Real-time educational notes
-    
-    def end_of_day_comprehensive(self):
-        # Complete market recap
-        # Trade analysis with lessons
-        # Strategy performance review
-        # Tomorrow's preparation
-        # Educational takeaways
+class RiskManager:
+    def check_position_limits(self):
+    def check_portfolio_greeks(self):
+    def check_correlation_risk(self):
+    def check_concentration_risk(self):
 ```
 
-### **16.2: Educational Content Engine**
+### **8.2: Position Sizing**
 ```python
-# education/content_engine.py
-class EducationalContentEngine:
-    def __init__(self):
-        self.topics = self.load_curriculum()
-        
-    def generate_daily_lesson(self):
-        # Options basics series
-        # Greeks explanations
-        # Strategy deep dives
-        # Risk management principles
-        # Technical analysis tutorials
-    
-    def create_trade_case_studies(self, trades):
-        # Why we entered
-        # What we saw in the data
-        # How it played out
-        # Lessons learned
-        # What to do differently
-    
-    def build_interactive_tutorials(self):
-        # Step-by-step guides
-        # Video script generation
-        # Infographic data
-        # Quiz questions
+class PositionSizer:
+    def calculate_kelly_size(self):
+    def apply_risk_limits(self):
+    def adjust_for_volatility(self):
 ```
 
-### **16.3: Market Commentary Generator**
-```python
-# publishing/market_commentary.py
-class MarketCommentaryGenerator:
-    def generate_commentary(self, market_data):
-        # Real-time market observations
-        # Connect to broader themes
-        # Historical context
-        # Educational angles
-        # Actionable insights
-    
-    def format_for_platforms(self):
-        # Discord format (concise)
-        # Newsletter format (detailed)
-        # Dashboard format (visual)
-        # API format (structured)
-```
-
-### **16.4: Performance Analytics & Reporting**
-```python
-# reports/performance_analytics.py
-class PerformanceAnalytics:
-    def generate_detailed_analytics(self):
-        # Win/loss analysis
-        # Strategy effectiveness
-        # Risk-adjusted returns
-        # Drawdown analysis
-        # Improvement opportunities
-    
-    def create_educational_metrics(self):
-        # What worked and why
-        # Common patterns identified
-        # Market conditions impact
-        # Strategy adaptations needed
-```
-
-### **16.5: Content Distribution System**
-```python
-# publishing/distribution_system.py
-class ContentDistributionSystem:
-    def __init__(self):
-        self.discord = DiscordPublisher()
-        self.dashboard = DashboardPublisher()
-        self.api = APIPublisher()
-        # Future: Twitter/X, WHOP, Newsletter
-    
-    def distribute_content(self, content_type, content):
-        # Route to appropriate channels
-        # Format for each platform
-        # Schedule delayed posts
-        # Track engagement metrics
-```
-
-### **16.6: Educational Content Configuration**
-```yaml
-# config/education/curriculum.yaml
-options_basics:
-  topics:
-    - what_are_options
-    - calls_vs_puts
-    - strike_prices_explained
-    - expiration_dates
-    - intrinsic_vs_extrinsic
-
-greeks_series:
-  topics:
-    - delta_explained
-    - gamma_risk
-    - theta_decay
-    - vega_volatility
-    - practical_applications
-
-strategies:
-  0dte:
-    - setup_criteria
-    - risk_management
-    - entry_timing
-    - exit_rules
-    - case_studies
-  
-  swing_trading:
-    - multi_day_setups
-    - position_management
-    - rolling_options
-    - profit_taking
-
-market_analysis:
-  technical:
-    - support_resistance
-    - trend_analysis
-    - volume_patterns
-    - indicator_confluence
-  
-  fundamental:
-    - earnings_impact
-    - economic_data
-    - sector_rotation
-    - market_regime
-```
+### **8.3: Stop Loss Management**
+- Dynamic stop losses
+- Trailing stops
+- Time-based stops
+- Volatility-adjusted stops
 
 **Deliverables:**
-- Complete market analysis system
-- Educational content pipeline
-- Automated report generation
-- Multi-platform distribution
-- Performance analytics with lessons
-- **Time:** 7 days
+- Complete risk framework
+- Position sizing operational
+- Stop loss systems active
+- **Time:** 4 days
 
 ---
 
-## **Phase 17: Complete Integration Testing (Days 90-99)**
-**Goal:** Full system testing in paper mode
+## **Phase 9: Execution System (Days 48-51)**
+**Goal:** Order execution via IBKR
 
-### **16.1: 5-Day Paper Trading**
+### **9.1: Order Manager**
+```python
+class OrderManager:
+    def submit_order(self, signal):
+    def monitor_fill(self):
+    def handle_partial_fills(self):
+    def manage_cancellations(self):
+```
+
+### **9.2: Execution Analytics**
+- Slippage tracking
+- Fill quality analysis
+- Execution performance metrics
+
+**Deliverables:**
+- Orders executing in paper account
+- Fill monitoring active
+- Execution analytics operational
+- **Time:** 4 days
+
+---
+
+## **Phase 10: Paper Trading & Documentation (Days 52-59)**
+**Goal:** Full system paper trading with documentation
+
+### **10.1: Paper Trading**
+- 5-day continuous paper trading
 - All strategies active
-- All APIs running
 - Full monitoring
 - Performance tracking
 
-### **16.2: Stress Testing**
-- API failures
-- Database disconnects
-- High volatility
-- Rate limit testing
+### **10.2: Trade Documentation**
+```python
+class TradeDocumentation:
+    def document_entry(self, trade):
+    def capture_market_context(self):
+    def track_management(self):
+    def analyze_outcome(self):
+```
 
-### **16.3: Performance Optimization**
-- Query optimization
-- Cache tuning
-- Parallel processing
-- Resource monitoring
+### **10.3: Performance Analysis**
+- Win rate calculation
+- Profit factor analysis
+- Sharpe ratio tracking
+- Drawdown monitoring
 
 **Deliverables:**
 - 5+ days successful paper trading
-- All failure modes tested
-- Performance optimized
-- **Time:** 10 days
+- Complete trade documentation
+- Performance metrics validated
+- Educational content library started
+- **Time:** 8 days
 
 ---
 
-## **Phase 17: Production Preparation (Days 89-95)**
-**Goal:** Final preparations for live trading
+## **Phase 11: Output Layer & Publishing (Days 60-66)**
+**Goal:** Discord, dashboard, and educational content
 
-### **17.1: Documentation Update**
-- API documentation
-- Operational runbooks
-- Emergency procedures
-- Configuration guide
+### **11.1: Discord Publisher**
+```python
+class DiscordPublisher:
+    def send_trade_alert(self):
+    def post_market_analysis(self):
+    def share_educational_content(self):
+    def publish_performance(self):
+```
 
-### **17.2: Backup & Recovery**
-- Database backups
-- Configuration backups
-- Recovery procedures
-- Rollback plans
+### **11.2: Dashboard API**
+```python
+@app.get("/positions")
+@app.get("/performance")
+@app.get("/market-analysis")
+@app.websocket("/stream")
+```
 
-### **17.3: Final Validation**
-- Go/No-Go checklist
-- Performance metrics review
-- Risk assessment
-- Team training
+### **11.3: Report Generation**
+- Daily market analysis
+- Weekly performance reports
+- Educational content pieces
+- Strategy explanations
+
+### **11.4: Content Distribution**
+- Automated report generation
+- Scheduled publishing
+- Multi-channel distribution
 
 **Deliverables:**
-- Complete documentation
-- All procedures tested
-- Ready for production
+- Discord publishing active
+- Dashboard operational
+- Educational content flowing
+- Reports automated
 - **Time:** 7 days
 
 ---
 
-## **Phase 18: Production Deployment (Day 96+)**
-**Goal:** Begin live trading with real capital
+## **Phase 12: Educational Platform (Days 67-73)**
+**Goal:** Complete educational content system
 
-### **18.1: Gradual Capital Deployment**
-- Week 1: $1,000 limit
-- Week 2: $2,500 if profitable
-- Week 3: $5,000 if profitable
-- Week 4: $10,000 target
+### **12.1: Market Analysis System**
+```python
+class MarketAnalyzer:
+    def generate_pre_market_report(self):
+    def create_intraday_updates(self):
+    def build_end_of_day_analysis(self):
+```
 
-### **18.2: Daily Operations**
-- Pre-market checklist
-- Intraday monitoring
-- Post-market review
-- Continuous improvement
+### **12.2: Educational Content Engine**
+```python
+class EducationalEngine:
+    def create_daily_lessons(self):
+    def generate_case_studies(self):
+    def build_strategy_guides(self):
+```
+
+### **12.3: Community Engagement**
+- Q&A responses
+- Interactive tutorials
+- Performance transparency
+- Learning resources
 
 **Deliverables:**
-- System trading live
-- Profitable operations
-- **Time:** Ongoing
+- Full educational platform
+- 10+ daily content pieces
+- Community engagement active
+- **Time:** 7 days
 
 ---
 
-## **Module Build Order Summary**
+## **Phase 13: System Integration & Testing (Days 74-80)**
+**Goal:** Complete system validation
 
-### **Core Modules (Built Incrementally)**
-1. `config_manager.py` - Phase 0, enhanced each phase
-2. `av_client.py` - Phase 1, add methods through Phase 14
-3. `ibkr_connection.py` - Phase 3, enhanced Phase 9
-4. `rate_limiter.py` - Phase 2
-5. `scheduler.py` - Phase 4
-6. `cache_manager.py` - Phase 4
-7. `ingestion.py` - Phase 1, extended each API phase
-8. `greeks_validator.py` - Phase 6
-9. `analytics_engine.py` - Phase 6
-10. `indicator_processor.py` - Phase 10
-11. `base_strategy.py` - Phase 7
-12. `zero_dte.py` - Phase 7
-13. `one_dte.py` - Phase 11
-14. `swing_14d.py` - Phase 11
-15. `moc_imbalance.py` - Phase 11
-16. `decision_engine.py` - Phase 7
-17. `strategy_engine.py` - Phase 11
-18. `risk_manager.py` - Phase 8
-19. `position_sizer.py` - Phase 8
-20. `ibkr_executor.py` - Phase 9
-21. `trade_monitor.py` - Phase 9
-22. `trade_documentation.py` - Phase 9 (NEW)
-23. `feature_builder.py` - Phase 12
-24. `model_suite.py` - Phase 12
-25. `market_analyzer.py` - Phase 15 (NEW)
-26. `content_generator.py` - Phase 15 (NEW)
-27. `educational_reports.py` - Phase 15 (NEW)
-28. `discord_publisher.py` - Phase 15 (ENHANCED)
-29. `dashboard_api.py` - Phase 15 (ENHANCED)
-30. `comprehensive_market_analysis.py` - Phase 16 (NEW)
-31. `content_engine.py` - Phase 16 (NEW)
-32. `market_commentary.py` - Phase 16 (NEW)
-33. `performance_analytics.py` - Phase 16 (NEW)
-34. `distribution_system.py` - Phase 16 (NEW)
+### **13.1: Integration Testing**
+- End-to-end testing
+- Stress testing
+- Failure recovery testing
+- Performance testing
+
+### **13.2: Optimization**
+- Query optimization
+- Cache tuning
+- Resource monitoring
+- Cost analysis
+
+### **13.3: Documentation**
+- Complete system documentation
+- Operational runbooks
+- Emergency procedures
+- Configuration guides
+
+**Deliverables:**
+- System fully tested
+- Performance optimized
+- Documentation complete
+- **Time:** 7 days
 
 ---
 
-## **API Implementation Order**
+## **Phase 14: Production Preparation (Days 81-87)**
+**Goal:** Ready for live trading
 
-### **Priority 1 - Core Data (Phases 1-5)**
-1. REALTIME_OPTIONS - Phase 1
-2. HISTORICAL_OPTIONS - Phase 2
-3. RSI - Phase 5
-4. MACD - Phase 5
-5. BBANDS - Phase 5
-6. VWAP - Phase 5
-7. ATR - Phase 5
-8. ADX - Phase 5
+### **14.1: Final Validation**
+- Go/No-Go checklist
+- Risk assessment
+- Performance review
+- Team training
 
-### **Priority 2 - Analytics & Indicators (Phases 6, 10)**
-9. ANALYTICS_FIXED_WINDOW - Phase 6
-10. ANALYTICS_SLIDING_WINDOW - Phase 6
-11. STOCH - Phase 10
-12. AROON - Phase 10
-13. CCI - Phase 10
-14. MFI - Phase 10
-15. WILLR - Phase 10
-16. MOM - Phase 10
-17. EMA - Phase 10
-18. SMA - Phase 10
-19. OBV - Phase 10
-20. AD - Phase 10
+### **14.2: Production Setup**
+- Production environment
+- Monitoring systems
+- Backup procedures
+- Rollback plans
 
-### **Priority 3 - Sentiment (Phase 13)**
-21. NEWS_SENTIMENT - Phase 13
-22. TOP_GAINERS_LOSERS - Phase 13
-23. INSIDER_TRANSACTIONS - Phase 13
+### **14.3: Gradual Deployment**
+- $1,000 initial capital
+- Gradual scaling plan
+- Risk monitoring
+- Performance tracking
 
-### **Priority 4 - Fundamentals (Phase 14)**
-24. OVERVIEW - Phase 14
-25. EARNINGS - Phase 14
-26. EARNINGS_ESTIMATES - Phase 14
-27. EARNINGS_CALENDAR - Phase 14
-28. EARNINGS_CALL_TRANSCRIPT - Phase 14
-29. INCOME_STATEMENT - Phase 14
-30. BALANCE_SHEET - Phase 14
-31. CASH_FLOW - Phase 14
-32. DIVIDENDS - Phase 14
-33. SPLITS - Phase 14
-
-### **Priority 5 - Economic (Phase 14)**
-34. TREASURY_YIELD - Phase 14
-35. FEDERAL_FUNDS_RATE - Phase 14
-36. CPI - Phase 14
-37. INFLATION - Phase 14
-38. REAL_GDP - Phase 14
-
-### **IBKR Data Feeds (Phase 3)**
-- Real-time quotes
-- 1-minute bars
-- 5-minute bars
-- 10-minute bars
-- 15-minute bars
-- 30-minute bars
-- 1-hour bars
-- MOC Imbalance (Phase 11)
-
----
-
-## **Configuration Files Build Order**
-
-### **Phase 0 - Minimal**
-- `.env` (credentials only)
-- `config/apis/alpha_vantage.yaml` (one endpoint)
-
-### **Phase 2 - Rate Limiting**
-- `config/apis/rate_limits.yaml`
-
-### **Phase 3 - IBKR**
-- `config/apis/ibkr.yaml`
-
-### **Phase 4 - Scheduling**
-- `config/data/schedules.yaml`
-- `config/system/redis.yaml`
-
-### **Phase 7 - First Strategy**
-- `config/strategies/0dte.yaml`
-
-### **Phase 8 - Risk**
-- `config/risk/position_limits.yaml`
-- `config/risk/portfolio_limits.yaml`
-
-### **Phase 11 - More Strategies**
-- `config/strategies/1dte.yaml`
-- `config/strategies/swing_14d.yaml`
-- `config/strategies/moc_imbalance.yaml`
-
-### **Phase 12 - ML**
-- `config/ml/models.yaml`
-- `config/ml/features.yaml`
-
-### **Phase 15 - Monitoring**
-- `config/monitoring/discord.yaml`
-- `config/monitoring/alerts.yaml`
-
-### **Phase 17 - Environments**
-- `config/environments/development.yaml`
-- `config/environments/paper.yaml`
-- `config/environments/production.yaml`
-
----
-
-## **Success Metrics by Phase**
-
-| Phase | Success Criteria | Validation |
-|-------|-----------------|------------|
-| 0 | Environment setup complete | Can import modules |
-| 1 | First API → Database | SPY options in DB |
-| 2 | Rate limiting works | Never exceeds 600/min |
-| 3 | IBKR real-time data | Bars flowing to DB |
-| 4 | Automated collection | Data updates automatically |
-| 5 | Core indicators working | 6 indicators in DB |
-| 6 | Greeks validated | Bad data rejected |
-| 7 | 0DTE signals generated | Confidence scores calculated, documentation started |
-| 8 | Risk checks enforced | Limits prevent bad trades |
-| 9 | Paper trades execute | Orders fill in TWS, trades documented |
-| 10 | All indicators working | 16 indicators operational |
-| 11 | All strategies active | 4 strategies generating signals |
-| 12 | ML predictions working | Models return confidence |
-| 13 | Sentiment integrated | News affects decisions |
-| 14 | Fundamentals complete | All 41 APIs working |
-| 15 | Educational content live | Daily reports, market analysis published |
-| 16 | Full analysis platform | Comprehensive educational system operational |
-| 17 | 5-day paper success | Win rate > 45%, daily content produced |
-| 18 | Production ready | All checklists complete, educational platform ready |
-| 19 | Live trading | Profitable operations, growing community |
-
----
-
-## **Risk Mitigation**
-
-### **Technical Risks**
-- **API Changes:** Test each API individually first
-- **Rate Limits:** Implement limiter early (Phase 2)
-- **Data Quality:** Validate at ingestion (every phase)
-- **Schema Evolution:** Design after seeing real data
-
-### **Operational Risks**
-- **Scope Creep:** Stick to phase objectives
-- **Integration Issues:** Test each addition immediately
-- **Performance:** Monitor from Phase 1
-- **Debugging:** Isolated phases = isolated problems
-
-### **Financial Risks**
-- **Paper First:** No real money until Phase 18
-- **Gradual Capital:** Start with $1,000
-- **Circuit Breakers:** Implemented Phase 8
-- **Manual Override:** Always available
-
----
-
-## **Key Principles**
-
-1. **Working Software Every Phase**
-   - Each phase produces functional output
-   - Never more than 7 days without working code
-
-2. **Real Data Drives Design**
-   - See API response → Design schema → Build table
-   - No assumptions about data structure
-
-3. **Incremental Complexity**
-   - Start synchronous, add async later
-   - Start single-threaded, add concurrency later
-   - Start simple queries, optimize later
-
-4. **Configuration Grows With Features**
-   - Don't create configs for unused features
-   - Add configuration when implementing feature
-
-5. **Test Immediately**
-   - Each API tested as implemented
-   - Each module tested when complete
-   - Integration tested at phase end
-
-6. **Document for Education**
-   - Every trade is a learning opportunity
-   - Build educational content from Day 1
-   - Share insights with community continuously
+**Deliverables:**
+- Production ready
+- All checklists complete
+- Team trained
+- **Time:** 7 days
 
 ---
 
 ## **Timeline Summary**
 
-- **Days 1-7:** Foundation + First API (Phase 0-1)
-- **Days 8-14:** Rate Limiting + IBKR (Phase 2-3)
-- **Days 15-24:** Scheduler + Core Indicators (Phase 4-5)
-- **Days 25-35:** Analytics + First Strategy (Phase 6-7)
-- **Days 36-43:** Risk + Paper Trading with Documentation (Phase 8-9)
-- **Days 44-57:** All Indicators + Strategies (Phase 10-11)
-- **Days 58-67:** ML + Sentiment (Phase 12-13)
-- **Days 68-82:** Fundamentals + Output with Educational Content (Phase 14-15)
-- **Days 83-89:** Comprehensive Market Analysis System (Phase 16)
-- **Days 90-99:** Full Integration Testing (Phase 17)
-- **Days 100-106:** Production Preparation (Phase 18)
-- **Day 107+:** Production Trading with Full Educational Platform (Phase 19)
+| Phase | Days | Deliverable |
+|-------|------|-------------|
+| 0 | 1-2 | Foundation setup |
+| 1 | 3-8 | All 41 Alpha Vantage APIs operational |
+| 2 | 9-14 | Complete IBKR implementation with aggregation |
+| 3 | 15-17 | Data integration validated |
+| 4 | 18-24 | Institutional analytics engine (VPIN, GEX, etc.) |
+| 5 | 25-28 | 200+ ML features engineered |
+| 6 | 29-35 | ML models with backtesting framework |
+| 7 | 36-43 | All strategies implemented |
+| 8 | 44-47 | Risk management complete |
+| 9 | 48-51 | Execution system operational |
+| 10 | 52-59 | Paper trading successful |
+| 11 | 60-66 | Publishing & dashboard live |
+| 12 | 67-73 | Educational platform complete |
+| 13 | 74-80 | System fully tested |
+| 14 | 81-87 | Production ready |
 
-**Total Timeline:** ~15 weeks to full production with educational platform
-**First Working System:** Day 7
-**Paper Trading Starts:** Day 40
-**Educational Content Starts:** Day 43 (basic), Day 82 (full)
-**Full Feature Set:** Day 89
-**Production Ready:** Day 106
+**Total: 87 days (~12.5 weeks)** (adjusted from 84 days)
 
 ---
 
-## **Next Steps**
+## **Key Improvements from v3.0**
 
-1. **Review & Approve** this incremental plan including educational components
-2. **Start Phase 0** immediately (3 days)
-3. **Daily Progress Tracking** starting Phase 1
-4. **Weekly Reviews** to adjust if needed
-5. **Document Discoveries** as you build (these become educational content)
-6. **Begin Planning** educational curriculum structure early
-7. **Start Capturing** trade rationale from first paper trade
+### **Efficiency Gains**
+- **Data Foundation:** 14 days vs 74 days (5x faster)
+- **Time to Analytics:** Day 18 vs Day 60 (3x faster)
+- **Production Ready:** 87 days vs 107 days (3 weeks faster)
+
+### **Quality Improvements**
+- **Coherent Database:** Designed holistically with complete schema upfront
+- **Complete Data:** Analytics has all 41 APIs + IBKR data from day one
+- **Institutional-Grade:** VPIN, GEX, microstructure analytics included
+- **200+ ML Features:** Comprehensive quant-style feature engineering
+- **Advanced ML:** LSTM/GRU time series models with backtesting framework
+- **Risk Analytics:** VaR, CVaR, Monte Carlo simulations standard
+
+### **Risk Reduction**
+- **No Partial Systems:** Each phase delivers complete functionality
+- **Early Validation:** Issues found early with complete data
+- **Simpler Debugging:** Batch implementation easier to troubleshoot
+- **Professional Testing:** Walk-forward analysis, purged CV standard
+
+---
+
+## **Critical Success Factors**
+
+1. **Complete Phase 0-3 First**
+   - No shortcuts on data foundation
+   - All APIs must work before proceeding
+
+2. **Maintain Rate Limits**
+   - Never exceed 500 calls/minute for Alpha Vantage
+   - Monitor continuously
+
+3. **Data Quality Gates**
+   - Validate all data before analytics
+   - No bad data in system
+
+4. **Incremental Validation**
+   - Test each phase thoroughly
+   - Don't proceed until phase complete
+
+5. **Documentation Discipline**
+   - Document all API responses
+   - Keep configuration current
+   - Track all decisions
+
+---
+
+## **Comprehensive Feature Validation**
+
+### **✅ All Original Requirements Included:**
+
+**Data Sources (Complete):**
+- ✅ All 41 Alpha Vantage APIs (batch implementation)
+- ✅ IBKR 5-second bars with aggregation to all timeframes
+- ✅ Real-time quotes and MOC imbalance
+
+**Strategies (All 4):**
+- ✅ 0DTE Strategy
+- ✅ 1DTE Strategy  
+- ✅ 14DTE Swing Strategy
+- ✅ MOC Imbalance Strategy
+
+**Symbols (All Tiers):**
+- ✅ Tier A: SPY, QQQ, IWM, SPX
+- ✅ Tier B: AAPL, MSFT, NVDA, GOOGL, AMZN, META, TSLA
+- ✅ Tier C: Rotating watchlist
+
+**Output & Publishing:**
+- ✅ Discord webhooks with comprehensive alerts
+- ✅ Dashboard with WebSocket streaming
+- ✅ Educational content platform (10+ pieces daily)
+- ✅ Automated report generation
+- ✅ Performance transparency
+
+### **✅ Institutional-Grade Analytics Added:**
+
+**Market Microstructure:**
+- ✅ VPIN (Volume-Synchronized Probability of Informed Trading)
+- ✅ Order flow toxicity metrics
+- ✅ GEX (Gamma Exposure) calculations
+- ✅ Dealer positioning estimates
+- ✅ Advanced options flow analysis
+
+**Risk Analytics:**
+- ✅ VaR and CVaR calculations
+- ✅ Monte Carlo simulations (10,000 scenarios)
+- ✅ Stress testing framework
+- ✅ Correlation matrices with PCA
+- ✅ Beta calculations and tracking error
+
+**Technical Analysis:**
+- ✅ All 16 original indicators
+- ✅ Anchored VWAP
+- ✅ Market Profile/Volume Profile
+- ✅ Cumulative Delta
+- ✅ Market internals (ADD, VOLD, TICK, TRIN)
+
+**Machine Learning:**
+- ✅ 200+ features per symbol
+- ✅ LSTM/GRU for time series
+- ✅ Walk-forward backtesting
+- ✅ SHAP values for interpretability
+- ✅ Regime-specific models
+- ✅ Model drift detection
+
+### **✅ API Implementation Approach Captured:**
+
+The 8-step process is properly scaled for batch implementation:
+1. Test ALL 41 Alpha Vantage APIs at once (Day 3)
+2. Analyze and document ALL responses (Day 3-4)
+3. Configure ALL endpoints in YAML (Day 4)
+4. Set up scheduling for ALL APIs (Day 4)
+5. Implement ALL client methods (Day 5)
+6. Create complete database schema (Day 5-6)
+7. Implement ALL ingestion methods (Day 6-7)
+8. Test complete pipeline (Day 7-8)
+
+### **✅ Nothing Missed - Everything Enhanced:**
+
+**Original Features:** All preserved
+**Institutional Features:** All added
+**Educational Platform:** Fully integrated
+**Risk Management:** Enterprise-grade
+**Performance Monitoring:** Comprehensive
+**Data Quality:** Multiple validation layers
+**Scalability:** Built-in from day one
+
+---
+
+## **Next Immediate Steps**
+
+1. **Day 1-2:** Complete Phase 0 foundation setup
+2. **Day 3:** Begin testing all 41 Alpha Vantage APIs with comprehensive test script
+3. **Day 4:** Analyze responses and design complete database schema
+4. **Day 5-6:** Create all database tables at once
+5. **Day 7-8:** Implement and test full AV pipeline
+6. **Day 9-14:** Complete IBKR implementation with aggregation
+7. **Day 15-17:** Validate entire data foundation
+
+**Critical Success Factor:** Complete data foundation operational before any analytics or strategies. This ensures clean architecture and enables institutional-grade analytics from the start.
+
+**Focus:** Days 1-17 are critical - get ALL data flowing, then build on solid foundation.
