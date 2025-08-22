@@ -69,7 +69,5 @@ htmlcov/
 docs/_build/
 
 # Backups
-backups/
-*.sql
-
+backu
 analysis.txt
