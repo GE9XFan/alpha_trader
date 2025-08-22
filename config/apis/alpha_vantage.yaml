@@ -1,0 +1,31 @@
+# Alpha Vantage API Configuration
+alpha_vantage:
+  base_url: "https://www.alphavantage.co/query"
+  api_key: ${ALPHA_VANTAGE_API_KEY}
+  
+  # Rate limiting
+  rate_limit:
+    calls_per_minute: 600
+    target_usage: 500  # Stay below this
+    burst_capacity: 20
+    refill_rate: 10  # tokens per second
+  
+  # Retry settings
+  retry:
+    max_attempts: 3
+    initial_delay: 1
+    max_delay: 10
+    exponential_base: 2
+  
+  # Timeout settings
+  timeout:
+    connect: 10
+    read: 30
+  
+  # Endpoints (will be populated with all 41 in Phase 1)
+  endpoints:
+    # Placeholder structure - will add all 41 endpoints in Phase 1
+    realtime_options:
+      function: "REALTIME_OPTIONS"
+      cache_ttl: 30
+      priority: "critical"

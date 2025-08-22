@@ -1,0 +1,22 @@
+# Data Collection Schedules
+schedules:
+  # Symbol tiers
+  tier_a_symbols: ['SPY', 'QQQ', 'IWM', 'SPX']
+  tier_b_symbols: ['AAPL', 'MSFT', 'NVDA', 'GOOGL', 'AMZN', 'META', 'TSLA']
+  tier_c_symbols: []  # Will be populated dynamically
+  
+  # API groups (to be expanded in Phase 1)
+  api_groups:
+    critical:
+      apis: ['realtime_options']
+      tier_a_interval: 30
+      tier_b_interval: 45
+      tier_c_interval: 180
+    
+    indicators_fast:
+      apis: []  # Will add RSI, MACD, BBANDS, VWAP
+      tier_a_interval: 60
+      tier_b_interval: 300
+      tier_c_interval: 600
+    
+    # More groups to be added in Phase 1

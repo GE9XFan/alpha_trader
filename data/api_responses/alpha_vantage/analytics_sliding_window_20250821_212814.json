@@ -1,0 +1,42 @@
+{
+  "meta_data": {
+    "symbols": "AAPL",
+    "window_size": 90,
+    "min_dt": "2025-05-21",
+    "max_dt": "2025-08-21",
+    "ohlc": "Close",
+    "interval": "DAILY"
+  },
+  "payload": {
+    "RETURNS_CALCULATIONS": {
+      "MEAN": {
+        "RUNNING_MEAN": {},
+        "window_start": {}
+      },
+      "MEDIAN": {
+        "RUNNING_MEDIAN": {},
+        "window_start": {}
+      },
+      "CUMULATIVE_RETURN": {
+        "RUNNING_CUMULATIVE_RETURN": {},
+        "window_start": {}
+      },
+      "VARIANCE": {
+        "RUNNING_VARIANCE": {},
+        "window_start": {}
+      },
+      "STDDEV": {
+        "RUNNING_STDDEV": {},
+        "window_start": {}
+      },
+      "COVARIANCE": {
+        "RUNNING_COVARIANCE": {},
+        "window_start": {}
+      },
+      "CORRELATION": {
+        "RUNNING_CORRELATION": {},
+        "window_start": {}
+      }
+    }
+  }
+}

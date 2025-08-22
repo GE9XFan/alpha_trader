@@ -1,0 +1,25 @@
+# Database Configuration
+database:
+  host: ${DB_HOST}
+  port: ${DB_PORT}
+  name: ${DB_NAME}
+  user: ${DB_USER}
+  password: ${DB_PASSWORD}
+  
+  # Connection pool settings
+  pool_size: 20
+  max_overflow: 40
+  pool_timeout: 30
+  pool_recycle: 3600
+  
+  # Performance settings
+  echo: false  # Set to true for SQL debugging
+  echo_pool: false
+  
+  # Query settings
+  statement_timeout: 60000  # milliseconds
+  lock_timeout: 10000
+  
+  # Maintenance
+  backup_dir: "./backups/database"
+  retention_days: 90
