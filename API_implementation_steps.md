@@ -1,15 +1,15 @@
-# Phase 5.1: RSI Implementation - Exact Steps Followed
-**Date:** August 17, 2025  
-**Duration:** ~2 hours  
-**Result:** 83,239 RSI records ingested across 4 symbols
+# API Implementation Framework - Universal Steps
+**Purpose:** Standardized approach for integrating any external API  
+**Duration:** ~2-3 hours per API endpoint  
+**Outcome:** Production-ready API integration with caching, scheduling, and monitoring
 
-## Step 1: API Discovery & Documentation (30 mins)
+## Step 1: API Discovery & Documentation (30-45 mins)
 
-### 1.1 Created Test Script
-**File:** `scripts/test_rsi_api.py`
+### 1.1 Create Test Script
+**Location:** `scripts/test_[api_name]_api.py`
 ```python
 #!/usr/bin/env python3
-"""Test RSI API and document response structure - Phase 5.1"""
+"""Test [API_NAME] API and document response structure"""
 
 import sys
 import json
@@ -21,297 +21,576 @@ sys.path.append(str(Path(__file__).parent.parent))
 from src.foundation.config_manager import ConfigManager
 import requests
 
-def test_rsi_api():
+def test_api():
     config = ConfigManager()
     params = {
-        'function': 'RSI',
-        'symbol': 'SPY',
-        'interval': '1min',
-        'time_period': 14,
-        'series_type': 'close',
-        'apikey': config.av_api_key,
-        'datatype': 'json'
+        # API-specific parameters
+        'endpoint': '[ENDPOINT]',
+        'apikey': config.[api]_key,
+        'format': 'json'
     }
     # Make API call and save response
+    # Document structure, rate limits, data types
 ```
 
 ### 1.2 API Response Analysis
-**Execution:** `python scripts/test_rsi_api.py`
-**Results:**
-- Response saved to: `data/api_responses/rsi_SPY_20250817_*.json`
-- Structure discovered:
-  - Top-level keys: `['Meta Data', 'Technical Analysis: RSI']`
-  - Data points: 21,074
-  - Date range: 2025-07-17 04:14 to 2025-08-15 20:00
-  - Value format: Nested dict `{'RSI': '36.4294'}` with string values
+**Actions:**
+- Execute test script
+- Save raw response to `data/api_responses/[api]_[timestamp].json`
+- Document structure:
+  - Top-level keys and their types
+  - Data point count
+  - Date/time formats
+  - Value formats (strings, numbers, nested objects)
+  - Error response formats
+  - Rate limit headers
 
-## Step 2: Configuration Setup (15 mins)
+### 1.3 Create API Documentation
+**File:** `docs/apis/[api_name]_spec.md`
+- Endpoint URLs
+- Required/optional parameters
+- Response structure
+- Rate limits
+- Error codes
+- Data types and ranges
 
-### 2.1 Alpha Vantage Configuration
-**File:** `config/apis/alpha_vantage.yaml`
+## Step 2: Configuration Setup (15-20 mins)
+
+### 2.1 API Configuration
+**File:** `config/apis/[api_name].yaml`
 ```yaml
-# Added under endpoints section
-rsi:
-  function: "RSI"
-  datatype: "json"
-  cache_ttl: 60
-  default_params:
-    interval: "1min"
-    time_period: 14
-    series_type: "close"
+base_url: "[API_BASE_URL]"
+auth_method: "[key|oauth|basic]"
+rate_limits:
+  calls_per_minute: [NUMBER]
+  calls_per_day: [NUMBER]
+
+endpoints:
+  [endpoint_name]:
+    path: "[/path/to/endpoint]"
+    method: "[GET|POST]"
+    cache_ttl: [SECONDS]
+    retry_strategy:
+      max_retries: 3
+      backoff_factor: 2
+    default_params:
+      param1: "value1"
+      param2: "value2"
 ```
 
 ### 2.2 Scheduler Configuration
 **File:** `config/data/schedules.yaml`
 ```yaml
-indicators_fast:
-  apis: ["RSI"]  # Changed from empty list
-  tier_a_interval: 60
-  tier_b_interval: 300
-  tier_c_interval: 600
-  calls_per_symbol: 1
+[schedule_group]:
+  apis: ["[API_NAME]"]
+  priority_1_interval: [SECONDS]
+  priority_2_interval: [SECONDS]
+  priority_3_interval: [SECONDS]
+  calls_per_resource: [NUMBER]
+  enabled: true
 ```
 
-## Step 3: Client Method Implementation (30 mins)
+### 2.3 Environment Variables
+**File:** `.env`
+```bash
+[API_NAME]_API_KEY=your_key_here
+[API_NAME]_BASE_URL=https://api.example.com
+[API_NAME]_TIMEOUT=30
+```
 
-### 3.1 Fixed Hardcoded Values Issue
-**Critical:** Removed ALL hardcoded defaults from existing methods
-- Changed `get_realtime_options(self, symbol='SPY', ...)` to `get_realtime_options(self, symbol, ...)`
-- Changed `get_historical_options(self, symbol='SPY', ...)` to `get_historical_options(self, symbol, ...)`
+## Step 3: Client Method Implementation (30-45 mins)
 
-### 3.2 Added RSI Method
-**File:** `src/connections/av_client.py`
+### 3.1 Remove Hardcoded Values
+**Critical Checklist:**
+- [ ] No hardcoded URLs
+- [ ] No hardcoded API keys
+- [ ] No hardcoded default parameters
+- [ ] No hardcoded timeout values
+- [ ] All values from configuration
+
+### 3.2 Implement Client Method
+**File:** `src/connections/[api]_client.py`
 ```python
-def get_rsi(self, symbol, interval=None, time_period=None, 
-            series_type=None, use_cache=True):
-    """
-    Get RSI (Relative Strength Index) data for a symbol
-    Phase 5.1: Technical indicator with caching
-    
-    All parameters come from configuration, no hardcoded defaults
-    """
-    rsi_config = self.config.av_config['endpoints']['rsi']
-    
-    if interval is None:
-        interval = rsi_config['default_params']['interval']
-    if time_period is None:
-        time_period = rsi_config['default_params']['time_period']
-    if series_type is None:
-        series_type = rsi_config['default_params']['series_type']
-    
-    # Build params, make request with caching
+class [API]Client:
+    def __init__(self):
+        self.config = ConfigManager()
+        self.cache = CacheManager()
+        self.setup_rate_limiter()
+        
+    def get_[endpoint](self, resource_id, **kwargs):
+        """
+        Get [data_type] from [API_NAME]
+        
+        Args:
+            resource_id: Identifier for the resource
+            **kwargs: Override default parameters
+            
+        Returns:
+            dict: API response or cached data
+        """
+        # Load endpoint configuration
+        endpoint_config = self.config.[api]_config['endpoints']['[endpoint]']
+        
+        # Build parameters from config, no hardcoding
+        params = self._build_params(endpoint_config, resource_id, **kwargs)
+        
+        # Check cache first
+        cache_key = self._generate_cache_key(params)
+        if use_cache and (cached := self.cache.get(cache_key)):
+            return cached
+            
+        # Make API call with retry logic
+        response = self._make_request(params)
+        
+        # Cache successful response
+        if response:
+            self.cache.set(cache_key, response, ttl=endpoint_config['cache_ttl'])
+            
+        return response
 ```
 
-### 3.3 Cache TTL Update
+### 3.3 Add Error Handling
 ```python
-self.cache_ttl = {
-    'realtime_options': 30,
-    'historical_options': 86400,
-    'rsi': self.config.av_config['endpoints'].get('rsi', {}).get('cache_ttl', 60)
-}
+def _make_request(self, params):
+    try:
+        # Rate limiting check
+        if not self.rate_limiter.allow_request():
+            raise RateLimitExceeded()
+            
+        response = requests.get(url, params=params, timeout=self.timeout)
+        response.raise_for_status()
+        
+        # Log successful call
+        self._log_api_call(success=True)
+        
+        return response.json()
+        
+    except requests.exceptions.RequestException as e:
+        self._log_api_call(success=False, error=str(e))
+        return None
 ```
 
-### 3.4 Client Test Results
-**Execution:** `python scripts/test_rsi_client.py`
-- First call (API): 0.58s
-- Second call (cache): 0.01s
-- **Speed improvement: 109.4x**
-- Cache keys created: 2 (SPY, QQQ)
+### 3.4 Client Testing
+**Script:** `scripts/test_[api]_client.py`
+- Test normal operation
+- Test caching behavior
+- Test error handling
+- Test rate limiting
+- Measure performance (API vs cache)
 
-## Step 4: Schema Design & Table Creation (30 mins)
+## Step 4: Schema Design & Database Setup (30 mins)
 
-### 4.1 Schema Design Based on Actual Response
-**File:** `scripts/create_rsi_table.sql`
+### 4.1 Design Schema Based on API Response
+**File:** `scripts/create_[api]_table.sql`
 ```sql
-CREATE TABLE IF NOT EXISTS av_rsi (
+CREATE TABLE IF NOT EXISTS [api]_[endpoint] (
     id SERIAL PRIMARY KEY,
-    symbol VARCHAR(10) NOT NULL,
+    resource_id VARCHAR(255) NOT NULL,
     timestamp TIMESTAMP NOT NULL,
-    rsi DECIMAL(10, 4),  -- Handles values like 36.4294
-    interval VARCHAR(10) NOT NULL,
-    time_period INTEGER NOT NULL,
+    
+    -- Data fields based on API response
+    field1 [DATATYPE],
+    field2 [DATATYPE],
+    json_data JSONB,  -- For flexible/nested data
+    
+    -- Metadata
+    api_version VARCHAR(10),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(symbol, timestamp, interval, time_period)
+    
+    -- Constraints
+    UNIQUE(resource_id, timestamp),
+    CHECK (field1 >= 0)  -- Add data validation
 );
 
 -- Performance indexes
-CREATE INDEX IF NOT EXISTS idx_rsi_symbol_timestamp 
-    ON av_rsi(symbol, timestamp DESC);
-CREATE INDEX IF NOT EXISTS idx_rsi_symbol_interval 
-    ON av_rsi(symbol, interval, timestamp DESC);
-CREATE INDEX IF NOT EXISTS idx_rsi_timestamp 
-    ON av_rsi(timestamp DESC);
+CREATE INDEX idx_[table]_resource_timestamp 
+    ON [table](resource_id, timestamp DESC);
+CREATE INDEX idx_[table]_timestamp 
+    ON [table](timestamp DESC);
+CREATE INDEX idx_[table]_json_data 
+    ON [table] USING GIN(json_data);  -- For JSONB queries
 ```
 
-### 4.2 Table Creation
-**Execution:** `psql -U michaelmerrick -d trading_system_db -f scripts/create_rsi_table.sql`
-**Verification:** `psql -U michaelmerrick -d trading_system_db -c "\d av_rsi"`
+### 4.2 Create Migration
+**File:** `migrations/[timestamp]_create_[api]_tables.sql`
+- Include rollback statements
+- Add comments explaining fields
+- Include sample data for testing
 
-## Step 5: Ingestion Method Implementation (45 mins)
+### 4.3 Execute Migration
+```bash
+# Run migration
+psql -U [user] -d [database] -f migrations/[timestamp]_create_[api]_tables.sql
 
-### 5.1 Ingestion Method
+# Verify structure
+psql -U [user] -d [database] -c "\d [table_name]"
+```
+
+## Step 5: Ingestion Pipeline Implementation (45-60 mins)
+
+### 5.1 Implement Ingestion Method
 **File:** `src/data/ingestion.py`
 ```python
-def ingest_rsi_data(self, api_response, symbol, interval='1min', time_period=14):
+def ingest_[api]_data(self, api_response, resource_id, **metadata):
     """
-    Ingest RSI indicator data into database
-    Phase 5.1: Technical indicator ingestion
+    Ingest [API] data into database
+    
+    Args:
+        api_response: Raw API response
+        resource_id: Resource identifier
+        **metadata: Additional context (interval, version, etc.)
+    
+    Returns:
+        int: Number of records processed
     """
-    if not api_response or 'Technical Analysis: RSI' not in api_response:
-        print(f"No RSI data to ingest for {symbol}")
+    # Validate response
+    if not self._validate_response(api_response):
+        logger.error(f"Invalid response for {resource_id}")
         return 0
     
-    rsi_data = api_response['Technical Analysis: RSI']
-    print(f"Processing {len(rsi_data)} RSI data points for {symbol}...")
+    # Extract data based on API structure
+    data_points = self._extract_data_points(api_response)
+    logger.info(f"Processing {len(data_points)} records for {resource_id}")
     
-    # Process each timestamp
-    for timestamp_str, rsi_dict in rsi_data.items():
-        timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M')
-        rsi_value = self._to_decimal(rsi_dict.get('RSI'))
+    records_processed = 0
+    batch = []
+    
+    for point in data_points:
+        # Transform data
+        record = self._transform_record(point, resource_id, **metadata)
         
-        # Check existence, insert or update
-        # Commit in batches of 1000
+        # Add to batch
+        batch.append(record)
+        
+        # Process batch when full
+        if len(batch) >= self.batch_size:
+            records_processed += self._process_batch(batch)
+            batch = []
     
-    # Cache after successful ingestion
-    cache_key = f"av:rsi:{symbol}:{interval}_{time_period}"
-    self.cache.set(cache_key, api_response, ttl=60)
+    # Process remaining records
+    if batch:
+        records_processed += self._process_batch(batch)
+    
+    # Update cache after successful ingestion
+    self._update_ingestion_cache(resource_id, api_response)
+    
+    return records_processed
 ```
 
-### 5.2 Pipeline Test Results
-**Execution:** `python scripts/test_rsi_pipeline.py`
-- Records processed: 21,074
-- Records inserted: 21,074
-- Records updated: 0
-- Database verification: All 21,074 records stored correctly
+### 5.2 Implement Data Transformation
+```python
+def _transform_record(self, raw_data, resource_id, **metadata):
+    """Transform API data to database format"""
+    return {
+        'resource_id': resource_id,
+        'timestamp': self._parse_timestamp(raw_data.get('time')),
+        'field1': self._to_decimal(raw_data.get('value1')),
+        'field2': self._to_integer(raw_data.get('value2')),
+        'json_data': json.dumps(raw_data.get('extra', {})),
+        'api_version': metadata.get('version', '1.0'),
+        'updated_at': datetime.now()
+    }
+```
 
-## Step 6: Scheduler Integration (30 mins)
+### 5.3 Implement Batch Processing
+```python
+def _process_batch(self, batch):
+    """Process batch with upsert logic"""
+    try:
+        # Use COPY for initial load, INSERT ON CONFLICT for updates
+        stmt = """
+            INSERT INTO [table] (resource_id, timestamp, field1, field2, json_data)
+            VALUES (%(resource_id)s, %(timestamp)s, %(field1)s, %(field2)s, %(json_data)s)
+            ON CONFLICT (resource_id, timestamp) 
+            DO UPDATE SET
+                field1 = EXCLUDED.field1,
+                field2 = EXCLUDED.field2,
+                updated_at = CURRENT_TIMESTAMP
+        """
+        
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.executemany(stmt, batch)
+            conn.commit()
+            return len(batch)
+            
+    except Exception as e:
+        logger.error(f"Batch processing failed: {e}")
+        return 0
+```
 
-### 6.1 Added Fetch Method
+### 5.4 Pipeline Testing
+**Script:** `scripts/test_[api]_pipeline.py`
+- Test end-to-end flow
+- Verify data transformation
+- Check duplicate handling
+- Validate database constraints
+- Measure throughput
+
+## Step 6: Scheduler Integration (30-45 mins)
+
+### 6.1 Add Fetch Method
 **File:** `src/data/scheduler.py`
 ```python
-def _fetch_rsi(self, symbol, interval='1min', time_period=14):
+def _fetch_[api]_[endpoint](self, resource_id, **params):
     """
-    Fetch RSI indicator data
-    Called by scheduler for each symbol
-    Phase 5.1: Technical indicator scheduling
+    Fetch [endpoint] data for resource
+    Called by scheduler based on configuration
     """
-    if not self._is_market_hours():
-        print(f"Skipping RSI for {symbol} - market closed")
+    # Check operational constraints
+    if not self._should_fetch(resource_id):
+        logger.info(f"Skipping {resource_id} - constraints not met")
         return
     
-    av_client = AlphaVantageClient()
+    # Initialize clients
+    api_client = [API]Client()
     ingestion = DataIngestion()
     
-    data = av_client.get_rsi(symbol, interval=interval, time_period=time_period)
-    
-    if data and 'Technical Analysis: RSI' in data:
-        records = ingestion.ingest_rsi_data(data, symbol, interval, time_period)
-        print(f"  ✓ {symbol} RSI: {records} records processed")
-```
-
-### 6.2 Added Scheduling Method
-```python
-def _schedule_rsi_indicators(self):
-    """Schedule RSI indicator data collection"""
-    if 'indicators_fast' not in self.api_groups:
-        return
+    try:
+        # Fetch data with configured parameters
+        data = api_client.get_[endpoint](resource_id, **params)
         
-    indicators_config = self.api_groups['indicators_fast']
-    
-    if 'RSI' not in indicators_config.get('apis', []):
-        print("  RSI not configured in indicators_fast group")
-        return
-    
-    # Schedule all three tiers
-    # Tier A: 60s, Tier B: 300s, Tier C: 600s
+        if data:
+            # Ingest into database
+            records = ingestion.ingest_[api]_data(data, resource_id, **params)
+            logger.info(f"✓ {resource_id}: {records} records processed")
+            
+            # Update metrics
+            self._update_metrics('success', resource_id, records)
+        else:
+            self._update_metrics('no_data', resource_id, 0)
+            
+    except Exception as e:
+        logger.error(f"Failed to fetch {resource_id}: {e}")
+        self._update_metrics('error', resource_id, 0)
 ```
 
-### 6.3 Updated Main Job Creation
+### 6.2 Add Scheduling Method
+```python
+def _schedule_[api]_jobs(self):
+    """Schedule [API] data collection jobs"""
+    
+    # Load configuration
+    schedule_config = self.config.schedules.get('[schedule_group]', {})
+    
+    if '[API]' not in schedule_config.get('apis', []):
+        logger.info("[API] not configured in schedule group")
+        return
+    
+    # Get resources to track
+    resources = self._get_resources_by_priority()
+    
+    # Schedule by priority tier
+    for priority, resource_list in resources.items():
+        interval = schedule_config[f'priority_{priority}_interval']
+        
+        for resource_id in resource_list:
+            job_id = f"[api]_{resource_id}_{priority}"
+            
+            self.scheduler.add_job(
+                func=self._fetch_[api]_[endpoint],
+                trigger='interval',
+                seconds=interval,
+                id=job_id,
+                args=[resource_id],
+                kwargs=self._get_job_params(resource_id),
+                max_instances=1,
+                replace_existing=True
+            )
+            
+    logger.info(f"Scheduled {len(self.scheduler.get_jobs())} [API] jobs")
+```
+
+### 6.3 Update Main Job Creation
 ```python
 def _create_jobs(self):
-    # Existing options jobs
-    if 'critical' in self.api_groups:
-        self._schedule_realtime_options()
+    """Create all scheduled jobs"""
     
-    # NEW - Phase 5.1
-    if 'indicators_fast' in self.api_groups:
-        self._schedule_rsi_indicators()
+    # Existing jobs...
     
-    # Existing daily jobs
-    if 'daily' in self.api_groups:
-        self._schedule_historical_options()
+    # Add new API jobs
+    if '[schedule_group]' in self.api_groups:
+        self._schedule_[api]_jobs()
+    
+    # Log summary
+    self._log_job_summary()
 ```
 
-### 6.4 Scheduler Test Results
-**Execution:** `python scripts/test_rsi_scheduler.py`
-- RSI jobs created: 23
-- Test duration: 65 seconds
-- IBIT received: 20,933 records
-- All tiers executing correctly
+### 6.4 Scheduler Testing
+**Script:** `scripts/test_[api]_scheduler.py`
+- Verify job creation
+- Test execution intervals
+- Check resource prioritization
+- Monitor API rate limits
+- Validate error recovery
 
-## Step 7: End-to-End Testing (30 mins)
+## Step 7: End-to-End Testing (30-45 mins)
 
-### 7.1 Complete System Test
-**Execution:** `python scripts/test_rsi_complete.py`
-**Results:**
-- Symbols tracked: 4 (SPY, QQQ, IWM, IBIT)
-- Total RSI records: 83,239
-- Date range: 2025-07-17 to 2025-08-15 (22 days)
-- Average RSI: 50.83
-- Oversold readings: 3.1%
-- Overbought readings: 4.4%
-- Data quality: Valid (0.16 to 96.33 range)
+### 7.1 Comprehensive System Test
+**Script:** `scripts/test_[api]_complete.py`
+```python
+def test_complete_system():
+    """Full system integration test"""
+    
+    # 1. Clear test data
+    cleanup_test_data()
+    
+    # 2. Initialize components
+    api_client = [API]Client()
+    scheduler = DataScheduler()
+    ingestion = DataIngestion()
+    
+    # 3. Test API connectivity
+    assert test_api_connection(api_client)
+    
+    # 4. Test single resource flow
+    test_resource = 'TEST_001'
+    data = api_client.get_[endpoint](test_resource)
+    records = ingestion.ingest_[api]_data(data, test_resource)
+    assert records > 0
+    
+    # 5. Test scheduler with multiple resources
+    scheduler.start()
+    time.sleep(120)  # Run for 2 minutes
+    scheduler.stop()
+    
+    # 6. Validate database state
+    stats = get_database_statistics()
+    assert stats['total_records'] > 0
+    assert stats['unique_resources'] >= len(test_resources)
+    
+    # 7. Test data quality
+    validate_data_quality()
+    
+    # 8. Performance metrics
+    print_performance_summary()
+```
 
-### 7.2 Performance Metrics
-- API calls added: ~27/minute
-- Total system API usage: ~46/minute (9.2% of budget)
-- Cache hit rate: Not measured (TTL expired during test)
-- Database storage: ~10MB for RSI data
+### 7.2 Data Quality Validation
+```python
+def validate_data_quality():
+    """Validate ingested data quality"""
+    
+    checks = {
+        'nulls': check_for_nulls(),
+        'duplicates': check_for_duplicates(),
+        'ranges': validate_value_ranges(),
+        'timestamps': validate_timestamp_continuity(),
+        'relationships': validate_data_relationships()
+    }
+    
+    for check_name, result in checks.items():
+        assert result['passed'], f"Failed {check_name}: {result['message']}"
+```
 
-## Step 8: Documentation & Commit
+### 7.3 Performance Benchmarks
+- API calls per minute: [TARGET]
+- Cache hit rate: > 80%
+- Ingestion throughput: > 1000 records/second
+- Database query time: < 100ms
+- Memory usage: < 500MB
 
-### 8.1 Files Created
-1. `scripts/test_rsi_api.py` - API discovery
-2. `scripts/test_rsi_client.py` - Client testing
-3. `scripts/test_rsi_pipeline.py` - Full pipeline test
-4. `scripts/test_rsi_scheduler.py` - Scheduler integration test
-5. `scripts/test_rsi_complete.py` - Comprehensive validation
-6. `scripts/create_rsi_table.sql` - Database schema
+## Step 8: Documentation & Deployment
 
-### 8.2 Files Modified
-1. `config/apis/alpha_vantage.yaml` - Added RSI endpoint
-2. `config/data/schedules.yaml` - Added RSI to indicators_fast
-3. `src/connections/av_client.py` - Added get_rsi() + fixed hardcoding
-4. `src/data/ingestion.py` - Added ingest_rsi_data()
-5. `src/data/scheduler.py` - Added _fetch_rsi() and _schedule_rsi_indicators()
+### 8.1 Create Documentation
+**Files to create:**
+1. `docs/apis/[api]_integration.md` - Integration guide
+2. `docs/apis/[api]_troubleshooting.md` - Common issues
+3. `scripts/test_[api]_*.py` - Test suite
+4. `scripts/create_[api]_tables.sql` - Database schema
+5. `monitoring/[api]_dashboard.json` - Monitoring config
 
-### 8.3 Git Commit
+### 8.2 Update System Documentation
+**Files to update:**
+1. `README.md` - Add API to supported integrations
+2. `docs/configuration.md` - Document new config options
+3. `docs/api_limits.md` - Update rate limit tracking
+4. `CHANGELOG.md` - Document changes
+
+### 8.3 Git Commit Template
 ```bash
 git add -A
-git commit -m "Phase 5.1: RSI complete - 83,239 records, 23 symbols, 60-600s intervals
+git commit -m "[API_NAME] Integration: [Brief Summary]
 
-- Implemented RSI indicator with full scheduler integration
-- Fixed hardcoded defaults in av_client.py (critical fix)
-- Added configuration-driven RSI with cache support
-- Database schema supports multiple intervals and periods
-- Scheduler manages 23 RSI jobs across 3 tiers
-- API usage now at 9.2% of capacity
-- All tests passing, data quality validated"
+- Implemented [endpoint] with full scheduler integration
+- Configuration-driven parameters (no hardcoding)
+- Database schema supports [key features]
+- Scheduler manages [X] jobs across [Y] priority tiers
+- Caching with [TTL]s TTL for [use case]
+- API usage: [X%] of rate limit capacity
+- Test coverage: [X%]
+- Performance: [key metrics]
+
+Resolves: #[issue_number]"
 ```
 
-## Lessons Learned
+## Quality Checklist
 
-1. **API Response Structure:** Always test actual API first - nested dict structure was unexpected
-2. **Hardcoding Issue:** Must vigilantly check for hardcoded values in ALL methods
-3. **Cache TTL:** 60 seconds is appropriate for fast indicators
-4. **Batch Processing:** Processing 1000 records at a time prevents memory issues
-5. **Scheduler Integration:** Adding new indicators to existing scheduler is straightforward
+### Code Quality
+- [ ] No hardcoded values
+- [ ] All parameters from configuration
+- [ ] Comprehensive error handling
+- [ ] Logging at appropriate levels
+- [ ] Type hints on all methods
+- [ ] Docstrings with examples
 
-## Next Steps
+### Testing
+- [ ] Unit tests for each component
+- [ ] Integration tests for pipeline
+- [ ] End-to-end system test
+- [ ] Performance benchmarks met
+- [ ] Error scenarios tested
+- [ ] Rate limit compliance verified
 
-**Day 19: MACD Implementation**
-- Follow same 8-step process
-- Expected similar data volume
-- Consider 5-minute intervals for some tiers
-- May need separate table for MACD components (signal, histogram)
+### Operations
+- [ ] Monitoring configured
+- [ ] Alerts defined
+- [ ] Runbook created
+- [ ] Rollback procedure documented
+- [ ] Resource limits set
+- [ ] Backup strategy defined
+
+## Common Pitfalls to Avoid
+
+1. **Hardcoded Values:** Always use configuration
+2. **Missing Error Handling:** Expect API failures
+3. **No Rate Limiting:** Respect API limits
+4. **Inefficient Caching:** Set appropriate TTLs
+5. **Poor Batch Sizes:** Test optimal batch sizes
+6. **No Monitoring:** Add metrics from day one
+7. **Weak Testing:** Test edge cases thoroughly
+8. **No Documentation:** Document while building
+
+## Template Scripts
+
+### Quick Start Script
+```bash
+#!/bin/bash
+# setup_[api]_integration.sh
+
+echo "Setting up [API] integration..."
+
+# Create directories
+mkdir -p data/api_responses
+mkdir -p scripts/tests
+mkdir -p docs/apis
+
+# Copy templates
+cp templates/api_client.py src/connections/[api]_client.py
+cp templates/test_api.py scripts/test_[api]_api.py
+
+# Run initial test
+python scripts/test_[api]_api.py
+
+echo "Setup complete. Edit configuration in config/apis/[api].yaml"
+```
+
+## Next Steps After Implementation
+
+1. **Monitor for 24 hours:** Watch for issues
+2. **Optimize caching:** Adjust TTLs based on usage
+3. **Tune scheduling:** Optimize intervals
+4. **Scale testing:** Add more resources
+5. **Performance tuning:** Optimize slow queries
+6. **Documentation review:** Update based on learnings
