@@ -1,14 +1,21 @@
 # Alpha Vantage API Configuration
+# Phase 1: Complete 35 API Implementation
 alpha_vantage:
   base_url: "https://www.alphavantage.co/query"
   api_key: ${ALPHA_VANTAGE_API_KEY}
   
-  # Rate limiting
+  # Rate limiting - all values required, no defaults
   rate_limit:
     calls_per_minute: 600
     target_usage: 500  # Stay below this
     burst_capacity: 20
     refill_rate: 10  # tokens per second
+    time_window: 60  # seconds (60 = per minute)
+    check_interval: 0.1  # seconds between token checks
+    initial_tokens: null  # null means use burst_capacity
+    initial_total_calls: 0
+    initial_rejected_calls: 0
+    initial_window_calls: 0
   
   # Retry settings
   retry:
@@ -22,10 +29,342 @@ alpha_vantage:
     connect: 10
     read: 30
   
-  # Endpoints (will be populated with all 41 in Phase 1)
+  # Complete endpoints configuration - 35 APIs
   endpoints:
-    # Placeholder structure - will add all 41 endpoints in Phase 1
+    # ==========================================
+    # OPTIONS & GREEKS (2 APIs)
+    # ==========================================
     realtime_options:
       function: "REALTIME_OPTIONS"
       cache_ttl: 30
       priority: "critical"
+      default_params:
+        require_greeks: "true"
+        datatype: "json"
+      
+    historical_options:
+      function: "HISTORICAL_OPTIONS"
+      cache_ttl: 86400
+      priority: "daily"
+      default_params:
+        datatype: "json"
+        # date parameter set dynamically (one month ago)
+    
+    # ==========================================
+    # TECHNICAL INDICATORS (16 APIs)
+    # ==========================================
+    rsi:
+      function: "RSI"
+      cache_ttl: 60
+      priority: "indicators_fast"
+      default_params:
+        interval: "daily"
+        time_period: 14
+        series_type: "close"
+        datatype: "json"
+    
+    macd:
+      function: "MACD"
+      cache_ttl: 60
+      priority: "indicators_fast"
+      default_params:
+        interval: "daily"
+        series_type: "close"
+        fastperiod: 12
+        slowperiod: 26
+        signalperiod: 9
+        datatype: "json"
+    
+    stoch:
+      function: "STOCH"
+      cache_ttl: 60
+      priority: "indicators_fast"
+      default_params:
+        interval: "daily"
+        fastkperiod: 5
+        slowkperiod: 3
+        slowdperiod: 3
+        slowkmatype: 0
+        slowdmatype: 0
+        datatype: "json"
+    
+    willr:
+      function: "WILLR"
+      cache_ttl: 60
+      priority: "indicators_fast"
+      default_params:
+        interval: "daily"
+        time_period: 14
+        datatype: "json"
+    
+    mom:
+      function: "MOM"
+      cache_ttl: 60
+      priority: "indicators_fast"
+      default_params:
+        interval: "daily"
+        time_period: 10
+        series_type: "close"
+        datatype: "json"
+    
+    bbands:
+      function: "BBANDS"
+      cache_ttl: 60
+      priority: "indicators_fast"
+      default_params:
+        interval: "daily"
+        time_period: 20
+        series_type: "close"
+        nbdevup: 2
+        nbdevdn: 2
+        matype: 0
+        datatype: "json"
+    
+    atr:
+      function: "ATR"
+      cache_ttl: 300
+      priority: "indicators_medium"
+      default_params:
+        interval: "daily"
+        time_period: 14
+        datatype: "json"
+    
+    adx:
+      function: "ADX"
+      cache_ttl: 300
+      priority: "indicators_medium"
+      default_params:
+        interval: "daily"
+        time_period: 14
+        datatype: "json"
+    
+    aroon:
+      function: "AROON"
+      cache_ttl: 300
+      priority: "indicators_medium"
+      default_params:
+        interval: "daily"
+        time_period: 14
+        datatype: "json"
+    
+    cci:
+      function: "CCI"
+      cache_ttl: 300
+      priority: "indicators_medium"
+      default_params:
+        interval: "daily"
+        time_period: 20
+        datatype: "json"
+    
+    ema:
+      function: "EMA"
+      cache_ttl: 300
+      priority: "indicators_medium"
+      default_params:
+        interval: "daily"
+        time_period: 20
+        series_type: "close"
+        datatype: "json"
+    
+    sma:
+      function: "SMA"
+      cache_ttl: 300
+      priority: "indicators_medium"
+      default_params:
+        interval: "daily"
+        time_period: 20
+        series_type: "close"
+        datatype: "json"
+    
+    mfi:
+      function: "MFI"
+      cache_ttl: 300
+      priority: "indicators_medium"
+      default_params:
+        interval: "daily"
+        time_period: 14
+        datatype: "json"
+    
+    obv:
+      function: "OBV"
+      cache_ttl: 300
+      priority: "indicators_medium"
+      default_params:
+        interval: "daily"
+        datatype: "json"
+    
+    ad:
+      function: "AD"
+      cache_ttl: 300
+      priority: "indicators_medium"
+      default_params:
+        interval: "daily"
+        datatype: "json"
+    
+    vwap:
+      function: "VWAP"
+      cache_ttl: 60
+      priority: "indicators_fast"
+      default_params:
+        interval: "15min"  # intraday only
+        datatype: "json"
+    
+    # ==========================================
+    # ANALYTICS (2 APIs)
+    # ==========================================
+    analytics_fixed_window:
+      function: "ANALYTICS_FIXED_WINDOW"
+      cache_ttl: 300
+      priority: "analytics"
+      default_params:
+        SYMBOLS: "SPY,QQQ"  # Note: SYMBOLS (plural)
+        INTERVAL: "DAILY"
+        OHLC: "close"
+        RANGE: "1month"
+        CALCULATIONS: "MIN,MAX,MEAN,MEDIAN,CUMULATIVE_RETURN,VARIANCE,STDDEV,MAX_DRAWDOWN,HISTOGRAM,AUTOCORRELATION,COVARIANCE,CORRELATION"
+        datatype: "json"
+    
+    analytics_sliding_window:
+      function: "ANALYTICS_SLIDING_WINDOW"
+      cache_ttl: 300
+      priority: "analytics"
+      default_params:
+        SYMBOLS: "SPY,QQQ"  # Note: SYMBOLS (plural)
+        INTERVAL: "DAILY"
+        OHLC: "close"
+        RANGE: "6month"
+        WINDOW_SIZE: 90
+        CALCULATIONS: "MEAN,MEDIAN,CUMULATIVE_RETURN,VARIANCE,STDDEV,COVARIANCE,CORRELATION"
+        datatype: "json"
+    
+    # ==========================================
+    # SENTIMENT & NEWS (3 APIs)
+    # ==========================================
+    news_sentiment:
+      function: "NEWS_SENTIMENT"
+      cache_ttl: 600
+      priority: "sentiment"
+      default_params:
+        tickers: "AAPL"  # Can be multiple: 'SPY,QQQ,AAPL'
+        sort: "LATEST"
+        limit: 50
+        datatype: "json"
+    
+    top_gainers_losers:
+      function: "TOP_GAINERS_LOSERS"
+      cache_ttl: 600
+      priority: "sentiment"
+      default_params:
+        datatype: "json"
+        # No other required parameters
+    
+    insider_transactions:
+      function: "INSIDER_TRANSACTIONS"
+      cache_ttl: 600
+      priority: "sentiment"
+      default_params:
+        datatype: "json"
+        # symbol parameter set per call
+    
+    # ==========================================
+    # FUNDAMENTALS (7 APIs)
+    # ==========================================
+    overview:
+      function: "OVERVIEW"
+      cache_ttl: 86400
+      priority: "fundamentals"
+      default_params:
+        datatype: "json"
+        # symbol parameter set per call
+    
+    earnings_calendar:
+      function: "EARNINGS_CALENDAR"
+      cache_ttl: 86400
+      priority: "fundamentals"
+      default_params:
+        # Returns CSV by default, no datatype needed
+        # No other required parameters
+    
+    income_statement:
+      function: "INCOME_STATEMENT"
+      cache_ttl: 86400
+      priority: "fundamentals"
+      default_params:
+        datatype: "json"
+        # symbol parameter set per call
+    
+    balance_sheet:
+      function: "BALANCE_SHEET"
+      cache_ttl: 86400
+      priority: "fundamentals"
+      default_params:
+        datatype: "json"
+        # symbol parameter set per call
+    
+    cash_flow:
+      function: "CASH_FLOW"
+      cache_ttl: 86400
+      priority: "fundamentals"
+      default_params:
+        datatype: "json"
+        # symbol parameter set per call
+    
+    dividends:
+      function: "DIVIDENDS"
+      cache_ttl: 86400
+      priority: "fundamentals"
+      default_params:
+        datatype: "json"
+        # symbol parameter set per call
+    
+    splits:
+      function: "SPLITS"
+      cache_ttl: 86400
+      priority: "fundamentals"
+      default_params:
+        datatype: "json"
+        # symbol parameter set per call
+    
+    # ==========================================
+    # ECONOMIC INDICATORS (5 APIs)
+    # ==========================================
+    treasury_yield:
+      function: "TREASURY_YIELD"
+      cache_ttl: 604800  # 7 days
+      priority: "economic"
+      default_params:
+        interval: "monthly"  # daily, weekly, or monthly
+        maturity: "10year"   # 3month, 2year, 5year, 7year, 10year, 30year
+        datatype: "json"
+    
+    federal_funds_rate:
+      function: "FEDERAL_FUNDS_RATE"
+      cache_ttl: 604800  # 7 days
+      priority: "economic"
+      default_params:
+        interval: "monthly"  # daily, weekly, or monthly
+        datatype: "json"
+    
+    cpi:
+      function: "CPI"
+      cache_ttl: 604800  # 7 days
+      priority: "economic"
+      default_params:
+        interval: "monthly"  # monthly or semiannual
+        datatype: "json"
+    
+    inflation:
+      function: "INFLATION"
+      cache_ttl: 604800  # 7 days
+      priority: "economic"
+      default_params:
+        datatype: "json"
+        # No other required parameters
+    
+    real_gdp:
+      function: "REAL_GDP"
+      cache_ttl: 604800  # 7 days
+      priority: "economic"
+      default_params:
+        interval: "quarterly"  # quarterly or annual
+        datatype: "json"
