@@ -646,3 +646,198 @@ ALL FIELDS in 2025-08-21:
 
 ================================================================================
 COMPLETE FIELD LISTING DONE
+
+(venv) michaelmerrick@Michaels-MacBook-Pro AlphaTrader % python scripts/analyze_ibkr.py
+COMPLETE FIELD ANALYSIS FOR EACH IBKR DATA TYPE
+
+================================================================================
+
+ACCOUNTS
+----------------------------------------
+File: accounts_20250822_164053.json
+
+Data location: root level
+ALL FIELDS:
+  accounts: list with 1 items
+    DUH923436
+
+CONTRACT_DETAILS
+----------------------------------------
+File: contract_details_20250822_164053.json
+
+Data location: contract details object
+ALL FIELDS:
+  contract = Contract(secType='STK', conId=265598, symbol='AAPL', exchange='SMART', primaryExchange='NASDAQ', currency='USD', localSymbol='AAPL', tradingClass='NMS')
+  marketName = NMS
+  minTick = 0.01
+  orderTypes = ACTIVETIM,AD,ADDONT,ADJUST,ALERT,ALGO,ALLOC,AON,AVGCOST,BASKET,BENCHPX,CASHQTY,COND,CONDORDER,DARKONLY,DARKPOLL,DAY,DEACT,DEACTDIS,DEACTEOD,DIS,DUR,GAT,GTC,GTD,GTT,HID,IBKRATS,ICE,IMB,IOC,LIT,LMT,LOC,MIDPX,MIT,MKT,MOC,MTL,NGCOMB,NODARK,NONALGO,OCA,OPG,OPGREROUT,PEGBENCH,PEGMID,POSTATS,POSTONLY,PREOPGRTH,PRICECHK,REL,REL2MID,RELPCTOFS,RPI,RTH,SCALE,SCALEODD,SCALERST,SIZECHK,SMARTSTG,SNAPMID,SNAPMKT,SNAPREL,STP,STPLMT,SWEEP,TRAIL,TRAILLIT,TRAILLMT,TRAILMIT,WHATIF
+  validExchanges = SMART,AMEX,NYSE,CBOE,PHLX,ISE,CHX,ARCA,NASDAQ,DRCTEDGE,BEX,BATS,EDGEA,BYX,IEX,EDGX,FOXRIVER,PEARL,NYSENAT,LTSE,MEMX,IBEOS,OVERNIGHT,TPLUS0,PSX
+  priceMagnifier = 1
+  underConId = 0
+  longName = APPLE INC
+  contractMonth = 
+  industry = Technology
+  category = Computers
+  subcategory = Computers
+  timeZoneId = US/Eastern
+  tradingHours = 20250822:0400-20250822:2000;20250823:CLOSED;20250824:CLOSED;20250825:0400-20250825:2000;20250826:0400-20250826:2000;20250827:0400-20250827:2000
+  liquidHours = 20250822:0930-20250822:1600;20250823:CLOSED;20250824:CLOSED;20250825:0930-20250825:1600;20250826:0930-20250826:1600;20250827:0930-20250827:1600
+  evRule = 
+  evMultiplier = 0
+  mdSizeMultiplier = 1
+  aggGroup = 1
+  underSymbol = 
+  underSecType = 
+  marketRuleIds = 26,26,26,26,26,26,26,26,26,26,26,26,26,26,26,26,26,26,26,26,26,26,26,26,26
+  secIdList: list with 1 items
+  realExpirationDate = 
+  lastTradeTime = 
+  stockType = COMMON
+  minSize = 0.0001
+  sizeIncrement = 0.0001
+  suggestedSizeIncrement = 100.0
+  cusip = 
+  ratings = 
+  descAppend = 
+  bondType = 
+  couponType = 
+  callable = False
+  putable = False
+  coupon = 0
+  convertible = False
+  maturity = 
+  issueDate = 
+  nextOptionDate = 
+  nextOptionType = 
+  nextOptionPartial = False
+  notes = 
+
+HISTORICAL_5SEC
+----------------------------------------
+File: historical_5sec_20250822_164053.json
+
+Data location: list of historical bars
+Number of bars: 5
+
+ALL FIELDS in first bar:
+  date = 2025-08-22 15:59:35-04:00
+  open = 227.83
+  high = 227.86
+  low = 227.81
+  close = 227.86
+  volume = 49838.0
+  average = 227.844
+  barCount = 315
+
+REALTIME_BARS
+----------------------------------------
+File: realtime_bars_20250822_164053.json
+
+Data location: list of real-time bars
+Number of bars: 3
+
+ALL FIELDS in first bar:
+  time = 2025-08-22 20:40:50+00:00
+  endTime = -1
+  open_ = 227.93
+  high = 227.93
+  low = 227.93
+  close = 227.93
+  volume = 0.0
+  wap = 227.93
+  count = 0
+
+SUMMARY
+----------------------------------------
+File: summary_20250822_164053.json
+
+Data location: list of account summary items
+Number of items: 80
+
+ALL FIELDS in first summary item:
+  account = DUH923436
+  tag = AccountType
+  value = INDIVIDUAL
+  currency = 
+  modelCode = 
+
+TICKER
+----------------------------------------
+File: ticker_20250822_164053.json
+
+Data location: ticker object
+ALL FIELDS:
+  contract = Stock(symbol='AAPL', exchange='SMART', currency='USD')
+  time = 2025-08-22 20:40:54.875615+00:00
+  marketDataType = 1
+  minTick = 0.01
+  bid = 227.93
+  bidSize = 100.0
+  bidExchange = 
+  ask = 227.97
+  askSize = 400.0
+  askExchange = 
+  last = 227.93
+  lastSize = 100.0
+  lastExchange = 
+  prevBid = nan
+  prevBidSize = nan
+  prevAsk = nan
+  prevAskSize = nan
+  prevLast = nan
+  prevLastSize = nan
+  volume = 422483.0
+  open = 226.1
+  high = 229.09
+  low = 225.41
+  close = 224.9
+  vwap = nan
+  low13week = nan
+  high13week = nan
+  low26week = nan
+  high26week = nan
+  low52week = nan
+  high52week = nan
+  bidYield = nan
+  askYield = nan
+  lastYield = nan
+  markPrice = nan
+  halted = nan
+  rtHistVolatility = nan
+  rtVolume = nan
+  rtTradeVolume = nan
+  rtTime = None
+  avVolume = nan
+  tradeCount = nan
+  tradeRate = nan
+  volumeRate = nan
+  shortableShares = nan
+  indexFuturePremium = nan
+  futuresOpenInterest = nan
+  putOpenInterest = nan
+  callOpenInterest = nan
+  putVolume = nan
+  callVolume = nan
+  avOptionVolume = nan
+  histVolatility = nan
+  impliedVolatility = nan
+  dividends = None
+  fundamentalRatios = None
+  ticks: list with 2 items
+  tickByTicks: list with 0 items
+  domBids: list with 0 items
+  domAsks: list with 0 items
+  domTicks: list with 0 items
+  bidGreeks = None
+  askGreeks = None
+  lastGreeks = None
+  modelGreeks = None
+  auctionVolume = nan
+  auctionPrice = nan
+  auctionImbalance = nan
+  regulatoryImbalance = nan
+  bboExchange = 9c0001
+  snapshotPermissions = 3
+  updateEvent = Event<updateEvent, []>
+
+===================================================================

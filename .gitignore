@@ -71,3 +71,5 @@ docs/_build/
 # Backups
 backups/
 *.sql
+
+analysis.txt
