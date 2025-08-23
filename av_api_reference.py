@@ -115,7 +115,7 @@ API_REFERENCE = {
             "required": ["SYMBOLS", "INTERVAL", "RANGE", "WINDOW_SIZE"],
             "optional": ["OHLC", "CALCULATIONS"],
             "note": "Parameters are UPPERCASE",
-            "example": {"SYMBOLS": "AAPL,QQQ", "INTERVAL": "DAILY", "OHLC": "close","RANGE": "6month", "WINDOW_SIZE": 90, "CALCULATIONS": "MEAN,MEDIAN,CUMULATIVE_RETURN,VARIANCE,STDDEV,COVARIANCE,CORRELATION"}
+            "example": {"SYMBOLS": "AAPL,QQQ", "INTERVAL": "DAILY", "OHLC": "close","RANGE": "6month", "WINDOW_SIZE": 30, "CALCULATIONS": "MEAN,MEDIAN,CUMULATIVE_RETURN,VARIANCE,STDDEV,COVARIANCE,CORRELATION"}
         }
     },
     

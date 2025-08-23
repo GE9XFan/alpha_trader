@@ -11,6 +11,13 @@ data/cache/
 data/models/
 logs/
 
+# API Response Analysis Files (Day 3)
+data/api_schemas.json
+data/deep_api_schemas.json
+data/field_statistics.json
+data/api_interfaces.ts
+data/api_dataclasses.py
+
 # IDE
 .vscode/
 .idea/
