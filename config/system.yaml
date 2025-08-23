@@ -1,0 +1,56 @@
+# System Configuration for AlphaTrader
+# All values can use environment variables with ${VAR_NAME} syntax
+
+system:
+  environment: ${ENVIRONMENT:development}
+  log_level: ${LOG_LEVEL:INFO}
+  
+database:
+  host: ${DB_HOST:localhost}
+  port: ${DB_PORT:5432}
+  name: ${DB_NAME:alphatrader}
+  user: ${DB_USER:alphatrader}
+  password: ${DB_PASSWORD:alphatrader_dev}
+  pool_size: 10
+  
+redis:
+  host: ${REDIS_HOST:localhost}
+  port: ${REDIS_PORT:6379}
+  db: 0
+  
+message_bus:
+  persistence: postgresql
+  async: true
+  max_message_size: 1048576  # 1MB
+  
+plugin_manager:
+  auto_discover: true
+  plugin_dirs:
+    - plugins/datasources
+    - plugins/processing
+    - plugins/ml
+    - plugins/analytics
+    - plugins/strategies
+    - plugins/risk
+    - plugins/execution
+    - plugins/monitoring
+    - plugins/publishing
+  health_check_interval: 30  # seconds
+  
+rate_limiter:
+  # Alpha Vantage limits - ALL FROM ENVIRONMENT/CONFIG
+  calls_per_minute: ${AV_CALLS_PER_MINUTE}        # REQUIRED - your API limit
+  daily_limit: ${AV_DAILY_LIMIT}                  # REQUIRED - max calls per day  
+  premium_capacity: ${AV_PREMIUM_CAPACITY:}       # OPTIONAL - premium endpoint limit
+  burst_capacity: ${AV_BURST_CAPACITY:}           # OPTIONAL - burst handling
+  acquire_timeout: 5.0                            # seconds to wait for token
+  
+scheduler:
+  timezone: US/Eastern
+  job_store: memory
+  max_instances: 10
+  
+monitoring:
+  metrics_port: 9090
+  health_check_port: 8080
+  enable_prometheus: true
