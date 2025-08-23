@@ -1,0 +1,45 @@
+# Foundation configuration - ZERO hardcoded values
+# All values come from environment variables
+
+retry:
+  max_attempts: ${RETRY_MAX_ATTEMPTS}
+  backoff_factor: ${RETRY_BACKOFF_FACTOR}
+  max_delay: ${RETRY_MAX_DELAY}
+  jitter: ${RETRY_JITTER}
+
+circuit_breaker:
+  failure_threshold: ${CB_FAILURE_THRESHOLD}
+  recovery_timeout: ${CB_RECOVERY_TIMEOUT}
+  expected_exception: ${CB_EXPECTED_EXCEPTION}
+
+rate_limiting:
+  enabled: ${RATE_LIMIT_ENABLED}
+  default_bucket_size: ${RATE_LIMIT_DEFAULT_BUCKET_SIZE}
+  default_refill_rate: ${RATE_LIMIT_DEFAULT_REFILL_RATE}
+
+metrics:
+  enabled: ${METRICS_ENABLED}
+  port: ${METRICS_PORT}
+  namespace: ${METRICS_NAMESPACE}
+  subsystem: ${METRICS_SUBSYSTEM}
+
+health:
+  enabled: ${HEALTH_ENABLED}
+  port: ${HEALTH_PORT}
+  path: ${HEALTH_PATH}
+  timeout: ${HEALTH_TIMEOUT}
+  check_db: ${HEALTH_CHECK_DB}
+  check_redis: ${HEALTH_CHECK_REDIS}
+
+performance:
+  trace_enabled: ${PERF_TRACE_ENABLED}
+  slow_query_threshold_ms: ${PERF_SLOW_QUERY_THRESHOLD_MS}
+  slow_cache_threshold_ms: ${PERF_SLOW_CACHE_THRESHOLD_MS}
+
+correlation:
+  enabled: ${LOG_CORRELATION}
+  header: X-Correlation-ID
+
+audit:
+  enabled: ${LOG_AUDIT}
+  level: INFO

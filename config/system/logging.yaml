@@ -1,0 +1,41 @@
+# Logging configuration - ZERO hardcoded values
+# All values come from environment variables
+
+version: 1
+disable_existing_loggers: false
+
+formatters:
+  json:
+    class: pythonjsonlogger.jsonlogger.JsonFormatter
+    format: '%(asctime)s %(name)s %(levelname)s %(message)s'
+  
+  detailed:
+    format: '%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
+    datefmt: '%Y-%m-%d %H:%M:%S'
+
+handlers:
+  console:
+    class: logging.StreamHandler
+    level: ${LOG_LEVEL}
+    formatter: json
+    stream: ext://sys.stdout
+  
+  file:
+    class: logging.handlers.RotatingFileHandler
+    level: ${LOG_LEVEL}
+    formatter: json
+    filename: ${LOG_DIR}/${APP_NAME}.log
+    maxBytes: ${LOG_MAX_BYTES}
+    backupCount: ${LOG_BACKUP_COUNT}
+    encoding: ${LOG_ENCODING}
+    delay: ${LOG_DELAY}
+
+loggers:
+  alphatrader:
+    level: ${LOG_LEVEL}
+    handlers: [console, file]
+    propagate: false
+
+root:
+  level: ${LOG_LEVEL}
+  handlers: [console, file]
