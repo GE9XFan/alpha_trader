@@ -1,13 +1,15 @@
--- Economic Indicator: inflation
+-- ECONOMIC: inflation
+-- Generated from ACTUAL API response investigation
+-- Total fields in response: 6
+
 CREATE TABLE inflation (
     id BIGSERIAL PRIMARY KEY,
-    name VARCHAR(50),
-    interval VARCHAR(10),
-    unit VARCHAR(10),
-    date DATE,
-    value NUMERIC,
+    name TEXT,
+    interval TEXT,
+    unit TEXT,
+    date TEXT,
+    value TEXT    
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- Indexes
 CREATE INDEX idx_inflation_date ON inflation(date) WHERE date IS NOT NULL;

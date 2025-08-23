@@ -1,13 +1,17 @@
--- Fundamental Data: dividends
+-- FUNDAMENTALS: dividends
+-- Generated from ACTUAL API response investigation
+-- Total fields in response: 7
+
 CREATE TABLE dividends (
+    id BIGSERIAL PRIMARY KEY,
     symbol VARCHAR(10) PRIMARY KEY,
-    ex_dividend_date DATE,
-    declaration_date DATE,
-    record_date DATE,
-    payment_date DATE,
-    amount NUMERIC,
-    last_updated TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    ex_dividend_date TEXT,
+    declaration_date TEXT,
+    record_date TEXT,
+    payment_date TEXT,
+    amount TEXT    
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- Indexes
-CREATE INDEX idx_{table_name}_symbol ON {table_name}(symbol);
+CREATE INDEX idx_dividends_symbol ON dividends(symbol) WHERE symbol IS NOT NULL;
+CREATE INDEX idx_dividends_date ON dividends(date) WHERE date IS NOT NULL;

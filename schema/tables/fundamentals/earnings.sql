@@ -1,22 +1,19 @@
--- Fundamental Time-Series: earnings
+-- FUNDAMENTALS: earnings
+-- Generated from ACTUAL API response investigation
+-- Total fields in response: 12
+
 CREATE TABLE earnings (
     id BIGSERIAL PRIMARY KEY,
-    symbol VARCHAR(10) NOT NULL,
-    fiscal_date_ending DATE NOT NULL,
-    report_type VARCHAR(10) NOT NULL CHECK (report_type IN ('annual', 'quarterly')),
-    reported_currency VARCHAR(10),
-    estimatedeps NUMERIC,
-    reporteddate DATE,
-    reportedeps NUMERIC,
-    reporttime VARCHAR(50),
-    surprise NUMERIC,
-    surprisepercentage NUMERIC,
-    
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    UNIQUE(symbol, fiscal_date_ending, report_type)
+    symbol VARCHAR(10) PRIMARY KEY,
+    fiscaldateending TEXT,
+    reportedeps TEXT,
+    reporteddate TEXT,
+    estimatedeps TEXT,
+    surprise TEXT,
+    surprisepercentage TEXT,
+    reporttime TEXT    
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- Indexes
-CREATE INDEX idx_{table_name}_symbol ON {table_name}(symbol);
-CREATE INDEX idx_{table_name}_date ON {table_name}(fiscal_date_ending);
-CREATE INDEX idx_{table_name}_type ON {table_name}(report_type);
+CREATE INDEX idx_earnings_symbol ON earnings(symbol) WHERE symbol IS NOT NULL;
+CREATE INDEX idx_earnings_date ON earnings(date) WHERE date IS NOT NULL;

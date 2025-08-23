@@ -1,13 +1,15 @@
--- Economic Indicator: treasury_yield
+-- ECONOMIC: treasury_yield
+-- Generated from ACTUAL API response investigation
+-- Total fields in response: 6
+
 CREATE TABLE treasury_yield (
     id BIGSERIAL PRIMARY KEY,
-    name VARCHAR(50),
-    interval VARCHAR(10),
-    unit VARCHAR(10),
-    date DATE,
-    value NUMERIC,
+    name TEXT,
+    interval TEXT,
+    unit TEXT,
+    date TEXT,
+    value TEXT    
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- Indexes
 CREATE INDEX idx_treasury_yield_date ON treasury_yield(date) WHERE date IS NOT NULL;

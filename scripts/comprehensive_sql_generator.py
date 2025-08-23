@@ -353,14 +353,14 @@ CREATE TABLE {table_name} (
         # Extract all fields from options data
         options_fields = {}
         
-        if 'options' in data:
-            options_list = data['options']
-            if isinstance(options_list, list) and options_list:
-                # Analyze all options to get complete field list
-                for option in options_list:
-                    for field, value in option.items():
-                        if field not in options_fields:
-                            options_fields[field] = self._get_field_type_from_value(value)
+        # Check both 'options' and 'data' keys for the options array
+        options_list = data.get('options', data.get('data', []))
+        if isinstance(options_list, list) and options_list:
+            # Analyze all options to get complete field list
+            for option in options_list:
+                for field, value in option.items():
+                    if field not in options_fields:
+                        options_fields[field] = self._get_field_type_from_value(value)
         
         # Add all discovered fields
         for field, field_type in sorted(options_fields.items()):

@@ -1,5 +1,5 @@
 -- AlphaTrader Database Schema
--- Generated: 2025-08-23T11:25:21.762287
+-- Generated: 2025-08-23T11:36:37.114727
 -- Total Fields Catalog: 8227
 -- 
 -- ZERO COMPROMISES:
@@ -579,6 +579,26 @@ CREATE INDEX idx_{table_name}_symbol ON {table_name}(symbol);
 CREATE TABLE historical_options (
     id BIGSERIAL PRIMARY KEY,
     symbol VARCHAR(10) NOT NULL,
+    ask NUMERIC,
+    ask_size NUMERIC,
+    bid NUMERIC,
+    bid_size NUMERIC,
+    contractid VARCHAR(50),
+    date DATE,
+    delta NUMERIC,
+    expiration DATE,
+    gamma NUMERIC,
+    implied_volatility NUMERIC,
+    last NUMERIC,
+    mark NUMERIC,
+    open_interest NUMERIC,
+    rho NUMERIC,
+    strike NUMERIC,
+    symbol VARCHAR(10),
+    theta NUMERIC,
+    type VARCHAR(10),
+    vega NUMERIC,
+    volume NUMERIC,
     
     data_timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
@@ -636,6 +656,26 @@ CREATE INDEX idx_historical_options_timestamp ON historical_options(data_timesta
 CREATE TABLE realtime_options (
     id BIGSERIAL PRIMARY KEY,
     symbol VARCHAR(10) NOT NULL,
+    ask NUMERIC,
+    ask_size NUMERIC,
+    bid NUMERIC,
+    bid_size NUMERIC,
+    contractid VARCHAR(50),
+    date DATE,
+    delta NUMERIC,
+    expiration DATE,
+    gamma NUMERIC,
+    implied_volatility NUMERIC,
+    last NUMERIC,
+    mark NUMERIC,
+    open_interest NUMERIC,
+    rho NUMERIC,
+    strike NUMERIC,
+    symbol VARCHAR(10),
+    theta NUMERIC,
+    type VARCHAR(10),
+    vega NUMERIC,
+    volume NUMERIC,
     
     data_timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),

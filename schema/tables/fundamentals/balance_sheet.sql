@@ -1,52 +1,53 @@
--- Fundamental Time-Series: balance_sheet
+-- FUNDAMENTALS: balance_sheet
+-- Generated from ACTUAL API response investigation
+-- Total fields in response: 79
+
 CREATE TABLE balance_sheet (
     id BIGSERIAL PRIMARY KEY,
     symbol VARCHAR(10) NOT NULL,
     fiscal_date_ending DATE NOT NULL,
-    report_type VARCHAR(10) NOT NULL CHECK (report_type IN ('annual', 'quarterly')),
+    report_type VARCHAR(10) CHECK (report_type IN ('annual', 'quarterly')),
     reported_currency VARCHAR(10),
+    fiscaldateending TEXT,
+    reportedcurrency TEXT,
+    totalassets TEXT,
+    totalcurrentassets TEXT,
+    cashandcashequivalentsatcarryingvalue TEXT,
+    cashandshortterminvestments TEXT,
+    inventory TEXT,
+    currentnetreceivables TEXT,
+    totalnoncurrentassets TEXT,
+    propertyplantequipment TEXT,
     accumulateddepreciationamortizationppe TEXT,
-    capitalleaseobligations TEXT,
-    cashandcashequivalentsatcarryingvalue NUMERIC,
-    cashandshortterminvestments NUMERIC,
-    commonstock NUMERIC,
-    commonstocksharesoutstanding NUMERIC,
-    currentaccountspayable NUMERIC,
-    currentdebt TEXT,
-    currentlongtermdebt NUMERIC,
-    currentnetreceivables NUMERIC,
-    deferredrevenue TEXT,
-    goodwill TEXT,
     intangibleassets TEXT,
     intangibleassetsexcludinggoodwill TEXT,
-    inventory NUMERIC,
+    goodwill TEXT,
     investments TEXT,
-    longtermdebt NUMERIC,
-    longtermdebtnoncurrent TEXT,
-    longterminvestments NUMERIC,
-    othercurrentassets NUMERIC,
-    othercurrentliabilities NUMERIC,
+    longterminvestments TEXT,
+    shortterminvestments TEXT,
+    othercurrentassets TEXT,
     othernoncurrentassets TEXT,
-    othernoncurrentliabilities NUMERIC,
-    propertyplantequipment NUMERIC,
-    retainedearnings NUMERIC,
-    shortlongtermdebttotal NUMERIC,
-    shorttermdebt NUMERIC,
-    shortterminvestments NUMERIC,
-    totalassets NUMERIC,
-    totalcurrentassets NUMERIC,
-    totalcurrentliabilities NUMERIC,
-    totalliabilities NUMERIC,
-    totalnoncurrentassets NUMERIC,
-    totalnoncurrentliabilities NUMERIC,
-    totalshareholderequity NUMERIC,
+    totalliabilities TEXT,
+    totalcurrentliabilities TEXT,
+    currentaccountspayable TEXT,
+    deferredrevenue TEXT,
+    currentdebt TEXT,
+    shorttermdebt TEXT,
+    totalnoncurrentliabilities TEXT,
+    capitalleaseobligations TEXT,
+    longtermdebt TEXT,
+    currentlongtermdebt TEXT,
+    longtermdebtnoncurrent TEXT,
+    shortlongtermdebttotal TEXT,
+    othercurrentliabilities TEXT,
+    othernoncurrentliabilities TEXT,
+    totalshareholderequity TEXT,
     treasurystock TEXT,
-    
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    UNIQUE(symbol, fiscal_date_ending, report_type)
+    retainedearnings TEXT,
+    commonstock TEXT,
+    commonstocksharesoutstanding TEXT    
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- Indexes
-CREATE INDEX idx_{table_name}_symbol ON {table_name}(symbol);
-CREATE INDEX idx_{table_name}_date ON {table_name}(fiscal_date_ending);
-CREATE INDEX idx_{table_name}_type ON {table_name}(report_type);
+CREATE INDEX idx_balance_sheet_symbol ON balance_sheet(symbol) WHERE symbol IS NOT NULL;
+CREATE INDEX idx_balance_sheet_date ON balance_sheet(date) WHERE date IS NOT NULL;

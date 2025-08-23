@@ -1,13 +1,15 @@
--- Economic Indicator: cpi
+-- ECONOMIC: cpi
+-- Generated from ACTUAL API response investigation
+-- Total fields in response: 6
+
 CREATE TABLE cpi (
     id BIGSERIAL PRIMARY KEY,
-    name VARCHAR(50),
-    interval VARCHAR(10),
-    unit VARCHAR(50),
-    date DATE,
-    value NUMERIC,
+    name TEXT,
+    interval TEXT,
+    unit TEXT,
+    date TEXT,
+    value TEXT    
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- Indexes
 CREATE INDEX idx_cpi_date ON cpi(date) WHERE date IS NOT NULL;
