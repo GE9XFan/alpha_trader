@@ -1,0 +1,311 @@
+tools:
+  # Options Pricing Tools
+  - name: calculate_option_price
+    description: Calculate option price using Black-Scholes or Binomial model
+    parameters:
+      spot_price: 
+        type: float
+        description: Current price of underlying
+      strike_price:
+        type: float
+        description: Strike price of option
+      time_to_expiry:
+        type: float
+        description: Time to expiration in years
+      volatility:
+        type: float
+        description: Implied volatility (annualized)
+      risk_free_rate:
+        type: float
+        description: Risk-free interest rate
+      option_type:
+        type: enum
+        values: [CALL, PUT]
+      model:
+        type: enum
+        values: [BLACK_SCHOLES, BINOMIAL, MONTE_CARLO]
+        default: BLACK_SCHOLES
+    returns:
+      price: float
+      confidence: float
+
+  - name: calculate_all_greeks
+    description: Calculate all Greeks for an option position
+    parameters:
+      spot_price: float
+      strike_price: float
+      time_to_expiry: float
+      volatility: float
+      risk_free_rate: float
+      option_type: enum[CALL, PUT]
+      position_size: int
+    returns:
+      delta: float
+      gamma: float
+      vega: float
+      theta: float
+      rho: float
+      dollar_delta: float
+      dollar_gamma: float
+
+  - name: calculate_portfolio_greeks
+    description: Aggregate Greeks across entire options portfolio
+    parameters:
+      positions:
+        type: array
+        items:
+          symbol: string
+          strike: float
+          expiry: date
+          option_type: enum[CALL, PUT]
+          quantity: int
+    returns:
+      portfolio_delta: float
+      portfolio_gamma: float
+      portfolio_vega: float
+      portfolio_theta: float
+      within_limits: boolean
+      breached_limits: array
+
+  # VPIN and Flow Analysis
+  - name: calculate_vpin
+    description: Calculate Volume-synchronized Probability of Informed Trading
+    parameters:
+      volume_data:
+        type: array
+        items:
+          timestamp: datetime
+          buy_volume: int
+          sell_volume: int
+      window_size:
+        type: int
+        default: 50
+    returns:
+      vpin: float
+      is_toxic: boolean
+      trend: enum[INCREASING, STABLE, DECREASING]
+
+  - name: analyze_options_flow
+    description: Analyze unusual options activity and flow
+    parameters:
+      symbol: string
+      timeframe:
+        type: enum
+        values: [1H, 4H, 1D]
+        default: 1D
+    returns:
+      unusual_activity: array
+      put_call_ratio: float
+      flow_sentiment: enum[BULLISH, NEUTRAL, BEARISH]
+      large_trades: array
+
+  # Risk Management Tools
+  - name: check_risk_limits
+    description: Verify position against all risk parameters
+    parameters:
+      position:
+        symbol: string
+        strike: float
+        option_type: enum[CALL, PUT]
+        quantity: int
+        entry_price: float
+      portfolio_metrics:
+        current_positions: int
+        daily_pnl: float
+        portfolio_value: float
+    returns:
+      passed: boolean
+      failed_checks: array
+      risk_score: float
+      recommendations: array
+
+  - name: calculate_position_size
+    description: Calculate optimal position size using Kelly Criterion
+    parameters:
+      account_value: float
+      win_probability: float
+      average_win: float
+      average_loss: float
+      kelly_fraction:
+        type: float
+        default: 0.25
+      max_position_size:
+        type: float
+        default: 50000
+    returns:
+      recommended_size: float
+      contracts: int
+      risk_percentage: float
+
+  - name: manage_0dte_positions
+    description: Manage zero-day-to-expiration options
+    parameters:
+      current_time: time
+      positions:
+        type: array
+        items:
+          symbol: string
+          strike: float
+          option_type: enum[CALL, PUT]
+          quantity: int
+          current_price: float
+    returns:
+      positions_to_close: array
+      estimated_pnl: float
+      execution_priority: array
+
+  # Trading Signal Tools
+  - name: generate_options_signal
+    description: Generate options trading signal with confidence
+    parameters:
+      symbol: string
+      technical_indicators:
+        rsi: float
+        macd: object
+        bollinger_bands: object
+        vwap: float
+      options_metrics:
+        iv_rank: float
+        iv_percentile: float
+        put_call_ratio: float
+        vpin: float
+      market_conditions:
+        vix: float
+        market_trend: enum[UPTREND, SIDEWAYS, DOWNTREND]
+    returns:
+      signal: enum[BUY_CALL, BUY_PUT, SELL_CALL, SELL_PUT, HOLD]
+      confidence: float
+      suggested_strike: float
+      suggested_expiry: date
+      risk_reward: float
+
+  - name: identify_options_strategy
+    description: Identify optimal options strategy based on market outlook
+    parameters:
+      outlook:
+        direction: enum[BULLISH, NEUTRAL, BEARISH]
+        volatility_expectation: enum[INCREASING, STABLE, DECREASING]
+        time_horizon: int
+      risk_tolerance: enum[CONSERVATIVE, MODERATE, AGGRESSIVE]
+      capital_available: float
+    returns:
+      strategy: string
+      legs: array
+      max_profit: float
+      max_loss: float
+      breakeven_points: array
+
+  # Market Analysis Tools
+  - name: analyze_volatility_surface
+    description: Analyze implied volatility surface for opportunities
+    parameters:
+      symbol: string
+      expiry_range:
+        min_days: int
+        max_days: int
+    returns:
+      volatility_smile: object
+      term_structure: object
+      anomalies: array
+      arbitrage_opportunities: array
+
+  - name: calculate_moc_imbalance
+    description: Calculate Market-on-Close order imbalance
+    parameters:
+      symbol: string
+      current_time: time
+      order_book:
+        buy_orders: int
+        sell_orders: int
+      historical_average: float
+    returns:
+      imbalance: float
+      imbalance_direction: enum[BUY, SELL, NEUTRAL]
+      signal_strength: float
+      recommended_action: string
+
+  # Community Tools
+  - name: format_discord_signal
+    description: Format trading signal for Discord broadcast
+    parameters:
+      signal_type: enum[ENTRY, EXIT, ALERT]
+      trade_details:
+        symbol: string
+        action: enum[BUY, SELL]
+        strike: float
+        expiry: date
+        option_type: enum[CALL, PUT]
+        price: float
+        contracts: int
+      indicators: object
+      confidence: float
+      tier_access: array
+    returns:
+      embed: object
+      delay_schedule: object
+      formatted_message: string
+
+  - name: calculate_leaderboard_metrics
+    description: Calculate user metrics for leaderboard
+    parameters:
+      user_id: string
+      period: enum[DAILY, WEEKLY, MONTHLY, ALL_TIME]
+      trades: array
+    returns:
+      pnl: float
+      win_rate: float
+      profit_factor: float
+      sharpe_ratio: float
+      max_drawdown: float
+      consistency_score: float
+      rank: int
+
+  - name: validate_whop_subscription
+    description: Validate Whop subscription and determine access level
+    parameters:
+      user_id: string
+      webhook_payload: object
+      signature: string
+    returns:
+      valid: boolean
+      tier: enum[FREE, PREMIUM, VIP]
+      features_enabled: array
+      signal_delay: int
+      max_signals_per_day: int
+
+  # Backtesting Tools
+  - name: backtest_options_strategy
+    description: Backtest options trading strategy
+    parameters:
+      strategy:
+        type: string
+        rules: object
+      start_date: date
+      end_date: date
+      initial_capital: float
+      position_sizing: object
+      slippage_model: object
+    returns:
+      total_return: float
+      sharpe_ratio: float
+      max_drawdown: float
+      win_rate: float
+      profit_factor: float
+      trade_log: array
+      equity_curve: array
+
+  # Data Quality Tools
+  - name: validate_options_data
+    description: Validate options market data quality
+    parameters:
+      data:
+        type: object
+        symbol: string
+        chains: array
+        timestamp: datetime
+    returns:
+      is_valid: boolean
+      issues: array
+      missing_fields: array
+      anomalies: array
+      quality_score: float
