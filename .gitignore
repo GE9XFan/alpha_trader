@@ -44,4 +44,4 @@ temp/
 *.tmp
 
 # Claude AI specific
-.claude/mcp-servers.json
+.claude/mcp-servers.json.env
