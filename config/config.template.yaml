@@ -1,0 +1,217 @@
+# AlphaTrader Configuration - Tech Spec v3.0 Section 5
+system:
+  name: AlphaTrader
+  version: 3.0
+  environment: development  # development/staging/production
+
+# Data source configuration - Tech Spec Section 5.1
+data_sources:
+  # Interactive Brokers - Execution & Quotes
+  ibkr:
+    host: 127.0.0.1
+    port: 7497  # 7496 for live
+    client_id: 1
+    connection_timeout: 30
+    heartbeat_interval: 10
+    responsibilities:
+      - real_time_quotes
+      - price_bars_5sec
+      - order_execution
+      - position_management
+      
+  # Alpha Vantage - Analytics & Options (38 APIs total!)
+  alpha_vantage:
+    api_key: ${AV_API_KEY}  # Premium tier - 600 calls/minute
+    tier: premium
+    rate_limit: 600
+    rate_window: 60
+    timeout: 30
+    retry_count: 3
+    retry_delay: 1
+    concurrent_requests: 10
+    
+    # Cache configuration by data type
+    cache_config:
+      options:
+        ttl: 60  # Real-time options cache for 1 minute
+        max_size: 1000
+      historical_options:
+        ttl: 3600  # Historical data cache for 1 hour
+        max_size: 10000
+      indicators:
+        ttl: 300  # Technical indicators cache for 5 minutes
+        max_size: 500
+      sentiment:
+        ttl: 900  # News sentiment cache for 15 minutes
+        max_size: 100
+      fundamentals:
+        ttl: 86400  # Fundamental data cache for 1 day
+        max_size: 100
+        
+    # All 38 Alpha Vantage APIs from Tech Spec Section 6.1
+    enabled_apis:
+      # OPTIONS (2)
+      - REALTIME_OPTIONS
+      - HISTORICAL_OPTIONS
+      # TECHNICAL INDICATORS (16)
+      - RSI
+      - MACD
+      - STOCH
+      - WILLR
+      - MOM
+      - BBANDS
+      - ATR
+      - ADX
+      - AROON
+      - CCI
+      - EMA
+      - SMA
+      - MFI
+      - OBV
+      - AD
+      - VWAP
+      # ANALYTICS (2)
+      - ANALYTICS_FIXED_WINDOW
+      - ANALYTICS_SLIDING_WINDOW
+      # SENTIMENT (3)
+      - NEWS_SENTIMENT
+      - TOP_GAINERS_LOSERS
+      - INSIDER_TRANSACTIONS
+      # FUNDAMENTALS (7)
+      - OVERVIEW
+      - EARNINGS
+      - INCOME_STATEMENT
+      - BALANCE_SHEET
+      - CASH_FLOW
+      - DIVIDENDS
+      - SPLITS
+      # ECONOMIC (5)
+      - TREASURY_YIELD
+      - FEDERAL_FUNDS_RATE
+      - CPI
+      - INFLATION
+      - REAL_GDP
+
+# Trading configuration
+trading:
+  mode: paper  # paper/live
+  symbols: [SPY, QQQ, IWM]
+  
+  features:
+    from_ibkr:
+      - spot_price
+      - price_bars
+      - volume
+      - bid_ask_spread
+    from_alpha_vantage:
+      - options_chains
+      - greeks  # PROVIDED, not calculated!
+      - implied_volatility
+      - technical_indicators
+      - news_sentiment
+      - market_analytics
+
+# Risk management with AV Greeks - Tech Spec Section 3.3
+risk:
+  max_positions: 5
+  max_position_size: 10000
+  position_sizing_method: kelly
+  daily_loss_limit: 1000
+  weekly_loss_limit: 3000
+  monthly_loss_limit: 5000
+  
+  portfolio_greeks:
+    delta:
+      min: -0.3
+      max: 0.3
+      source: alpha_vantage  # Greeks from AV!
+    gamma:
+      min: -0.5
+      max: 0.5
+      source: alpha_vantage
+    vega:
+      min: -500
+      max: 500
+      source: alpha_vantage
+    theta:
+      min: -200
+      max: null
+      source: alpha_vantage
+
+# Machine Learning - Implementation Plan Week 2
+ml:
+  model:
+    type: xgboost
+    path: models/xgboost_v3.pkl
+    version: 3.0
+  training:
+    data_source: alpha_vantage  # 20 years available!
+    history_years: 5
+    retrain_interval_days: 30
+  features:
+    total_count: 45
+    price_features: 5  # From IBKR
+    technical_features: 16  # From Alpha Vantage
+    options_features: 12  # From Alpha Vantage
+    sentiment_features: 4  # From Alpha Vantage
+    market_features: 8  # From Alpha Vantage
+
+# Database configuration - Tech Spec Section 4
+database:
+  postgres:
+    host: localhost
+    port: 5432
+    database: alphatrader
+    user: postgres
+    password: ${DB_PASSWORD}
+    pool_size: 20
+  redis:
+    host: localhost
+    port: 6379
+    db: 0
+    password: ${REDIS_PASSWORD}
+
+# Monitoring - Tech Spec Section 8
+monitoring:
+  log_level: INFO
+  log_file: logs/alphatrader.log
+  metrics:
+    enabled: true
+    port: 9090
+    interval: 10
+  health_checks:
+    - name: ibkr_connection
+      interval: 60
+      critical: true
+    - name: av_api_health
+      interval: 300
+      critical: true
+    - name: av_rate_limit
+      interval: 30
+      threshold: 100
+      critical: false
+
+# Community features - Implementation Plan Week 7-8
+community:
+  discord:
+    enabled: true
+    bot_token: ${DISCORD_BOT_TOKEN}
+    channels:
+      signals: 123456789
+      performance: 234567890
+      analytics: 345678901
+      alerts: 456789012
+    tiers:
+      free:
+        delay_seconds: 300
+        max_signals_daily: 5
+        show_greeks: false
+      premium:
+        delay_seconds: 30
+        max_signals_daily: 20
+        show_greeks: true
+      vip:
+        delay_seconds: 0
+        max_signals_daily: -1
+        show_greeks: true
+        show_analytics: true
