@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Signal Generation Module
+Signal Generation Module - UPDATED VERSION
 Generates trading signals by combining ML predictions with trading rules.
+Now includes sentiment signals and regime adjustments.
 Brain of the system - reused by both paper and live trading.
 """
 
@@ -19,6 +20,9 @@ from src.analytics.ml_model import MLPredictor, Prediction
 from src.analytics.features import FeatureEngine
 from src.data.market_data import MarketDataManager
 from src.data.options_data import OptionsDataManager, OptionContract
+from src.data.av_client import AlphaVantageClient, SentimentData
+from src.data.fundamental_data import FundamentalDataManager
+from src.data.market_regime import MarketRegimeDetector, MarketRegime
 from src.core.config import get_config, TradingConfig
 
 logger = logging.getLogger(__name__)
@@ -31,6 +35,10 @@ class SignalType(Enum):
     HOLD = "HOLD"
     CLOSE = "CLOSE"
     CLOSE_ALL = "CLOSE_ALL"  # Emergency close
+    # New signal types
+    SENTIMENT_BUY = "SENTIMENT_BUY"
+    SENTIMENT_SELL = "SENTIMENT_SELL"
+    REGIME_ADJUST = "REGIME_ADJUST"
 
 
 @dataclass
@@ -41,6 +49,9 @@ class TradingSignal:
     signal_type: SignalType
     confidence: float
     
+    # Signal source
+    source: str = "ML"  # 'ML', 'SENTIMENT', 'TECHNICAL', 'REGIME', 'COMPOSITE'
+    
     # Option details
     option: Optional[OptionContract] = None
     contracts: int = 5  # Default contract size
@@ -48,6 +59,14 @@ class TradingSignal:
     # ML prediction details
     prediction: Optional[Prediction] = None
     features: Optional[np.ndarray] = None
+    
+    # Sentiment data
+    sentiment_score: Optional[float] = None
+    news_count: Optional[int] = None
+    
+    # Market regime
+    market_regime: Optional[MarketRegime] = None
+    regime_adjustment: float = 1.0  # Position size adjustment
     
     # Risk checks
     risk_approved: bool = False
@@ -67,9 +86,13 @@ class TradingSignal:
             'symbol': self.symbol,
             'signal_type': self.signal_type.value,
             'confidence': self.confidence,
+            'source': self.source,
             'option': self.option.to_dict() if self.option else None,
             'contracts': self.contracts,
             'features': self.features.tolist() if self.features is not None else None,
+            'sentiment_score': self.sentiment_score,
+            'market_regime': self.market_regime.value if self.market_regime else None,
+            'regime_adjustment': self.regime_adjustment,
             'risk_approved': self.risk_approved,
             'risk_notes': self.risk_notes,
             'urgency': self.urgency,
@@ -89,7 +112,7 @@ class TradingSignal:
 class SignalGenerator:
     """
     Generates trading signals - BRAIN OF THE SYSTEM
-    Combines ML predictions with trading rules and market conditions.
+    Combines ML predictions, sentiment analysis, and regime detection.
     Reused by paper and live trading.
     """
     
@@ -97,20 +120,29 @@ class SignalGenerator:
                  ml_model: MLPredictor,
                  feature_engine: FeatureEngine,
                  market_data: MarketDataManager,
-                 options_data: OptionsDataManager):
+                 options_data: OptionsDataManager,
+                 av_client: AlphaVantageClient,
+                 fundamental_manager: Optional[FundamentalDataManager] = None,
+                 market_regime: Optional[MarketRegimeDetector] = None):
         """
-        Initialize SignalGenerator
+        Initialize SignalGenerator with multi-source capabilities
         
         Args:
             ml_model: ML predictor for signals
             feature_engine: Feature calculator
             market_data: Market data manager
             options_data: Options data manager
+            av_client: Alpha Vantage client for sentiment
+            fundamental_manager: Optional fundamental data
+            market_regime: Optional regime detector
         """
         self.ml = ml_model
         self.features = feature_engine
         self.market = market_data
         self.options = options_data
+        self.av_client = av_client  # NEW: For sentiment
+        self.fundamentals = fundamental_manager  # NEW: For earnings checks
+        self.regime = market_regime  # NEW: For regime adjustments
         self.config = get_config()
         
         # Signal tracking
@@ -125,20 +157,25 @@ class SignalGenerator:
         
         # Signal filters
         self.enable_ml_signals = True
-        self.enable_technical_signals = False  # Can add rule-based signals
-        self.enable_options_flow_signals = False  # Can add flow-based signals
+        self.enable_technical_signals = False  
+        self.enable_sentiment_signals = self.config.ml.use_sentiment_features  # NEW
+        self.enable_fundamental_filters = self.config.ml.use_fundamental_features  # NEW
+        self.enable_regime_adjustments = True  # NEW
         
         # Performance tracking
         self.signals_generated = 0
         self.signals_executed = 0
+        self.signals_by_source: Dict[str, int] = {
+            'ML': 0, 'SENTIMENT': 0, 'TECHNICAL': 0, 'REGIME': 0, 'COMPOSITE': 0
+        }
         
-        logger.info("SignalGenerator initialized")
+        logger.info("SignalGenerator initialized with multi-source capabilities")
     
     async def generate_signals(self, 
                               symbols: List[str]) -> List[TradingSignal]:
         """
         Generate signals for symbols - CORE LOGIC
-        Called by both paper and live traders.
+        Now combines ML, sentiment, and regime signals.
         
         Args:
             symbols: List of symbols to analyze
@@ -146,23 +183,112 @@ class SignalGenerator:
         Returns:
             List of trading signals
         """
-        # TODO: Implement signal generation
+        # TODO: Implement multi-source signal generation
         # 1. Check if market is open
-        # 2. Filter symbols by timing
-        # 3. For each symbol:
-        #    a. Get historical data
-        #    b. Calculate features
-        #    c. Get ML prediction
-        #    d. Apply trading rules
-        #    e. Select best option
-        #    f. Create signal
-        # 4. Filter signals
-        # 5. Return signals
+        # 2. Get current market regime
+        # 3. Filter symbols by timing and fundamentals
+        # 4. For each symbol:
+        #    a. Generate ML signals
+        #    b. Generate sentiment signals
+        #    c. Apply regime adjustments
+        #    d. Combine signals
+        # 5. Filter and prioritize signals
+        # 6. Return final signal list
+        pass
+    
+    async def generate_ml_signals(self, symbols: List[str]) -> List[TradingSignal]:
+        """
+        Generate ML-based signals
+        
+        Args:
+            symbols: List of symbols
+            
+        Returns:
+            List of ML signals
+        """
+        # TODO: Implement ML signal generation
+        # 1. For each symbol:
+        #    a. Check timing constraints
+        #    b. Get historical data
+        #    c. Calculate features (uses AV indicators)
+        #    d. Get ML prediction
+        #    e. Apply trading rules
+        #    f. Select option contract
+        #    g. Create signal
+        # 2. Return ML signals
+        pass
+    
+    async def generate_sentiment_signals(self, symbols: List[str]) -> List[TradingSignal]:
+        """
+        Generate signals from news sentiment using Alpha Vantage
+        
+        Args:
+            symbols: List of symbols
+            
+        Returns:
+            List of sentiment-based signals
+        """
+        if not self.enable_sentiment_signals:
+            return []
+        
+        # TODO: Implement sentiment signal generation
+        # 1. Get news sentiment from av_client
+        # 2. For each symbol with strong sentiment:
+        #    a. Check sentiment threshold
+        #    b. Check volume of news
+        #    c. Get insider transactions
+        #    d. Generate signal if criteria met
+        # 3. Return sentiment signals
+        pass
+    
+    async def apply_regime_adjustments(self, 
+                                      signals: List[TradingSignal]) -> List[TradingSignal]:
+        """
+        Adjust signals based on market regime
+        
+        Args:
+            signals: Original signals
+            
+        Returns:
+            Regime-adjusted signals
+        """
+        if not self.regime or not self.enable_regime_adjustments:
+            return signals
+        
+        # TODO: Implement regime adjustments
+        # 1. Get current market regime
+        # 2. For each signal:
+        #    a. Apply position size adjustment
+        #    b. Adjust confidence thresholds
+        #    c. Filter inappropriate signals
+        #    d. Add regime metadata
+        # 3. Return adjusted signals
+        pass
+    
+    async def check_fundamental_filters(self, symbol: str) -> Tuple[bool, str]:
+        """
+        Check fundamental filters including earnings
+        
+        Args:
+            symbol: Stock symbol
+            
+        Returns:
+            Tuple of (passes_filter, reason)
+        """
+        if not self.fundamentals or not self.enable_fundamental_filters:
+            return True, "No fundamental filters"
+        
+        # TODO: Implement fundamental filtering
+        # 1. Check earnings date proximity
+        # 2. Check fundamental health score
+        # 3. Check debt levels
+        # 4. Check market cap
+        # 5. Return filter result
         pass
     
     async def generate_signal_for_symbol(self, symbol: str) -> Optional[TradingSignal]:
         """
-        Generate signal for a single symbol
+        Generate signal for a single symbol combining all sources
         
         Args:
             symbol: Stock symbol
@@ -170,15 +296,37 @@ class SignalGenerator:
         Returns:
             Trading signal or None
         """
-        # TODO: Implement single symbol signal generation
+        # TODO: Implement composite signal generation
         # 1. Check timing constraints
-        # 2. Get market data
-        # 3. Calculate features
-        # 4. Get ML prediction
-        # 5. Validate signal
-        # 6. Find option contract
-        # 7. Create TradingSignal
-        # 8. Return signal
+        # 2. Check fundamental filters
+        # 3. Get ML signal
+        # 4. Get sentiment signal
+        # 5. Combine signals
+        # 6. Apply regime adjustment
+        # 7. Select best option
+        # 8. Create composite signal
+        # 9. Return signal
+        pass
+    
+    def _combine_signals(self, 
+                        ml_signal: Optional[TradingSignal],
+                        sentiment_signal: Optional[TradingSignal]) -> Optional[TradingSignal]:
+        """
+        Combine ML and sentiment signals into composite
+        
+        Args:
+            ml_signal: ML-based signal
+            sentiment_signal: Sentiment-based signal
+            
+        Returns:
+            Combined signal or None
+        """
+        # TODO: Implement signal combination
+        # 1. If both agree, increase confidence
+        # 2. If disagree, use higher confidence
+        # 3. Weight by source reliability
+        # 4. Create composite signal
+        # 5. Return combined signal
         pass
     
     def _check_timing_constraints(self, symbol: str) -> bool:
@@ -214,11 +362,12 @@ class SignalGenerator:
         """
         # TODO: Implement trading rules
         # 1. Check confidence threshold
-        # 2. Check market regime
+        # 2. Check market regime compatibility
         # 3. Check volatility levels
         # 4. Check correlation limits
         # 5. Check time of day rules
-        # 6. Return combined result
+        # 6. Check sentiment alignment
+        # 7. Return combined result
         pass
     
     def _select_option_contract(self, 
@@ -235,11 +384,11 @@ class SignalGenerator:
             Selected option contract or None
         """
         # TODO: Implement option selection
-        # 1. Get ATM options
+        # 1. Get ATM options from options manager
         # 2. Filter by DTE (0-7 days)
-        # 3. Select shortest DTE for gamma
-        # 4. Verify liquidity
-        # 5. Check spread
+        # 3. Check liquidity (volume, OI)
+        # 4. Check spread reasonableness
+        # 5. Consider regime (longer DTE in volatile)
         # 6. Return best option
         pass
     
@@ -247,7 +396,7 @@ class SignalGenerator:
                                 signal: TradingSignal,
                                 account_value: float) -> int:
         """
-        Calculate position size in contracts
+        Calculate position size with regime adjustment
         
         Args:
             signal: Trading signal
@@ -257,11 +406,12 @@ class SignalGenerator:
             Number of contracts
         """
         # TODO: Implement position sizing
-        # 1. Get max position size from config
-        # 2. Calculate Kelly criterion
-        # 3. Apply risk limits
-        # 4. Round to contracts
-        # 5. Return size
+        # 1. Get base size from config
+        # 2. Apply Kelly criterion if enabled
+        # 3. Apply regime adjustment
+        # 4. Apply confidence scaling
+        # 5. Round to contracts
+        # 6. Return size
         pass
     
     async def generate_close_signals(self, 
@@ -276,66 +426,54 @@ class SignalGenerator:
             List of close signals
         """
         # TODO: Implement close signal generation
-        # 1. Check each position
-        # 2. Check stop loss conditions
-        # 3. Check profit targets
-        # 4. Check 0DTE expiry
-        # 5. Check ML exit signals
-        # 6. Create close signals
-        # 7. Return signals
+        # 1. Check each position for:
+        #    a. Stop loss conditions
+        #    b. Profit targets
+        #    c. 0DTE expiry
+        #    d. ML exit signals
+        #    e. Sentiment reversal
+        #    f. Regime change
+        # 2. Create close signals
+        # 3. Return signals
         pass
     
-    def _check_stop_loss(self, 
-                        position: Dict[str, Any]) -> bool:
+    def _check_sentiment_reversal(self, 
+                                 position: Dict[str, Any],
+                                 current_sentiment: float) -> bool:
         """
-        Check if position hit stop loss
+        Check if sentiment has reversed against position
         
         Args:
             position: Position details
+            current_sentiment: Current sentiment score
             
         Returns:
-            True if stop loss hit
+            True if sentiment reversed
         """
-        # TODO: Implement stop loss check
-        # 1. Calculate current P&L
-        # 2. Check against stop loss %
-        # 3. Check trailing stop
-        # 4. Return result
+        # TODO: Implement sentiment reversal check
+        # 1. Get position direction
+        # 2. Check current sentiment
+        # 3. Define reversal threshold
+        # 4. Return reversal status
         pass
     
-    def _check_profit_target(self, 
-                            position: Dict[str, Any]) -> bool:
+    def _check_regime_exit(self, 
+                          position: Dict[str, Any],
+                          current_regime: MarketRegime) -> bool:
         """
-        Check if position hit profit target
+        Check if regime change warrants exit
         
         Args:
             position: Position details
+            current_regime: Current market regime
             
         Returns:
-            True if profit target hit
+            True if should exit due to regime
         """
-        # TODO: Implement profit target check
-        # 1. Calculate current P&L
-        # 2. Check against target
-        # 3. Consider time in position
-        # 4. Return result
-        pass
-    
-    def _check_expiry(self, position: Dict[str, Any]) -> bool:
-        """
-        Check if position is expiring today
-        
-        Args:
-            position: Position details
-            
-        Returns:
-            True if expiring today
-        """
-        # TODO: Implement expiry check
-        # 1. Get position expiry
-        # 2. Check if today
-        # 3. Check time to close
-        # 4. Return result
+        # TODO: Implement regime exit check
+        # 1. Check if regime changed
+        # 2. Check if new regime incompatible
+        # 3. Return exit decision
         pass
     
     def validate_signal(self, signal: TradingSignal) -> Tuple[bool, List[str]]:
@@ -354,7 +492,8 @@ class SignalGenerator:
         # 3. Check market hours
         # 4. Verify confidence
         # 5. Check risk approval
-        # 6. Return validation result
+        # 6. Check source validity
+        # 7. Return validation result
         pass
     
     def filter_signals(self, 
@@ -372,10 +511,11 @@ class SignalGenerator:
         """
         # TODO: Implement signal filtering
         # 1. Remove invalid signals
-        # 2. Sort by confidence
-        # 3. Remove duplicates
-        # 4. Apply max limit
-        # 5. Return filtered list
+        # 2. Apply fundamental filters
+        # 3. Sort by confidence and source
+        # 4. Remove duplicates
+        # 5. Apply max limit
+        # 6. Return filtered list
         pass
     
     def get_signal_metrics(self) -> Dict[str, Any]:
@@ -387,10 +527,11 @@ class SignalGenerator:
         """
         # TODO: Implement metrics calculation
         # 1. Count signals by type
-        # 2. Calculate average confidence
-        # 3. Track execution rate
-        # 4. Calculate timing stats
-        # 5. Return metrics
+        # 2. Count signals by source
+        # 3. Calculate average confidence
+        # 4. Track execution rate
+        # 5. Calculate timing stats
+        # 6. Return metrics
         pass
     
     def emergency_close_all(self) -> List[TradingSignal]:
@@ -423,62 +564,25 @@ class SignalGenerator:
         # 6. Return result
         pass
     
-    def add_technical_signals(self, enabled: bool = True) -> None:
+    async def backtest_signals(self, 
+                              historical_data: pd.DataFrame,
+                              start_date: datetime,
+                              end_date: datetime) -> pd.DataFrame:
         """
-        Enable/disable technical analysis signals
+        Backtest signal generation
         
         Args:
-            enabled: Whether to enable
-        """
-        # TODO: Implement technical signal toggle
-        # 1. Set flag
-        # 2. Initialize if needed
-        # 3. Log change
-        pass
-    
-    def add_options_flow_signals(self, enabled: bool = True) -> None:
-        """
-        Enable/disable options flow signals
-        
-        Args:
-            enabled: Whether to enable
-        """
-        # TODO: Implement flow signal toggle
-        # 1. Set flag
-        # 2. Initialize if needed
-        # 3. Log change
-        pass
-    
-    def save_signals(self, filepath: str) -> bool:
-        """
-        Save signals to file for analysis
-        
-        Args:
-            filepath: Output file path
+            historical_data: Historical market data
+            start_date: Backtest start
+            end_date: Backtest end
             
         Returns:
-            True if saved successfully
+            DataFrame with backtest results
         """
-        # TODO: Implement signal saving
-        # 1. Convert signals to DataFrame
-        # 2. Add metadata
-        # 3. Save to file
-        # 4. Return success
-        pass
-    
-    def load_signals(self, filepath: str) -> List[TradingSignal]:
-        """
-        Load signals from file
-        
-        Args:
-            filepath: Input file path
-            
-        Returns:
-            List of signals
-        """
-        # TODO: Implement signal loading
-        # 1. Load from file
-        # 2. Parse into signals
-        # 3. Validate signals
-        # 4. Return list
+        # TODO: Implement backtesting
+        # 1. Iterate through historical data
+        # 2. Generate signals at each point
+        # 3. Track hypothetical trades
+        # 4. Calculate performance
+        # 5. Return results
         pass

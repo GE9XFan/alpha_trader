@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
 """
-Feature Engineering Module
-Calculates features for ML model - feeds the entire prediction pipeline.
-Reused for both training and live prediction with identical feature generation.
+Feature Engineering Module - UPDATED VERSION
+Calculates features for ML model using Alpha Vantage for technical indicators.
+Feeds the entire prediction pipeline with consistent feature generation.
 """
 
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional, Tuple, Any
-import talib
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 import logging
 from scipy import stats
 from collections import deque
+import asyncio
 
 from src.data.options_data import OptionsDataManager
 from src.data.market_data import MarketDataManager
+from src.data.av_client import AlphaVantageClient
+from src.data.fundamental_data import FundamentalDataManager
+from src.data.market_regime import MarketRegimeDetector
 from src.core.config import get_config, TradingConfig
 
 logger = logging.getLogger(__name__)
@@ -43,22 +46,32 @@ class FeatureVector:
 class FeatureEngine:
     """
     Feature engineering - FEEDS THE ML MODEL
-    Calculates consistent features for training and live prediction.
-    Total of 28 features across 4 categories.
+    Now uses Alpha Vantage for technical indicators instead of TA-Lib.
+    Includes sentiment and fundamental features.
+    Total of 28+ features across 5 categories.
     """
     
     def __init__(self, 
                  options_manager: OptionsDataManager,
-                 market_manager: MarketDataManager):
+                 market_manager: MarketDataManager,
+                 av_client: AlphaVantageClient,
+                 fundamental_manager: Optional[FundamentalDataManager] = None,
+                 regime_detector: Optional[MarketRegimeDetector] = None):
         """
-        Initialize FeatureEngine
+        Initialize FeatureEngine with Alpha Vantage integration
         
         Args:
             options_manager: Options data manager for options features
             market_manager: Market data manager for price data
+            av_client: Alpha Vantage client for technical indicators
+            fundamental_manager: Optional fundamental data manager
+            regime_detector: Optional market regime detector
         """
         self.options = options_manager
         self.market = market_manager
+        self.av_client = av_client  # NEW: For technical indicators
+        self.fundamentals = fundamental_manager
+        self.regime = regime_detector
         self.config = get_config()
         
         # Define feature names for consistency - CRITICAL for ML
@@ -70,17 +83,17 @@ class FeatureEngine:
             'volume_ratio',     # Current vs average volume
             'high_low_ratio',   # (High - Low) / Close
             
-            # Technical indicators (10)
-            'rsi',              # Relative Strength Index
-            'macd_signal',      # MACD signal line
-            'macd_histogram',   # MACD histogram
-            'bb_upper',         # Bollinger Band upper
-            'bb_lower',         # Bollinger Band lower
+            # Technical indicators from AV (10)
+            'rsi',              # RSI from Alpha Vantage
+            'macd_signal',      # MACD signal from AV
+            'macd_histogram',   # MACD histogram from AV
+            'bb_upper',         # Bollinger Band upper from AV
+            'bb_lower',         # Bollinger Band lower from AV
             'bb_position',      # Position within bands
-            'atr',              # Average True Range
-            'adx',              # Average Directional Index
-            'obv_slope',        # On-Balance Volume slope
-            'vwap_distance',    # Distance from VWAP
+            'atr',              # ATR from AV
+            'adx',              # ADX from AV
+            'obv_slope',        # OBV from AV (calculate slope)
+            'vwap_distance',    # VWAP from AV (intraday only)
             
             # Options metrics (8)
             'iv_rank',          # IV rank (0-100)
@@ -97,12 +110,26 @@ class FeatureEngine:
             'qqq_correlation',  # Correlation with QQQ
             'vix_level',        # VIX level (normalized)
             'term_structure',   # Options term structure
-            'market_regime'     # Market regime indicator
+            'market_regime',    # Market regime indicator
+            
+            # Sentiment features (3) - NEW
+            'news_sentiment',   # News sentiment from AV
+            'sentiment_volume', # Number of news articles
+            'insider_sentiment', # Insider transaction sentiment
+            
+            # Fundamental features (3) - NEW
+            'earnings_distance', # Days to/from earnings
+            'fundamental_score', # Company fundamental health
+            'pe_percentile'     # PE ratio percentile
         ]
         
         # Feature calculation cache
         self.feature_cache: Dict[str, FeatureVector] = {}
         self.cache_ttl = 60  # seconds
+        
+        # Technical indicator cache (from AV)
+        self.technical_cache: Dict[str, Dict[str, float]] = {}
+        self.technical_cache_time: Dict[str, datetime] = {}
         
         # Historical data storage for correlations
         self.correlation_window = 100  # bars
@@ -111,14 +138,14 @@ class FeatureEngine:
         # Feature statistics for normalization
         self.feature_stats: Dict[str, Dict[str, float]] = {}
         
-        logger.info(f"FeatureEngine initialized with {len(self.feature_names)} features")
+        logger.info(f"FeatureEngine initialized with {len(self.feature_names)} features using Alpha Vantage")
     
-    def calculate_features(self, 
-                         symbol: str,
-                         historical_data: pd.DataFrame) -> np.ndarray:
+    async def calculate_features(self, 
+                                symbol: str,
+                                historical_data: pd.DataFrame) -> np.ndarray:
         """
         Calculate all features - CRITICAL FOR ML
-        Same features for training and live prediction.
+        Now uses Alpha Vantage for technical indicators.
         
         Args:
             symbol: Stock symbol
@@ -127,21 +154,23 @@ class FeatureEngine:
         Returns:
             Feature array in consistent order
         """
-        # TODO: Implement feature calculation
+        # TODO: Implement feature calculation with AV
         # 1. Check cache first
-        # 2. Calculate price action features
-        # 3. Calculate technical indicators
-        # 4. Calculate options features
+        # 2. Calculate price action features (local)
+        # 3. Get technical indicators from AV
+        # 4. Calculate options features (using cached AV data)
         # 5. Calculate market structure features
-        # 6. Combine into array
-        # 7. Handle NaN values
-        # 8. Cache result
-        # 9. Return feature array
+        # 6. Get sentiment features from AV
+        # 7. Get fundamental features if available
+        # 8. Combine into array
+        # 9. Handle NaN values
+        # 10. Cache result
+        # 11. Return feature array
         pass
     
     def _calculate_price_features(self, data: pd.DataFrame) -> Dict[str, float]:
         """
-        Calculate price action features
+        Calculate price action features (local calculation)
         
         Args:
             data: OHLCV DataFrame
@@ -155,6 +184,72 @@ class FeatureEngine:
         # 3. Calculate high-low ratio
         # 4. Handle edge cases
         # 5. Return features dict
+        pass
+    
+    async def _get_av_technical_indicators(self, symbol: str) -> Dict[str, float]:
+        """
+        Get technical indicators from Alpha Vantage instead of calculating locally
+        
+        Args:
+            symbol: Stock symbol
+            
+        Returns:
+            Dictionary of technical indicators
+        """
+        # TODO: Implement AV technical indicator fetching
+        # 1. Check cache (5 min TTL)
+        # 2. Fetch RSI from AV
+        # 3. Fetch MACD from AV
+        # 4. Fetch Bollinger Bands from AV
+        # 5. Fetch ATR from AV
+        # 6. Fetch ADX from AV
+        # 7. Fetch OBV from AV
+        # 8. Fetch VWAP from AV (if intraday)
+        # 9. Cache results
+        # 10. Return indicators dict
+        pass
+    
+    async def _get_sentiment_features(self, symbol: str) -> Dict[str, float]:
+        """
+        Get sentiment features from Alpha Vantage NEWS_SENTIMENT
+        
+        Args:
+            symbol: Stock symbol
+            
+        Returns:
+            Dictionary of sentiment features
+        """
+        # TODO: Implement sentiment feature fetching
+        # 1. Call av_client.get_news_sentiment()
+        # 2. Aggregate sentiment scores
+        # 3. Count article volume
+        # 4. Get insider sentiment if available
+        # 5. Normalize scores
+        # 6. Return sentiment features
+        pass
+    
+    async def _get_fundamental_features(self, symbol: str) -> Dict[str, float]:
+        """
+        Get fundamental features if manager available
+        
+        Args:
+            symbol: Stock symbol
+            
+        Returns:
+            Dictionary of fundamental features
+        """
+        if not self.fundamentals:
+            return {
+                'earnings_distance': 0.0,
+                'fundamental_score': 0.5,
+                'pe_percentile': 0.5
+            }
+        
+        # TODO: Implement fundamental features
+        # 1. Get earnings date distance
+        # 2. Get fundamental score
+        # 3. Get PE percentile vs peers
+        # 4. Return features
         pass
     
     def _calculate_returns(self, data: pd.DataFrame, periods: int) -> float:
@@ -194,67 +289,9 @@ class FeatureEngine:
         # 5. Return ratio
         pass
     
-    def _calculate_technical_indicators(self, data: pd.DataFrame) -> Dict[str, float]:
-        """
-        Calculate technical indicators using TA-Lib
-        
-        Args:
-            data: OHLCV DataFrame
-            
-        Returns:
-            Dictionary of technical indicators
-        """
-        # TODO: Implement technical indicator calculation
-        # 1. Extract price arrays
-        # 2. Calculate RSI
-        # 3. Calculate MACD
-        # 4. Calculate Bollinger Bands
-        # 5. Calculate ATR
-        # 6. Calculate ADX
-        # 7. Calculate OBV slope
-        # 8. Calculate VWAP distance
-        # 9. Handle TA-Lib errors
-        # 10. Return indicators dict
-        pass
-    
-    def _calculate_obv_slope(self, close: np.ndarray, volume: np.ndarray) -> float:
-        """
-        Calculate On-Balance Volume slope
-        
-        Args:
-            close: Close prices
-            volume: Volume data
-            
-        Returns:
-            OBV slope
-        """
-        # TODO: Implement OBV slope calculation
-        # 1. Calculate OBV
-        # 2. Fit linear regression
-        # 3. Return slope
-        # 4. Handle edge cases
-        pass
-    
-    def _calculate_vwap_distance(self, data: pd.DataFrame) -> float:
-        """
-        Calculate distance from VWAP
-        
-        Args:
-            data: OHLCV data
-            
-        Returns:
-            Percentage distance from VWAP
-        """
-        # TODO: Implement VWAP distance
-        # 1. Calculate VWAP
-        # 2. Get current price
-        # 3. Calculate percentage distance
-        # 4. Return distance
-        pass
-    
     def _calculate_options_features(self, symbol: str) -> Dict[str, float]:
         """
-        Calculate options-specific features using Alpha Vantage data
+        Calculate options-specific features using cached Alpha Vantage data
         
         Args:
             symbol: Stock symbol
@@ -262,16 +299,16 @@ class FeatureEngine:
         Returns:
             Dictionary of options features
         """
-        # TODO: Implement options feature calculation using AV data
-        # 1. Get ATM options from options manager (uses AV)
-        # 2. Get IV directly from AV data (no calculation!)
-        # 3. Calculate IV rank using AV historical data
-        # 4. Calculate IV percentile using AV data
-        # 5. Get put/call ratio from AV volumes
-        # 6. Get gamma exposure from AV Greeks
-        # 7. Find delta neutral price using AV deltas
+        # TODO: Implement options feature calculation using cached AV data
+        # 1. Get ATM options from options manager (has AV Greeks)
+        # 2. Get IV directly from option data (from AV)
+        # 3. Calculate IV rank using options manager
+        # 4. Calculate IV percentile
+        # 5. Get put/call ratio from options manager
+        # 6. Get gamma exposure from options manager
+        # 7. Find delta neutral price
         # 8. Calculate max pain distance
-        # 9. Get option volumes from AV
+        # 9. Get option volumes from cached data
         # 10. Handle missing data
         # 11. Return features dict
         pass
@@ -290,9 +327,9 @@ class FeatureEngine:
         # TODO: Implement market structure calculation
         # 1. Calculate SPY correlation
         # 2. Calculate QQQ correlation
-        # 3. Get VIX level
+        # 3. Get VIX level (from market data or AV)
         # 4. Calculate term structure
-        # 5. Determine market regime
+        # 5. Get market regime if detector available
         # 6. Return features dict
         pass
     
@@ -319,22 +356,19 @@ class FeatureEngine:
         # 5. Return correlation
         pass
     
-    def _determine_market_regime(self, vix: float, trend: float) -> float:
+    async def get_feature_importance(self) -> pd.Series:
         """
-        Determine market regime (trending, ranging, volatile)
+        Get feature importance from model or pre-calculated
         
-        Args:
-            vix: VIX level
-            trend: Trend strength
-            
         Returns:
-            Regime indicator (0-1)
+            Series with feature importance scores
         """
-        # TODO: Implement regime detection
-        # 1. Classify VIX level
-        # 2. Assess trend strength
-        # 3. Combine into regime score
-        # 4. Return normalized score
+        # TODO: Implement importance retrieval
+        # 1. Load from model if available
+        # 2. Or use pre-calculated importance
+        # 3. Create Series with names
+        # 4. Sort by importance
+        # 5. Return Series
         pass
     
     def validate_features(self, features: np.ndarray) -> Tuple[bool, List[str]]:
@@ -351,23 +385,8 @@ class FeatureEngine:
         # 1. Check array length
         # 2. Check for NaN values
         # 3. Check for infinite values
-        # 4. Check value ranges
+        # 4. Validate feature ranges
         # 5. Return validation result
-        pass
-    
-    def get_feature_importance(self) -> pd.Series:
-        """
-        Get feature importance from model
-        
-        Returns:
-            Series with feature importance scores
-        """
-        # TODO: Implement importance retrieval
-        # 1. Load model if available
-        # 2. Extract feature importance
-        # 3. Create Series with names
-        # 4. Sort by importance
-        # 5. Return Series
         pass
     
     def calculate_feature_stats(self, 
@@ -413,11 +432,14 @@ class FeatureEngine:
         Returns:
             Dictionary mapping categories to feature names
         """
-        # TODO: Implement category mapping
-        # 1. Define categories
-        # 2. Map features to categories
-        # 3. Return organized dict
-        pass
+        return {
+            'price_action': self.feature_names[0:5],
+            'technical': self.feature_names[5:15],
+            'options': self.feature_names[15:23],
+            'market_structure': self.feature_names[23:28],
+            'sentiment': self.feature_names[28:31],
+            'fundamental': self.feature_names[31:34]
+        }
     
     def create_feature_vector(self,
                             symbol: str,
@@ -440,6 +462,26 @@ class FeatureEngine:
         # 3. Add metadata
         # 4. Validate vector
         # 5. Return vector
+        pass
+    
+    async def warmup_av_indicators(self, symbols: List[str]) -> bool:
+        """
+        Warmup Alpha Vantage technical indicators cache
+        
+        Args:
+            symbols: List of symbols to warmup
+            
+        Returns:
+            True if successful
+        """
+        # TODO: Implement AV warmup
+        # 1. For each symbol:
+        #    a. Fetch RSI
+        #    b. Fetch MACD
+        #    c. Fetch Bollinger Bands
+        #    d. Cache results
+        # 2. Log warmup status
+        # 3. Return success
         pass
     
     def save_features(self, features: List[FeatureVector], filepath: str) -> bool:

@@ -1,25 +1,78 @@
 #!/usr/bin/env python3
 """
-Alpha Vantage Client Module
-Handles all interactions with Alpha Vantage API for options data.
-Manages rate limiting, caching, and fallback strategies.
+Alpha Vantage Client Module - COMPLETE VERSION
+Handles ALL 38 Alpha Vantage APIs across 6 categories.
+Manages rate limiting (600/min premium), caching, and fallback strategies.
 """
 
 import asyncio
 import aiohttp
 import time
 import json
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Union
 from datetime import datetime, timedelta, date
 from dataclasses import dataclass, field
 import logging
 from collections import deque
 from functools import lru_cache
 import hashlib
+import pandas as pd
+from enum import Enum
 
 from src.core.config import get_config, AlphaVantageConfig
 
 logger = logging.getLogger(__name__)
+
+
+class AVFunction(Enum):
+    """All 38 Alpha Vantage API functions"""
+    # OPTIONS
+    REALTIME_OPTIONS = "REALTIME_OPTIONS"
+    HISTORICAL_OPTIONS = "HISTORICAL_OPTIONS"
+    
+    # TECHNICAL INDICATORS (16)
+    RSI = "RSI"
+    MACD = "MACD"
+    STOCH = "STOCH"
+    WILLR = "WILLR"
+    MOM = "MOM"
+    BBANDS = "BBANDS"
+    ATR = "ATR"
+    ADX = "ADX"
+    AROON = "AROON"
+    CCI = "CCI"
+    EMA = "EMA"
+    SMA = "SMA"
+    MFI = "MFI"
+    OBV = "OBV"
+    AD = "AD"
+    VWAP = "VWAP"
+    
+    # ANALYTICS
+    ANALYTICS_FIXED_WINDOW = "ANALYTICS_FIXED_WINDOW"
+    ANALYTICS_SLIDING_WINDOW = "ANALYTICS_SLIDING_WINDOW"
+    
+    # SENTIMENT
+    NEWS_SENTIMENT = "NEWS_SENTIMENT"
+    TOP_GAINERS_LOSERS = "TOP_GAINERS_LOSERS"
+    INSIDER_TRANSACTIONS = "INSIDER_TRANSACTIONS"
+    
+    # FUNDAMENTALS (8)
+    OVERVIEW = "OVERVIEW"
+    EARNINGS = "EARNINGS"
+    INCOME_STATEMENT = "INCOME_STATEMENT"
+    BALANCE_SHEET = "BALANCE_SHEET"
+    CASH_FLOW = "CASH_FLOW"
+    DIVIDENDS = "DIVIDENDS"
+    SPLITS = "SPLITS"
+    EARNINGS_CALENDAR = "EARNINGS_CALENDAR"
+    
+    # ECONOMIC (5)
+    TREASURY_YIELD = "TREASURY_YIELD"
+    FEDERAL_FUNDS_RATE = "FEDERAL_FUNDS_RATE"
+    CPI = "CPI"
+    INFLATION = "INFLATION"
+    REAL_GDP = "REAL_GDP"
 
 
 @dataclass
@@ -81,15 +134,50 @@ class OptionData:
         }
 
 
+@dataclass
+class TechnicalIndicator:
+    """Structure for technical indicator data"""
+    symbol: str
+    indicator: str
+    timestamp: datetime
+    value: float
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class SentimentData:
+    """Structure for sentiment data"""
+    symbol: str
+    timestamp: datetime
+    sentiment_score: float  # -1 to 1
+    sentiment_label: str  # 'Bullish', 'Bearish', 'Neutral'
+    relevance_score: float
+    article_count: int
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class FundamentalData:
+    """Structure for fundamental data"""
+    symbol: str
+    metric_type: str
+    timestamp: datetime
+    data: Dict[str, Any]
+    
+    def get_value(self, key: str, default: Any = None) -> Any:
+        """Get specific fundamental value"""
+        return self.data.get(key, default)
+
+
 class RateLimiter:
-    """Rate limiter for Alpha Vantage API calls"""
+    """Rate limiter for Alpha Vantage API calls - Updated for 600/min"""
     
     def __init__(self, calls_per_minute: int):
         """
         Initialize rate limiter
         
         Args:
-            calls_per_minute: Maximum API calls per minute
+            calls_per_minute: Maximum API calls per minute (600 for premium)
         """
         self.calls_per_minute = calls_per_minute
         self.call_times: deque = deque()
@@ -111,7 +199,7 @@ class RateLimiter:
             if len(self.call_times) >= self.calls_per_minute:
                 sleep_time = 60 - (now - self.call_times[0]) + 0.1
                 if sleep_time > 0:
-                    logger.info(f"Rate limit reached, sleeping {sleep_time:.1f}s")
+                    logger.debug(f"Rate limit reached, sleeping {sleep_time:.1f}s")
                     await asyncio.sleep(sleep_time)
                     # Recurse to clean up and check again
                     await self.acquire()
@@ -127,11 +215,20 @@ class RateLimiter:
 
 class AlphaVantageClient:
     """
-    Client for Alpha Vantage API
-    Handles options data retrieval with caching and rate limiting
+    Client for ALL 38 Alpha Vantage APIs
+    Handles options, technical indicators, sentiment, fundamentals, and economic data
     """
     
     BASE_URL = "https://www.alphavantage.co/query"
+    
+    # Cache TTLs for different API types (seconds)
+    CACHE_TTLS = {
+        'options': 60,          # 1 minute
+        'technical': 300,       # 5 minutes
+        'sentiment': 900,       # 15 minutes
+        'fundamentals': 86400,  # 1 day
+        'economic': 604800,     # 1 week
+    }
     
     def __init__(self, config: Optional[AlphaVantageConfig] = None):
         """
@@ -142,10 +239,10 @@ class AlphaVantageClient:
         """
         self.config = config or get_config().alpha_vantage
         
-        # Rate limiting
+        # Rate limiting (600/min for premium)
         self.rate_limiter = RateLimiter(self.config.rate_limit)
         
-        # Caching
+        # Caching with differentiated TTLs
         self.cache: Dict[str, Tuple[Any, float]] = {}  # key -> (data, expiry_time)
         self.cache_enabled = self.config.use_cache
         
@@ -169,6 +266,30 @@ class AlphaVantageClient:
         """Async context manager exit"""
         if self.session:
             await self.session.close()
+    
+    def _get_cache_ttl(self, function: str) -> int:
+        """
+        Get appropriate cache TTL for function type
+        
+        Args:
+            function: API function name
+            
+        Returns:
+            TTL in seconds
+        """
+        # Determine category and return appropriate TTL
+        if function in ['REALTIME_OPTIONS', 'HISTORICAL_OPTIONS']:
+            return self.CACHE_TTLS['options']
+        elif function in ['RSI', 'MACD', 'STOCH', 'BBANDS', 'ATR', 'ADX', 'SMA', 'EMA', 'VWAP']:
+            return self.CACHE_TTLS['technical']
+        elif function in ['NEWS_SENTIMENT', 'TOP_GAINERS_LOSERS', 'INSIDER_TRANSACTIONS']:
+            return self.CACHE_TTLS['sentiment']
+        elif function in ['OVERVIEW', 'EARNINGS', 'INCOME_STATEMENT', 'BALANCE_SHEET', 'CASH_FLOW']:
+            return self.CACHE_TTLS['fundamentals']
+        elif function in ['TREASURY_YIELD', 'FEDERAL_FUNDS_RATE', 'CPI', 'INFLATION', 'REAL_GDP']:
+            return self.CACHE_TTLS['economic']
+        else:
+            return 300  # Default 5 minutes
     
     def _get_cache_key(self, function: str, **params) -> str:
         """
@@ -211,16 +332,18 @@ class AlphaVantageClient:
         self.cache_misses += 1
         return None
     
-    def _add_to_cache(self, cache_key: str, data: Any) -> None:
+    def _add_to_cache(self, cache_key: str, data: Any, function: str) -> None:
         """
-        Add data to cache
+        Add data to cache with appropriate TTL
         
         Args:
             cache_key: Cache key
             data: Data to cache
+            function: API function for TTL determination
         """
         if self.cache_enabled:
-            expiry = time.time() + self.config.cache_ttl
+            ttl = self._get_cache_ttl(function)
+            expiry = time.time() + ttl
             self.cache[cache_key] = (data, expiry)
             logger.debug(f"Cached {cache_key} until {datetime.fromtimestamp(expiry)}")
     
@@ -277,7 +400,7 @@ class AlphaVantageClient:
                             continue
                         
                         # Cache successful response
-                        self._add_to_cache(cache_key, data)
+                        self._add_to_cache(cache_key, data, function)
                         return data
                     
                     elif response.status == 429:
@@ -300,23 +423,24 @@ class AlphaVantageClient:
         
         raise RuntimeError(f"Failed to get data after {self.config.retry_count} attempts")
     
-    async def get_realtime_options(self, symbol: str) -> List[OptionData]:
+    # ============= OPTIONS APIs =============
+    
+    async def get_realtime_options(self, symbol: str, require_greeks: bool = True) -> List[OptionData]:
         """
         Get real-time options data with Greeks from Alpha Vantage
         
         Args:
             symbol: Stock symbol
+            require_greeks: Whether to require Greeks in response
             
         Returns:
             List of OptionData objects with Greeks included
         """
         # TODO: Implement real-time options fetching
         # 1. Call REALTIME_OPTIONS function
-        # 2. Parse response
-        # 3. Extract Greeks from response (already calculated!)
-        # 4. Create OptionData objects
-        # 5. Handle missing data
-        # 6. Return list of options
+        # 2. Parse response using parse_option_response
+        # 3. Filter by Greeks requirement if needed
+        # 4. Return list of OptionData objects
         pass
     
     async def get_historical_options(self, 
@@ -335,10 +459,363 @@ class AlphaVantageClient:
         # TODO: Implement historical options fetching
         # 1. Call HISTORICAL_OPTIONS function
         # 2. Parse response
-        # 3. Extract Greeks from response
-        # 4. Create OptionData objects
-        # 5. Return list
+        # 3. Return list of OptionData objects
         pass
+    
+    # ============= TECHNICAL INDICATORS APIs =============
+    
+    async def get_technical_indicator(self, 
+                                     function: str,
+                                     symbol: str,
+                                     interval: str = 'daily',
+                                     **kwargs) -> pd.DataFrame:
+        """
+        Get technical indicator data
+        
+        Args:
+            function: Indicator function (RSI, MACD, etc.)
+            symbol: Stock symbol
+            interval: Time interval
+            **kwargs: Additional parameters (time_period, series_type, etc.)
+            
+        Returns:
+            DataFrame with indicator values
+        """
+        # TODO: Implement technical indicator fetching
+        # 1. Validate function is a technical indicator
+        # 2. Build appropriate parameters
+        # 3. Make request
+        # 4. Parse into DataFrame
+        # 5. Return indicator data
+        pass
+    
+    async def get_rsi(self, symbol: str, interval: str = 'daily', 
+                     time_period: int = 14, series_type: str = 'close') -> pd.DataFrame:
+        """Get RSI indicator"""
+        # TODO: Call get_technical_indicator with RSI parameters
+        pass
+    
+    async def get_macd(self, symbol: str, interval: str = 'daily',
+                      fastperiod: int = 12, slowperiod: int = 26, 
+                      signalperiod: int = 9) -> pd.DataFrame:
+        """Get MACD indicator"""
+        # TODO: Call get_technical_indicator with MACD parameters
+        pass
+    
+    async def get_bollinger_bands(self, symbol: str, interval: str = 'daily',
+                                 time_period: int = 20, nbdevup: int = 2,
+                                 nbdevdn: int = 2) -> pd.DataFrame:
+        """Get Bollinger Bands"""
+        # TODO: Call get_technical_indicator with BBANDS parameters
+        pass
+    
+    async def get_vwap(self, symbol: str, interval: str = '15min') -> pd.DataFrame:
+        """Get VWAP (intraday only)"""
+        # TODO: Validate interval is intraday
+        # TODO: Call get_technical_indicator with VWAP parameters
+        pass
+    
+    # ============= ANALYTICS APIs =============
+    
+    async def get_analytics_fixed_window(self, 
+                                        symbols: List[str],
+                                        interval: str = 'DAILY',
+                                        range_: str = '1month',
+                                        calculations: List[str] = None) -> Dict:
+        """
+        Get fixed window analytics
+        
+        Args:
+            symbols: List of symbols (comma-separated)
+            interval: Time interval (UPPERCASE)
+            range_: Time range
+            calculations: List of calculations to perform
+            
+        Returns:
+            Analytics results dictionary
+        """
+        # TODO: Implement fixed window analytics
+        # 1. Build UPPERCASE parameters
+        # 2. Join symbols with comma
+        # 3. Make request
+        # 4. Parse analytics response
+        # 5. Return results
+        pass
+    
+    async def get_analytics_sliding_window(self,
+                                          symbols: List[str],
+                                          interval: str = 'DAILY',
+                                          range_: str = '6month',
+                                          window_size: int = 90,
+                                          calculations: List[str] = None) -> Dict:
+        """
+        Get sliding window analytics
+        
+        Args:
+            symbols: List of symbols
+            interval: Time interval (UPPERCASE)
+            range_: Time range
+            window_size: Window size in days
+            calculations: List of calculations
+            
+        Returns:
+            Analytics results dictionary
+        """
+        # TODO: Implement sliding window analytics
+        # 1. Build UPPERCASE parameters
+        # 2. Join symbols
+        # 3. Make request
+        # 4. Parse results
+        # 5. Return analytics
+        pass
+    
+    # ============= SENTIMENT APIs =============
+    
+    async def get_news_sentiment(self, 
+                                tickers: Optional[str] = None,
+                                topics: Optional[str] = None,
+                                sort: str = 'LATEST',
+                                limit: int = 50) -> List[SentimentData]:
+        """
+        Get news sentiment data
+        
+        Args:
+            tickers: Comma-separated tickers (note: 'tickers' not 'symbol')
+            topics: Topics to filter
+            sort: Sort order
+            limit: Number of results
+            
+        Returns:
+            List of SentimentData objects
+        """
+        # TODO: Implement news sentiment fetching
+        # 1. Build parameters (use 'tickers' not 'symbol')
+        # 2. Make request
+        # 3. Parse sentiment response
+        # 4. Calculate aggregate sentiment scores
+        # 5. Return SentimentData list
+        pass
+    
+    async def get_top_gainers_losers(self) -> Dict[str, List[Dict]]:
+        """
+        Get top gainers and losers
+        
+        Returns:
+            Dictionary with 'gainers', 'losers', 'most_active' lists
+        """
+        # TODO: Implement top gainers/losers fetching
+        # 1. Make request (no parameters needed)
+        # 2. Parse into categories
+        # 3. Return structured data
+        pass
+    
+    async def get_insider_transactions(self, symbol: str) -> List[Dict]:
+        """
+        Get insider transactions
+        
+        Args:
+            symbol: Stock symbol
+            
+        Returns:
+            List of insider transaction records
+        """
+        # TODO: Implement insider transactions fetching
+        # 1. Make request
+        # 2. Parse transactions
+        # 3. Return list
+        pass
+    
+    # ============= FUNDAMENTALS APIs =============
+    
+    async def get_company_overview(self, symbol: str) -> FundamentalData:
+        """
+        Get company overview with key metrics
+        
+        Args:
+            symbol: Stock symbol
+            
+        Returns:
+            FundamentalData with company information
+        """
+        # TODO: Implement company overview fetching
+        # 1. Make request
+        # 2. Parse overview data
+        # 3. Create FundamentalData object
+        # 4. Return overview
+        pass
+    
+    async def get_earnings(self, symbol: str) -> pd.DataFrame:
+        """
+        Get earnings history and estimates
+        
+        Args:
+            symbol: Stock symbol
+            
+        Returns:
+            DataFrame with earnings data
+        """
+        # TODO: Implement earnings fetching
+        # 1. Make request
+        # 2. Parse quarterly and annual earnings
+        # 3. Create DataFrame
+        # 4. Return earnings data
+        pass
+    
+    async def get_income_statement(self, symbol: str) -> pd.DataFrame:
+        """
+        Get income statement data
+        
+        Args:
+            symbol: Stock symbol
+            
+        Returns:
+            DataFrame with income statement
+        """
+        # TODO: Implement income statement fetching
+        # 1. Make request
+        # 2. Parse annual and quarterly reports
+        # 3. Create DataFrame
+        # 4. Return income statement
+        pass
+    
+    async def get_balance_sheet(self, symbol: str) -> pd.DataFrame:
+        """
+        Get balance sheet data
+        
+        Args:
+            symbol: Stock symbol
+            
+        Returns:
+            DataFrame with balance sheet
+        """
+        # TODO: Implement balance sheet fetching
+        # 1. Make request
+        # 2. Parse balance sheet data
+        # 3. Create DataFrame
+        # 4. Return balance sheet
+        pass
+    
+    async def get_cash_flow(self, symbol: str) -> pd.DataFrame:
+        """
+        Get cash flow statement
+        
+        Args:
+            symbol: Stock symbol
+            
+        Returns:
+            DataFrame with cash flow data
+        """
+        # TODO: Implement cash flow fetching
+        # 1. Make request
+        # 2. Parse cash flow data
+        # 3. Create DataFrame
+        # 4. Return cash flow
+        pass
+    
+    async def get_earnings_calendar(self, horizon: str = '3month') -> str:
+        """
+        Get earnings calendar (returns CSV format)
+        
+        Args:
+            horizon: Time horizon
+            
+        Returns:
+            CSV string with earnings calendar
+        """
+        # TODO: Implement earnings calendar fetching
+        # 1. Make request
+        # 2. Note: Returns CSV format
+        # 3. Return raw CSV string
+        pass
+    
+    # ============= ECONOMIC APIs =============
+    
+    async def get_treasury_yield(self, 
+                                interval: str = 'monthly',
+                                maturity: str = '10year') -> pd.DataFrame:
+        """
+        Get treasury yield data (for risk-free rate)
+        
+        Args:
+            interval: Data interval
+            maturity: Bond maturity
+            
+        Returns:
+            DataFrame with yield data
+        """
+        # TODO: Implement treasury yield fetching
+        # 1. Make request
+        # 2. Parse yield data
+        # 3. Create DataFrame
+        # 4. Return yields
+        pass
+    
+    async def get_federal_funds_rate(self, interval: str = 'monthly') -> pd.DataFrame:
+        """
+        Get federal funds rate
+        
+        Args:
+            interval: Data interval
+            
+        Returns:
+            DataFrame with fed funds rate
+        """
+        # TODO: Implement fed funds rate fetching
+        # 1. Make request
+        # 2. Parse rate data
+        # 3. Create DataFrame
+        # 4. Return rates
+        pass
+    
+    async def get_cpi(self, interval: str = 'monthly') -> pd.DataFrame:
+        """
+        Get Consumer Price Index data
+        
+        Args:
+            interval: Data interval
+            
+        Returns:
+            DataFrame with CPI data
+        """
+        # TODO: Implement CPI fetching
+        # 1. Make request
+        # 2. Parse CPI data
+        # 3. Create DataFrame
+        # 4. Return CPI
+        pass
+    
+    async def get_inflation(self) -> pd.DataFrame:
+        """
+        Get inflation expectation data
+        
+        Returns:
+            DataFrame with inflation data
+        """
+        # TODO: Implement inflation fetching
+        # 1. Make request
+        # 2. Parse inflation data
+        # 3. Create DataFrame
+        # 4. Return inflation
+        pass
+    
+    async def get_real_gdp(self, interval: str = 'quarterly') -> pd.DataFrame:
+        """
+        Get real GDP data
+        
+        Args:
+            interval: Data interval
+            
+        Returns:
+            DataFrame with GDP data
+        """
+        # TODO: Implement GDP fetching
+        # 1. Make request
+        # 2. Parse GDP data
+        # 3. Create DataFrame
+        # 4. Return GDP
+        pass
+    
+    # ============= RESPONSE PARSERS =============
     
     def parse_option_response(self, response: Dict[str, Any]) -> List[OptionData]:
         """
@@ -354,13 +831,88 @@ class AlphaVantageClient:
         # 1. Extract option chain from response
         # 2. For each contract:
         #    a. Extract strike, expiry, type
-        #    b. Extract market data
-        #    c. Extract Greeks (delta, gamma, theta, vega, rho)
+        #    b. Extract market data (bid, ask, last, volume, OI)
+        #    c. Extract Greeks (delta, gamma, theta, vega, rho) - DIRECTLY FROM AV!
         #    d. Extract IV
         #    e. Create OptionData object
-        # 3. Handle missing fields
+        # 3. Handle missing fields gracefully
         # 4. Return list
         pass
+    
+    def parse_technical_response(self, response: Dict[str, Any], 
+                                indicator: str) -> pd.DataFrame:
+        """
+        Parse technical indicator response
+        
+        Args:
+            response: Raw API response
+            indicator: Indicator type
+            
+        Returns:
+            DataFrame with indicator values
+        """
+        # TODO: Implement technical indicator parsing
+        # 1. Extract time series data
+        # 2. Handle different indicator formats
+        # 3. Create DataFrame with proper columns
+        # 4. Set datetime index
+        # 5. Return DataFrame
+        pass
+    
+    def parse_sentiment_response(self, response: Dict[str, Any]) -> List[SentimentData]:
+        """
+        Parse sentiment response
+        
+        Args:
+            response: Raw API response
+            
+        Returns:
+            List of SentimentData objects
+        """
+        # TODO: Implement sentiment parsing
+        # 1. Extract feed items
+        # 2. Calculate sentiment scores
+        # 3. Create SentimentData objects
+        # 4. Return list
+        pass
+    
+    def parse_fundamental_response(self, response: Dict[str, Any], 
+                                  metric_type: str) -> FundamentalData:
+        """
+        Parse fundamental data response
+        
+        Args:
+            response: Raw API response
+            metric_type: Type of fundamental data
+            
+        Returns:
+            FundamentalData object
+        """
+        # TODO: Implement fundamental parsing
+        # 1. Extract relevant data fields
+        # 2. Handle missing data
+        # 3. Create FundamentalData object
+        # 4. Return parsed data
+        pass
+    
+    def parse_economic_response(self, response: Dict[str, Any]) -> pd.DataFrame:
+        """
+        Parse economic indicator response
+        
+        Args:
+            response: Raw API response
+            
+        Returns:
+            DataFrame with economic data
+        """
+        # TODO: Implement economic data parsing
+        # 1. Extract time series
+        # 2. Create DataFrame
+        # 3. Set proper data types
+        # 4. Return DataFrame
+        pass
+    
+    # ============= UTILITY METHODS =============
     
     async def get_option_chain(self, 
                               symbol: str,
@@ -425,7 +977,8 @@ class AlphaVantageClient:
             'cache_misses': self.cache_misses,
             'cache_hit_rate': cache_hit_rate,
             'errors': self.errors,
-            'cache_size': len(self.cache)
+            'cache_size': len(self.cache),
+            'rate_limit': self.config.rate_limit
         }
     
     def clear_cache(self) -> None:
@@ -456,7 +1009,7 @@ class AlphaVantageClient:
     
     async def warmup(self, symbols: List[str]) -> bool:
         """
-        Warmup cache with option data for symbols
+        Warmup cache with all data types for symbols
         
         Args:
             symbols: List of symbols to warmup
@@ -464,17 +1017,20 @@ class AlphaVantageClient:
         Returns:
             True if warmup successful
         """
-        # TODO: Implement cache warmup
+        # TODO: Implement comprehensive warmup
         # 1. For each symbol:
         #    a. Get option chain
-        #    b. Cache the data
-        # 2. Log warmup status
-        # 3. Return success
+        #    b. Get key technical indicators
+        #    c. Get sentiment data
+        #    d. Get company overview
+        # 2. Cache all data
+        # 3. Log warmup status
+        # 4. Return success
         pass
     
     async def test_connection(self) -> bool:
         """
-        Test Alpha Vantage connection
+        Test Alpha Vantage connection and API key
         
         Returns:
             True if connection successful
@@ -486,3 +1042,17 @@ class AlphaVantageClient:
         except Exception as e:
             logger.error(f"Connection test failed: {e}")
             return False
+    
+    async def test_all_endpoints(self) -> Dict[str, bool]:
+        """
+        Test all 38 API endpoints
+        
+        Returns:
+            Dictionary mapping endpoints to success status
+        """
+        # TODO: Implement comprehensive endpoint testing
+        # 1. Test each of 38 endpoints
+        # 2. Use minimal parameters
+        # 3. Track success/failure
+        # 4. Return results
+        pass
