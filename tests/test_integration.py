@@ -17,6 +17,7 @@ from pathlib import Path
 # Import all Phase 1 components
 from src.core.config import TradingConfig, initialize_config
 from src.data.market_data import MarketDataManager, MarketSnapshot
+from src.data.av_client import AlphaVantageClient, OptionData  # NEW: Alpha Vantage
 from src.data.options_data import OptionsDataManager, OptionContract
 from src.data.database import DatabaseManager, Trade, Signal, Position
 from src.analytics.features import FeatureEngine, FeatureVector
@@ -54,11 +55,22 @@ async def market_data_manager(test_config):
 
 
 @pytest.fixture
-async def options_data_manager(market_data_manager):
-    """Create options data manager for testing"""
+async def av_client(test_config):
+    """Create Alpha Vantage client for testing"""
+    # TODO: Implement AV client fixture
+    # 1. Create AlphaVantageClient
+    # 2. Use test API key
+    # 3. Set lower rate limit for testing
+    # 4. Return client
+    pass
+
+
+@pytest.fixture
+async def options_data_manager(market_data_manager, av_client):
+    """Create options data manager for testing with Alpha Vantage"""
     # TODO: Implement options data fixture
-    # 1. Create OptionsDataManager
-    # 2. Add test option chains
+    # 1. Create OptionsDataManager with AV client
+    # 2. Add test option data from AV
     # 3. Return manager
     pass
 
@@ -184,17 +196,78 @@ async def test_signal_to_risk_check_flow(signal_generator, risk_manager):
     pass
 
 
+# ============= Alpha Vantage Integration Tests =============
+
+@pytest.mark.asyncio
+async def test_alpha_vantage_connection(av_client):
+    """Test Alpha Vantage connection"""
+    # TODO: Implement AV connection test
+    # 1. Test connection
+    # 2. Verify API key works
+    # 3. Check rate limiting
+    # 4. Assert connection successful
+    pass
+
+
+@pytest.mark.asyncio
+async def test_alpha_vantage_option_fetching(av_client):
+    """Test fetching options from Alpha Vantage"""
+    # TODO: Implement AV option fetching test
+    # 1. Fetch option chain for SPY
+    # 2. Verify Greeks are included
+    # 3. Check IV is provided
+    # 4. Verify data structure
+    # 5. Assert data quality
+    pass
+
+
+@pytest.mark.asyncio
+async def test_alpha_vantage_greeks_accuracy(av_client, market_data_manager):
+    """Test that Alpha Vantage Greeks are reasonable"""
+    # TODO: Implement Greeks accuracy test
+    # 1. Get options from AV
+    # 2. Check delta ranges (0-1 for calls, -1-0 for puts)
+    # 3. Check gamma is positive
+    # 4. Check theta is negative
+    # 5. Verify Greeks make sense
+    pass
+
+
+@pytest.mark.asyncio
+async def test_alpha_vantage_caching(av_client):
+    """Test Alpha Vantage response caching"""
+    # TODO: Implement caching test
+    # 1. Make first request
+    # 2. Make same request again
+    # 3. Verify cache hit
+    # 4. Check cache expiry
+    # 5. Assert performance improvement
+    pass
+
+
+@pytest.mark.asyncio
+async def test_alpha_vantage_rate_limiting(av_client):
+    """Test Alpha Vantage rate limiting"""
+    # TODO: Implement rate limit test
+    # 1. Make multiple rapid requests
+    # 2. Verify rate limiter works
+    # 3. Check no API errors
+    # 4. Measure delay
+    # 5. Assert compliance with limits
+    pass
+
+
 # ============= Component Integration Tests =============
 
 @pytest.mark.asyncio
 async def test_market_and_options_integration(market_data_manager, options_data_manager):
-    """Test integration between market and options data"""
+    """Test integration between market data (IBKR) and options data (Alpha Vantage)"""
     # TODO: Implement market/options integration test
-    # 1. Get spot price from market
-    # 2. Fetch option chain
-    # 3. Calculate Greeks
-    # 4. Verify Greeks use spot price
-    # 5. Assert consistency
+    # 1. Get spot price from IBKR market data
+    # 2. Fetch option chain from Alpha Vantage
+    # 3. Get Greeks from AV (not calculated!)
+    # 4. Verify Greeks are pre-calculated
+    # 5. Assert data consistency
     pass
 
 

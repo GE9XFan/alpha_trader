@@ -1,0 +1,90 @@
+# AlphaTrader Configuration File
+# Single source of truth for all system configuration
+
+# Core trading settings
+mode: paper  # paper or live
+symbols: 
+  - SPY
+  - QQQ
+  - IWM
+
+# Interactive Brokers configuration
+ibkr:
+  host: 127.0.0.1
+  paper_port: 7497
+  live_port: 7496
+  client_id: 1
+  timeout: 30
+
+# Alpha Vantage configuration (NEW!)
+alpha_vantage:
+  api_key: ${ALPHA_VANTAGE_API_KEY}  # Set in environment variable
+  rate_limit: 75  # 75 for premium, 5 for free tier
+  cache_ttl: 300  # Cache for 5 minutes
+  timeout: 30
+  retry_count: 3
+  use_cache: true
+
+# Risk management
+risk:
+  max_positions: 5
+  max_position_size: 10000.0
+  daily_loss_limit: 1000.0
+  
+  greeks_limits:
+    delta: [-0.3, 0.3]
+    gamma: [-0.5, 0.5]
+    vega: [-500, 500]
+    theta: [-200, null]
+  
+  max_contracts_per_trade: 5
+  min_time_between_signals: 300
+  position_stop_loss_pct: 0.20
+  trailing_stop_pct: 0.15
+
+# Machine Learning
+ml:
+  model_path: models/xgboost_v1.pkl
+  scaler_path: models/xgboost_v1_scaler.pkl
+  min_confidence: 0.6
+  retrain_interval_days: 7
+  lookback_days: 30
+  feature_count: 28
+  n_estimators: 100
+  max_depth: 5
+  learning_rate: 0.1
+  n_classes: 4
+
+# Database
+database:
+  postgres_host: localhost
+  postgres_port: 5432
+  postgres_db: alphatrader
+  postgres_user: postgres
+  # postgres_password set via POSTGRES_PASSWORD env var
+  
+  redis_host: localhost
+  redis_port: 6379
+  redis_db: 0
+  
+  min_connections: 1
+  max_connections: 20
+
+# Execution
+execution:
+  slippage_ticks: 1
+  market_order_timeout: 10
+  use_adaptive_orders: false
+  market_open_delay_seconds: 60
+  market_close_cutoff_seconds: 60
+  auto_close_0dte: true
+  close_0dte_time: "15:59:00"
+
+# System settings
+log_level: INFO
+log_file: logs/alphatrader.log
+enable_metrics: true
+metrics_port: 8080
+timezone: America/New_York
+market_open: "09:30:00"
+market_close: "16:00:00"

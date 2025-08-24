@@ -262,18 +262,18 @@ class RiskManager:
     
     def _project_greeks_impact(self, signal: TradingSignal) -> Dict[str, float]:
         """
-        Project Greeks impact of new position
+        Project Greeks impact of new position using Alpha Vantage data
         
         Args:
             signal: Trading signal
             
         Returns:
-            Dictionary of projected Greeks changes
+            Dictionary of projected Greeks changes (from AV, not calculated!)
         """
-        # TODO: Implement Greeks projection
-        # 1. Get option details
-        # 2. Calculate Greeks for position
-        # 3. Multiply by position size
+        # TODO: Implement Greeks projection using AV data
+        # 1. Get option details from signal
+        # 2. Get Greeks directly from AV option data
+        # 3. Multiply by position size (contracts)
         # 4. Return Greeks dict
         pass
     
@@ -351,14 +351,15 @@ class RiskManager:
     
     def _recalculate_portfolio_greeks(self) -> None:
         """
-        Recalculate total portfolio Greeks
+        Recalculate total portfolio Greeks using Alpha Vantage data
         """
-        # TODO: Implement Greeks recalculation
+        # TODO: Implement Greeks recalculation using AV
         # 1. Initialize totals
         # 2. For each position:
-        #    a. Get current spot price
-        #    b. Calculate position Greeks
-        #    c. Add to totals
+        #    a. Get option data from AV cache
+        #    b. Get Greeks directly from AV data
+        #    c. Multiply by position quantity
+        #    d. Add to totals
         # 3. Store results
         # 4. Check for breaches
         pass

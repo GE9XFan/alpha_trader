@@ -1,23 +1,22 @@
 #!/usr/bin/env python3
 """
 Options Data Manager Module
-Handles option chains, Greeks calculations, and options-specific data.
-Built on top of MarketDataManager and reused by all trading components.
+Handles option chains and options-specific data using Alpha Vantage.
+Greeks are now provided by Alpha Vantage - no local calculation needed.
+Built on top of MarketDataManager and AlphaVantageClient.
 """
 
 import numpy as np
-from scipy.stats import norm
 from datetime import datetime, timedelta, date
 from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass
 import pandas as pd
-from ib_insync import Option, OptionChain, Contract
 import asyncio
 import logging
-from functools import lru_cache
 from collections import defaultdict
 
 from src.data.market_data import MarketDataManager
+from src.data.av_client import AlphaVantageClient, OptionData
 from src.core.config import get_config, TradingConfig
 
 logger = logging.getLogger(__name__)
@@ -103,44 +102,41 @@ class OptionChainSnapshot:
 
 class OptionsDataManager:
     """
-    Options data and Greeks calculator - REUSED BY ALL TRADING
-    Built on top of MarketDataManager for spot prices
+    Options data manager using Alpha Vantage - REUSED BY ALL TRADING
+    Greeks come pre-calculated from Alpha Vantage - no local calculation needed!
+    Built on top of MarketDataManager for spot prices and AlphaVantageClient for options.
     """
     
-    def __init__(self, market_data_manager: MarketDataManager):
+    def __init__(self, 
+                 market_data_manager: MarketDataManager,
+                 av_client: Optional[AlphaVantageClient] = None):
         """
         Initialize OptionsDataManager
         
         Args:
             market_data_manager: Market data manager for spot prices
+            av_client: Alpha Vantage client (creates new if None)
         """
-        self.market = market_data_manager  # Reuse market data!
+        self.market = market_data_manager  # For spot prices
+        self.av_client = av_client or AlphaVantageClient()  # For options data
         self.config = get_config()
         
         # Data storage
         self.chains: Dict[str, OptionChainSnapshot] = {}
-        self.greeks_cache: Dict[str, Dict[str, float]] = {}
-        self.iv_surface: Dict[str, pd.DataFrame] = {}
-        
-        # Risk-free rate (update periodically)
-        self.risk_free_rate: float = 0.05  # 5% default
-        
-        # Greeks calculation parameters
-        self.iv_iterations: int = 100
-        self.iv_tolerance: float = 0.0001
+        self.latest_options: Dict[str, List[OptionData]] = {}  # AV option data
         
         # Performance tracking
-        self.cache_hits: int = 0
-        self.cache_misses: int = 0
+        self.data_fetches: int = 0
+        self.fetch_errors: int = 0
         
-        logger.info("OptionsDataManager initialized")
+        logger.info("OptionsDataManager initialized with Alpha Vantage")
     
     async def fetch_option_chain(self, 
                                 symbol: str,
                                 min_dte: int = 0,
                                 max_dte: int = 45) -> OptionChainSnapshot:
         """
-        Fetch option chain from IBKR
+        Fetch option chain from Alpha Vantage
         
         Args:
             symbol: Underlying symbol
@@ -148,119 +144,44 @@ class OptionsDataManager:
             max_dte: Maximum days to expiry
             
         Returns:
-            OptionChainSnapshot with all contracts
+            OptionChainSnapshot with all contracts (Greeks included from AV!)
         """
-        # TODO: Implement option chain fetching
-        # 1. Create Stock contract for underlying
-        # 2. Request option chain from IBKR
+        # TODO: Implement option chain fetching from Alpha Vantage
+        # 1. Get spot price from market data manager
+        # 2. Call av_client.get_option_chain()
         # 3. Filter by DTE range
-        # 4. Get market data for each contract
-        # 5. Calculate Greeks for each contract
-        # 6. Create OptionChainSnapshot
-        # 7. Cache the chain
-        # 8. Handle errors gracefully
+        # 4. Convert OptionData to OptionContract format
+        # 5. Create OptionChainSnapshot
+        # 6. Cache the chain
+        # 7. Handle errors gracefully
         pass
     
-    def calculate_greeks(self,
-                        spot: float,
-                        strike: float,
-                        time_to_expiry: float,
-                        volatility: float,
-                        option_type: str,
-                        risk_free_rate: Optional[float] = None) -> Dict[str, float]:
+    def get_option_greeks(self, option: OptionData) -> Dict[str, float]:
         """
-        Calculate Black-Scholes Greeks - CRITICAL CALCULATION
-        Reused by: Risk, ML features, position management
+        Get Greeks for option - DIRECTLY FROM ALPHA VANTAGE DATA
+        No calculation needed!
         
         Args:
-            spot: Current spot price
-            strike: Strike price
-            time_to_expiry: Time to expiry in years
-            volatility: Implied volatility (annualized)
-            option_type: 'CALL' or 'PUT'
-            risk_free_rate: Risk-free rate (uses default if None)
+            option: OptionData from Alpha Vantage
             
         Returns:
             Dictionary with delta, gamma, theta, vega, rho
         """
-        # TODO: Implement Black-Scholes Greeks calculation
-        # 1. Create cache key from parameters
-        # 2. Check cache first
-        # 3. Calculate d1 and d2
-        # 4. Calculate delta based on option type
-        # 5. Calculate gamma (same for calls and puts)
-        # 6. Calculate theta based on option type
-        # 7. Calculate vega (same for calls and puts)
-        # 8. Calculate rho based on option type
-        # 9. Cache results
-        # 10. Return Greeks dictionary
-        pass
-    
-    @lru_cache(maxsize=1000)
-    def _black_scholes_price(self,
-                            spot: float,
-                            strike: float,
-                            time_to_expiry: float,
-                            volatility: float,
-                            option_type: str,
-                            risk_free_rate: float) -> float:
-        """
-        Calculate Black-Scholes option price
-        
-        Args:
-            spot: Current spot price
-            strike: Strike price
-            time_to_expiry: Time to expiry in years
-            volatility: Implied volatility
-            option_type: 'CALL' or 'PUT'
-            risk_free_rate: Risk-free rate
-            
-        Returns:
-            Theoretical option price
-        """
-        # TODO: Implement Black-Scholes pricing
-        # 1. Calculate d1 and d2
-        # 2. Calculate call price
-        # 3. If put, use put-call parity
-        # 4. Return theoretical price
-        pass
-    
-    def calculate_implied_volatility(self,
-                                    option_price: float,
-                                    spot: float,
-                                    strike: float,
-                                    time_to_expiry: float,
-                                    option_type: str,
-                                    risk_free_rate: Optional[float] = None) -> float:
-        """
-        Calculate implied volatility using Newton-Raphson method
-        
-        Args:
-            option_price: Market price of option
-            spot: Current spot price
-            strike: Strike price
-            time_to_expiry: Time to expiry in years
-            option_type: 'CALL' or 'PUT'
-            risk_free_rate: Risk-free rate
-            
-        Returns:
-            Implied volatility
-        """
-        # TODO: Implement IV calculation
-        # 1. Set initial guess (e.g., 0.25)
-        # 2. Iterate using Newton-Raphson
-        # 3. Calculate vega for adjustment
-        # 4. Update volatility estimate
-        # 5. Check convergence
-        # 6. Return final IV
-        pass
+        # Greeks are already in the OptionData from Alpha Vantage!
+        return {
+            'delta': option.delta,
+            'gamma': option.gamma,
+            'theta': option.theta,
+            'vega': option.vega,
+            'rho': option.rho
+        }
     
     def find_atm_options(self,
                         symbol: str,
                         dte_min: int = 0,
                         dte_max: int = 7) -> List[OptionContract]:
         """
-        Find at-the-money options for trading
+        Find at-the-money options for trading (still needed for option selection)
         
         Args:
             symbol: Underlying symbol
@@ -270,86 +191,30 @@ class OptionsDataManager:
         Returns:
             List of ATM option contracts
         """
-        # TODO: Implement ATM option finding
-        # 1. Get current spot price
-        # 2. Get option chain for symbol
+        # TODO: Implement ATM option finding using AV data
+        # 1. Get current spot price from market manager
+        # 2. Get cached option chain or fetch from AV
         # 3. Filter by DTE range
-        # 4. For each expiry, find closest strike
+        # 4. For each expiry, find closest strike to spot
         # 5. Return both calls and puts
         # 6. Sort by DTE
         pass
     
-    def find_options_by_delta(self,
-                             symbol: str,
-                             target_delta: float,
-                             option_type: str,
-                             dte_min: int = 0,
-                             dte_max: int = 45) -> List[OptionContract]:
+    def get_iv_from_option(self, option: OptionData) -> float:
         """
-        Find options with specific delta
+        Get implied volatility - DIRECTLY FROM ALPHA VANTAGE
         
         Args:
-            symbol: Underlying symbol
-            target_delta: Target delta (e.g., 0.30)
-            option_type: 'CALL' or 'PUT'
-            dte_min: Minimum days to expiry
-            dte_max: Maximum days to expiry
+            option: OptionData from Alpha Vantage
             
         Returns:
-            List of options near target delta
+            Implied volatility (already calculated by AV!)
         """
-        # TODO: Implement delta-based option finding
-        # 1. Get option chain
-        # 2. Filter by DTE and type
-        # 3. Calculate deltas if not cached
-        # 4. Find options closest to target delta
-        # 5. Return sorted by delta difference
-        pass
-    
-    def calculate_max_pain(self, symbol: str, expiry: date) -> float:
-        """
-        Calculate max pain strike for expiry
-        
-        Args:
-            symbol: Underlying symbol
-            expiry: Expiration date
-            
-        Returns:
-            Max pain strike price
-        """
-        # TODO: Implement max pain calculation
-        # 1. Get option chain for expiry
-        # 2. Get open interest for all strikes
-        # 3. Calculate total value at each strike
-        # 4. Find strike with minimum total value
-        # 5. Return max pain strike
-        pass
-    
-    def calculate_gamma_exposure(self, 
-                                symbol: str,
-                                spot_range: Optional[Tuple[float, float]] = None) -> pd.DataFrame:
-        """
-        Calculate gamma exposure (GEX) profile
-        
-        Args:
-            symbol: Underlying symbol
-            spot_range: Range of spot prices to calculate
-            
-        Returns:
-            DataFrame with gamma exposure by strike
-        """
-        # TODO: Implement GEX calculation
-        # 1. Get option chain
-        # 2. Calculate gamma for each contract
-        # 3. Multiply by open interest
-        # 4. Aggregate by strike
-        # 5. Create GEX profile
-        # 6. Return as DataFrame
-        pass
+        return option.implied_volatility
     
     def get_put_call_ratio(self, symbol: str, expiry: Optional[date] = None) -> float:
         """
-        Calculate put/call ratio
+        Calculate put/call ratio using AV data
         
         Args:
             symbol: Underlying symbol
@@ -358,108 +223,31 @@ class OptionsDataManager:
         Returns:
             Put/call volume ratio
         """
-        # TODO: Implement put/call ratio
-        # 1. Get option chain
+        # TODO: Implement put/call ratio using AV data
+        # 1. Get latest options from cache
         # 2. Filter by expiry if provided
-        # 3. Sum put volume
-        # 4. Sum call volume
+        # 3. Sum put volume from AV data
+        # 4. Sum call volume from AV data
         # 5. Calculate ratio
         # 6. Handle edge cases
-        pass
-    
-    def calculate_iv_rank(self, symbol: str, lookback_days: int = 252) -> float:
-        """
-        Calculate IV rank (0-100)
-        
-        Args:
-            symbol: Underlying symbol
-            lookback_days: Historical period for comparison
-            
-        Returns:
-            IV rank percentage
-        """
-        # TODO: Implement IV rank calculation
-        # 1. Get current IV (ATM)
-        # 2. Get historical IV data
-        # 3. Calculate min and max over period
-        # 4. Calculate rank: (current - min) / (max - min)
-        # 5. Convert to percentage
-        # 6. Handle edge cases
-        pass
-    
-    def calculate_iv_percentile(self, symbol: str, lookback_days: int = 252) -> float:
-        """
-        Calculate IV percentile (0-100)
-        
-        Args:
-            symbol: Underlying symbol
-            lookback_days: Historical period for comparison
-            
-        Returns:
-            IV percentile
-        """
-        # TODO: Implement IV percentile calculation
-        # 1. Get current IV
-        # 2. Get historical IV data
-        # 3. Count days with lower IV
-        # 4. Calculate percentile
-        # 5. Return as percentage
-        pass
-    
-    def build_iv_surface(self, symbol: str) -> pd.DataFrame:
-        """
-        Build implied volatility surface
-        
-        Args:
-            symbol: Underlying symbol
-            
-        Returns:
-            DataFrame with IV surface (strikes x expirations)
-        """
-        # TODO: Implement IV surface construction
-        # 1. Get complete option chain
-        # 2. Calculate IV for each contract
-        # 3. Pivot by strike and expiry
-        # 4. Interpolate missing values
-        # 5. Smooth surface if needed
-        # 6. Cache and return
-        pass
-    
-    def get_term_structure(self, symbol: str, strike: Optional[float] = None) -> pd.Series:
-        """
-        Get volatility term structure
-        
-        Args:
-            symbol: Underlying symbol
-            strike: Specific strike (ATM if None)
-            
-        Returns:
-            Series with IV by expiration
-        """
-        # TODO: Implement term structure extraction
-        # 1. Get option chain
-        # 2. Use ATM strike if not specified
-        # 3. Get IV for each expiry
-        # 4. Create term structure series
-        # 5. Return sorted by expiry
         pass
     
     def calculate_portfolio_greeks(self, 
                                   positions: List[Dict[str, Any]]) -> Dict[str, float]:
         """
-        Calculate aggregate Greeks for portfolio
+        Calculate aggregate Greeks for portfolio using AV data
         
         Args:
             positions: List of position dictionaries
             
         Returns:
-            Aggregate Greeks dictionary
+            Aggregate Greeks dictionary (from AV, not calculated!)
         """
         # TODO: Implement portfolio Greeks aggregation
         # 1. Initialize total Greeks
         # 2. For each position:
-        #    a. Get current spot price
-        #    b. Calculate position Greeks
+        #    a. Get option data from AV cache
+        #    b. Get Greeks directly from AV data
         #    c. Multiply by position size
         #    d. Add to totals
         # 3. Return aggregate Greeks

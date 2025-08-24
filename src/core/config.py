@@ -115,6 +115,24 @@ class ExecutionConfig:
 
 
 @dataclass
+class AlphaVantageConfig:
+    """Alpha Vantage API configuration"""
+    api_key: str = ''  # Load from environment
+    rate_limit: int = 75  # Requests per minute (75 for premium, 5 for free)
+    cache_ttl: int = 300  # Cache TTL in seconds (5 minutes)
+    timeout: int = 30  # Request timeout in seconds
+    retry_count: int = 3  # Number of retries on failure
+    use_cache: bool = True  # Enable caching
+    
+    def __post_init__(self):
+        """Load API key from environment"""
+        if not self.api_key:
+            self.api_key = os.getenv('ALPHA_VANTAGE_API_KEY', '')
+        if not self.api_key:
+            logger.warning("Alpha Vantage API key not set!")
+
+
+@dataclass
 class TradingConfig:
     """
     Master configuration class for the entire trading system.
@@ -130,6 +148,7 @@ class TradingConfig:
     ml: MLConfig = field(default_factory=MLConfig)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
+    alpha_vantage: AlphaVantageConfig = field(default_factory=AlphaVantageConfig)
     
     # Logging settings
     log_level: str = 'INFO'

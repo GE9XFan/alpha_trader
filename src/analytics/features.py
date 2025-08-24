@@ -254,7 +254,7 @@ class FeatureEngine:
     
     def _calculate_options_features(self, symbol: str) -> Dict[str, float]:
         """
-        Calculate options-specific features
+        Calculate options-specific features using Alpha Vantage data
         
         Args:
             symbol: Stock symbol
@@ -262,17 +262,18 @@ class FeatureEngine:
         Returns:
             Dictionary of options features
         """
-        # TODO: Implement options feature calculation
-        # 1. Get ATM options
-        # 2. Calculate IV rank
-        # 3. Calculate IV percentile
-        # 4. Get put/call ratio
-        # 5. Calculate gamma exposure
-        # 6. Find delta neutral price
-        # 7. Calculate max pain distance
-        # 8. Get option volumes
-        # 9. Handle missing data
-        # 10. Return features dict
+        # TODO: Implement options feature calculation using AV data
+        # 1. Get ATM options from options manager (uses AV)
+        # 2. Get IV directly from AV data (no calculation!)
+        # 3. Calculate IV rank using AV historical data
+        # 4. Calculate IV percentile using AV data
+        # 5. Get put/call ratio from AV volumes
+        # 6. Get gamma exposure from AV Greeks
+        # 7. Find delta neutral price using AV deltas
+        # 8. Calculate max pain distance
+        # 9. Get option volumes from AV
+        # 10. Handle missing data
+        # 11. Return features dict
         pass
     
     def _calculate_market_structure(self, symbol: str, data: pd.DataFrame) -> Dict[str, float]:

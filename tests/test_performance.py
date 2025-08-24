@@ -25,6 +25,7 @@ from io import StringIO
 # Import all Phase 1 components
 from src.core.config import TradingConfig, initialize_config
 from src.data.market_data import MarketDataManager
+from src.data.av_client import AlphaVantageClient  # NEW: Alpha Vantage
 from src.data.options_data import OptionsDataManager
 from src.data.database import DatabaseManager
 from src.analytics.features import FeatureEngine
@@ -45,6 +46,16 @@ def performance_config():
     # 2. Enable performance mode
     # 3. Set appropriate limits
     # 4. Return config
+    pass
+
+
+@pytest.fixture
+def av_client(performance_config):
+    """Create Alpha Vantage client for performance testing"""
+    # TODO: Implement AV client fixture
+    # 1. Create AlphaVantageClient
+    # 2. Pre-populate cache for testing
+    # 3. Return client
     pass
 
 
@@ -98,16 +109,29 @@ def test_feature_calculation_speed(feature_engine, performance_timer):
     pass
 
 
-def test_greeks_calculation_speed(options_data_manager, performance_timer):
-    """Test Greeks calculation performance - Target: <50ms for 100 contracts"""
-    # TODO: Implement Greeks speed test
-    # 1. Create 100 option contracts
-    # 2. Time Greeks calculation
-    # 3. Run 50 iterations
+def test_greeks_retrieval_speed(options_data_manager, performance_timer):
+    """Test Greeks retrieval performance from Alpha Vantage cache - Target: <10ms from cache"""
+    # TODO: Implement Greeks retrieval speed test
+    # 1. Pre-cache option data from Alpha Vantage
+    # 2. Time Greeks retrieval from cache
+    # 3. Run 100 retrievals
     # 4. Calculate statistics
-    # 5. Assert average < 50ms
-    # 6. Assert p95 < 75ms
-    # 7. Test caching effectiveness
+    # 5. Assert average < 10ms (from cache)
+    # 6. Assert p95 < 20ms
+    # 7. Test cache effectiveness
+    pass
+
+
+def test_alpha_vantage_fetch_speed(av_client, performance_timer):
+    """Test Alpha Vantage API fetch performance - Target: <500ms"""
+    # TODO: Implement AV fetch speed test
+    # 1. Clear cache to force API call
+    # 2. Time option chain fetch
+    # 3. Run 10 fetches (with rate limiting)
+    # 4. Calculate statistics
+    # 5. Assert average < 500ms
+    # 6. Assert p95 < 750ms
+    # 7. Measure cache impact
     pass
 
 
@@ -154,15 +178,17 @@ def test_database_query_speed(database_manager, performance_timer):
 
 @pytest.mark.asyncio
 async def test_complete_pipeline_latency(market_data_manager,
+                                        av_client,
                                         feature_engine,
                                         ml_predictor,
                                         signal_generator,
                                         risk_manager,
                                         performance_timer):
-    """Test complete pipeline latency - Target: <200ms total"""
+    """Test complete pipeline latency - Target: <200ms total (with cached AV data)"""
     # TODO: Implement pipeline latency test
     # 1. Measure each component:
     #    - Market data: 10ms
+    #    - AV Greeks (cached): 10ms  # Changed from calculation
     #    - Features: 30ms
     #    - ML: 30ms
     #    - Signal: 10ms
@@ -277,15 +303,29 @@ def test_memory_leak_detection(signal_generator, memory_tracker):
 
 # ============= Cache Performance Tests =============
 
+def test_alpha_vantage_cache_performance(av_client, performance_timer):
+    """Test Alpha Vantage caching effectiveness"""
+    # TODO: Implement AV cache test
+    # 1. Fetch option chain (cache miss)
+    # 2. Measure API call time
+    # 3. Fetch same chain (cache hit)
+    # 4. Measure cached retrieval
+    # 5. Assert cache 50x faster
+    # 6. Test cache expiry
+    # 7. Measure memory usage
+    pass
+
+
 def test_greeks_cache_performance(options_data_manager, performance_timer):
-    """Test Greeks calculation caching effectiveness"""
+    """Test Greeks retrieval caching effectiveness"""
     # TODO: Implement cache test
-    # 1. Calculate Greeks first time
-    # 2. Measure cached retrieval
-    # 3. Calculate hit rate
-    # 4. Assert cache 10x faster
-    # 5. Test cache invalidation
-    # 6. Measure memory usage
+    # 1. Get Greeks first time (may need AV fetch)
+    # 2. Measure retrieval time
+    # 3. Get same Greeks (from cache)
+    # 4. Calculate hit rate
+    # 5. Assert cache 10x faster
+    # 6. Test cache invalidation
+    # 7. Measure memory usage
     pass
 
 
@@ -560,11 +600,12 @@ class PerformanceBenchmark:
     # Target latencies (milliseconds)
     TARGETS = {
         'feature_calculation': 100,
-        'greeks_calculation': 50,
+        'greeks_retrieval_cached': 10,  # From AV cache
+        'greeks_fetch_api': 500,  # From AV API
         'ml_prediction': 30,
         'risk_check': 20,
         'database_query': 10,
-        'total_pipeline': 200
+        'total_pipeline': 200  # With cached AV data
     }
     
     @classmethod
