@@ -1,0 +1,177 @@
+{
+    "mcpServers": {
+      "options-data-server": {
+        "command": "python",
+        "args": ["mcp_servers/options_data_server.py"],
+        "description": "Handles IBKR options chains and Alpha Vantage options APIs",
+        "env": {
+          "IBKR_HOST": "${IBKR_HOST}",
+          "IBKR_PORT": "${IBKR_PAPER_PORT}",
+          "AV_API_KEY": "${ALPHA_VANTAGE_KEY}",
+          "CACHE_GREEKS": "true",
+          "UPDATE_FREQUENCY": "5"
+        },
+        "capabilities": [
+          "fetch_option_chain",
+          "calculate_greeks",
+          "get_implied_volatility",
+          "fetch_historical_options"
+        ]
+      },
+      
+      "risk-management-server": {
+        "command": "python",
+        "args": ["mcp_servers/risk_server.py"],
+        "description": "Monitors portfolio Greeks, VPIN, and enforces limits",
+        "env": {
+          "PORTFOLIO_DELTA_LIMIT": "0.3",
+          "PORTFOLIO_GAMMA_LIMIT": "0.75",
+          "PORTFOLIO_VEGA_LIMIT": "1000",
+          "PORTFOLIO_THETA_MIN": "-500",
+          "VPIN_THRESHOLD": "0.7",
+          "MAX_POSITIONS": "20"
+        },
+        "capabilities": [
+          "calculate_portfolio_greeks",
+          "check_risk_limits",
+          "calculate_vpin",
+          "trigger_circuit_breaker",
+          "force_close_0dte"
+        ]
+      },
+      
+      "trading-execution-server": {
+        "command": "python",
+        "args": ["mcp_servers/execution_server.py"],
+        "description": "Executes orders with <15ms latency",
+        "env": {
+          "IBKR_ACCOUNT": "${IBKR_ACCOUNT}",
+          "MAX_SLIPPAGE": "0.002",
+          "ORDER_TIMEOUT_MS": "15",
+          "ENABLE_SMART_ROUTING": "true"
+        },
+        "capabilities": [
+          "place_option_order",
+          "place_equity_order",
+          "modify_order",
+          "cancel_order",
+          "get_order_status"
+        ]
+      },
+      
+      "discord-community-server": {
+        "command": "python",
+        "args": ["mcp_servers/discord_server.py"],
+        "description": "Manages Discord bot and signal broadcasting",
+        "env": {
+          "DISCORD_BOT_TOKEN": "${DISCORD_BOT_TOKEN}",
+          "FREE_DELAY_SECONDS": "300",
+          "PREMIUM_DELAY_SECONDS": "30",
+          "VIP_DELAY_SECONDS": "0",
+          "BROADCAST_TIMEOUT_MS": "2000"
+        },
+        "capabilities": [
+          "broadcast_entry_signal",
+          "broadcast_exit_signal",
+          "send_daily_recap",
+          "update_leaderboard",
+          "manage_competitions"
+        ]
+      },
+      
+      "whop-subscription-server": {
+        "command": "python",
+        "args": ["mcp_servers/whop_server.py"],
+        "description": "Handles Whop marketplace subscriptions",
+        "env": {
+          "WHOP_API_KEY": "${WHOP_API_KEY}",
+          "WEBHOOK_SECRET": "${WHOP_WEBHOOK_SECRET}",
+          "TIER_PRICES": "{\"FREE\": 0, \"PREMIUM\": 99, \"VIP\": 499}"
+        },
+        "capabilities": [
+          "verify_subscription",
+          "handle_webhook",
+          "update_tier",
+          "process_payment",
+          "manage_access"
+        ]
+      },
+      
+      "database-server": {
+        "command": "python",
+        "args": ["mcp_servers/database_server.py"],
+        "description": "Manages PostgreSQL and Redis operations",
+        "env": {
+          "POSTGRES_URL": "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}",
+          "REDIS_URL": "redis://${REDIS_HOST}:${REDIS_PORT}",
+          "CONNECTION_POOL_SIZE": "20"
+        },
+        "capabilities": [
+          "store_options_data",
+          "cache_greeks",
+          "query_positions",
+          "store_trades",
+          "update_community_stats"
+        ]
+      },
+      
+      "analytics-server": {
+        "command": "python",
+        "args": ["mcp_servers/analytics_server.py"],
+        "description": "Calculates features and generates analytics",
+        "env": {
+          "FEATURE_COUNT": "147",
+          "CALCULATION_TIMEOUT_MS": "15",
+          "USE_VECTORIZATION": "true"
+        },
+        "capabilities": [
+          "calculate_technical_indicators",
+          "generate_features",
+          "calculate_vpin",
+          "analyze_options_flow",
+          "generate_reports"
+        ]
+      },
+      
+      "model-inference-server": {
+        "command": "python",
+        "args": ["mcp_servers/model_server.py"],
+        "description": "Runs XGBoost predictions with fallback",
+        "env": {
+          "MODEL_PATH": "${MODEL_PATH}",
+          "FALLBACK_MODEL_PATH": "${FALLBACK_MODEL_PATH}",
+          "CONFIDENCE_THRESHOLD": "0.6",
+          "INFERENCE_TIMEOUT_MS": "10"
+        },
+        "capabilities": [
+          "predict_signal",
+          "calculate_confidence",
+          "use_fallback_model",
+          "validate_prediction"
+        ]
+      }
+    },
+    
+    "globalEnv": {
+      "PYTHON_PATH": "/usr/bin/python3",
+      "LOG_LEVEL": "${LOG_LEVEL}",
+      "ENVIRONMENT": "${ENVIRONMENT}"
+    },
+    
+    "startupOrder": [
+      "database-server",
+      "options-data-server",
+      "risk-management-server",
+      "analytics-server",
+      "model-inference-server",
+      "trading-execution-server",
+      "discord-community-server",
+      "whop-subscription-server"
+    ],
+    
+    "healthChecks": {
+      "interval": 30,
+      "timeout": 5,
+      "retries": 3
+    }
+  }
