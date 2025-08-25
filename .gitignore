@@ -21,7 +21,7 @@ config/config.yaml
 # Data
 *.csv
 *.xlsx
-data/
+/data/
 
 # Models
 models/*.pkl
