@@ -85,7 +85,7 @@ class MLPredictor:
                 )
                 
                 # Get historical price data for labels
-                hist_prices = await self.features.options.market.get_bars(
+                hist_prices = await self.features.options.market.get_historical_bars(
                     symbol, f'{days_back} D'
                 )
                 
@@ -122,6 +122,8 @@ class MLPredictor:
             X = self.scaler.fit_transform(X)
             
             # Train model
+            if self.model is None:
+                self._create_default_model()
             self.model.fit(X, y)
             
             # Save model

@@ -2,7 +2,7 @@
 Configuration Management - Implementation Plan Week 1 Day 1-2
 Single source of truth for all configuration
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Any
 import yaml
 import os
@@ -30,8 +30,8 @@ class AlphaVantageConfig:
     retry_count: int = 3
     retry_delay: int = 1
     concurrent_requests: int = 10
-    cache_config: Dict[str, Dict[str, Any]] = None
-    enabled_apis: List[str] = None
+    cache_config: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    enabled_apis: List[str] = field(default_factory=list)
     
     def __post_init__(self):
         self.api_key = os.getenv('AV_API_KEY', '')
@@ -49,7 +49,7 @@ class AlphaVantageConfig:
 class TradingConfig:
     """Trading configuration - Implementation Plan Week 1"""
     mode: str = 'paper'  # paper/live
-    symbols: List[str] = None
+    symbols: List[str] = field(default_factory=list)
     max_positions: int = 5
     max_position_size: float = 10000
     daily_loss_limit: float = 1000
@@ -57,7 +57,7 @@ class TradingConfig:
     monthly_loss_limit: float = 5000
     
     # Greeks limits using Alpha Vantage data
-    greeks_limits: Dict[str, tuple] = None
+    greeks_limits: Dict[str, tuple] = field(default_factory=dict)
     
     def __post_init__(self):
         if not self.symbols:

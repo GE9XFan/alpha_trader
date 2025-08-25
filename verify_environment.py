@@ -51,12 +51,12 @@ def main():
     
     # PostgreSQL
     print("\n📍 PostgreSQL:")
-    from test_postgres import test_postgres_connection
+    from tests.manual.test_postgres import test_postgres_connection
     checks.append(test_postgres_connection())
     
     # Redis
     print("\n📍 Redis:")
-    from test_redis import test_redis_connection
+    from tests.manual.test_redis import test_redis_connection
     checks.append(test_redis_connection())
     
     # Summary

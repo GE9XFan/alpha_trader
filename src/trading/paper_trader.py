@@ -3,7 +3,7 @@ Paper Trader - Implementation Plan Week 5-6
 Paper trading using IBKR execution and Alpha Vantage data
 """
 import asyncio
-from datetime import datetime
+from datetime import datetime, time
 from typing import Dict, List
 
 from src.core.config import config
@@ -162,7 +162,7 @@ class PaperTrader:
             return False
         
         market_time = now.time()
-        return market_time >= datetime.time(9, 30) and market_time <= datetime.time(16, 0)
+        return market_time >= time(9, 30) and market_time <= time(16, 0)
     
     async def stop(self):
         """Stop paper trading"""

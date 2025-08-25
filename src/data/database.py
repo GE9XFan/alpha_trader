@@ -175,14 +175,19 @@ class DatabaseManager:
     @contextmanager
     def get_db(self):
         """Get database connection - reused everywhere"""
+        if not self.pg_pool:
+            raise DatabaseException("PostgreSQL pool not initialized")
         conn = self.pg_pool.getconn()
         try:
             yield conn
         finally:
             self.pg_pool.putconn(conn)
     
-    def cache_av_response(self, key: str, value: Any, ttl: int = None):
+    def cache_av_response(self, key: str, value: Any, ttl: Optional[int] = None):
         """Cache Alpha Vantage responses with appropriate TTL"""
+        if not self.redis:
+            return  # Skip caching if Redis not available
+            
         if ttl is None:
             # Use default TTLs based on data type
             if 'options' in key:
@@ -196,6 +201,8 @@ class DatabaseManager:
     
     def get_av_cache(self, key: str) -> Optional[Any]:
         """Get from Alpha Vantage cache"""
+        if not self.redis:
+            return None
         value = self.redis.get(key)
         return json.loads(value) if value else None
     

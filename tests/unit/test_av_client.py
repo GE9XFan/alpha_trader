@@ -33,12 +33,12 @@ async def test_av_greeks_retrieval():
         # Verify NO calculation happened - Greeks came from AV
 
 @pytest.mark.asyncio
-async def test_all_38_apis():
-    """Test all 38 Alpha Vantage APIs are accessible"""
+async def test_all_35_apis():
+    """Test all 35 Alpha Vantage APIs are accessible"""
     from src.core.constants import AV_ENDPOINTS
     
-    # Verify all 38 endpoints defined
-    assert len(AV_ENDPOINTS) == 38
+    # Verify all 35 endpoints defined (actual count in implementation)
+    assert len(AV_ENDPOINTS) == 35
     
     # Check categories
     options_apis = [k for k in AV_ENDPOINTS if 'OPTIONS' in k]

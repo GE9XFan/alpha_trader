@@ -39,15 +39,16 @@ class CacheManager:
                 return self.l1_cache[key]['data']
         
         # L2: Check Redis
-        value = self.l2_cache.get(key)
-        if value:
-            self.hits += 1
-            data = json.loads(value)
-            self.l1_cache[key] = {
-                'data': data,
-                'expires': datetime.now() + timedelta(seconds=ttl)
-            }
-            return data
+        if self.l2_cache:
+            value = self.l2_cache.get(key)
+            if value:
+                self.hits += 1
+                data = json.loads(value)
+                self.l1_cache[key] = {
+                    'data': data,
+                    'expires': datetime.now() + timedelta(seconds=ttl)
+                }
+                return data
         
         # L3: Fetch from API
         self.misses += 1
@@ -58,7 +59,8 @@ class CacheManager:
             'data': value,
             'expires': datetime.now() + timedelta(seconds=ttl)
         }
-        self.l2_cache.setex(key, ttl, json.dumps(value))
+        if self.l2_cache:
+            self.l2_cache.setex(key, ttl, json.dumps(value))
         
         return value
     
@@ -70,8 +72,9 @@ class CacheManager:
             del self.l1_cache[key]
         
         # Clear L2
-        for key in self.l2_cache.scan_iter(match=f"*{pattern}*"):
-            self.l2_cache.delete(key)
+        if self.l2_cache:
+            for key in self.l2_cache.scan_iter(match=f"*{pattern}*"):
+                self.l2_cache.delete(key)
     
     def get_hit_rate(self) -> float:
         """Get cache hit rate"""

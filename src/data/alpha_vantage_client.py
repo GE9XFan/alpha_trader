@@ -516,7 +516,7 @@ class AlphaVantageClient:
                                         interval: str = 'DAILY',
                                         range: str = '1month',
                                         ohlc: str = 'close',
-                                        calculations: Union[str, List[str]] = None) -> Dict:
+                                        calculations: Optional[Union[str, List[str]]] = None) -> Dict:
         """
         Get fixed window analytics
         Note: Parameters are UPPERCASE for analytics APIs
@@ -561,7 +561,7 @@ class AlphaVantageClient:
                                           interval: str = 'DAILY',
                                           range: str = '6month',
                                           ohlc: str = 'close',
-                                          calculations: Union[str, List[str]] = None) -> Dict:
+                                          calculations: Optional[Union[str, List[str]]] = None) -> Dict:
         """
         Get sliding window analytics
         Note: Parameters are UPPERCASE for analytics APIs
@@ -645,7 +645,7 @@ class AlphaVantageClient:
         if sort:
             params['sort'] = sort
         if limit:
-            params['limit'] = limit
+            params['limit'] = str(limit)
         
         cache_key = f"sentiment_{tickers if tickers else 'all'}_{datetime.now().hour}"
         if cached := self._get_cache(cache_key):
@@ -880,6 +880,8 @@ class AlphaVantageClient:
             # This endpoint returns CSV, not JSON
             await self.rate_limiter.acquire()
             
+            if not self.session:
+                await self.connect()
             async with self.session.get(self.base_url, params=params) as resp:
                 if resp.status != 200:
                     logger.error(f"API error {resp.status}")
@@ -1041,6 +1043,8 @@ class AlphaVantageClient:
         start = asyncio.get_event_loop().time()
         
         try:
+            if not self.session:
+                await self.connect()
             async with self.session.get(self.base_url, params=params) as resp:
                 # Check status
                 if resp.status != 200:
@@ -1164,9 +1168,12 @@ class AlphaVantageClient:
                 vega = float(contract_data.get('vega', 0))
                 rho = float(contract_data.get('rho', 0))
                 
-                # Extract other fields - Alpha Vantage uses 'strike' (string format)
-                strike_str = contract_data.get('strike', '0')
-                strike = float(strike_str.replace(',', '') if strike_str else 0)
+                # Extract other fields - Alpha Vantage uses 'strike' (string or float format)
+                strike_value = contract_data.get('strike', 0)
+                if isinstance(strike_value, str):
+                    strike = float(strike_value.replace(',', '') if strike_value else 0)
+                else:
+                    strike = float(strike_value) if strike_value else 0.0
                 
                 # Alpha Vantage returns 'type' field with lowercase 'call' or 'put'
                 option_type = contract_data.get('type', '')
@@ -1268,7 +1275,7 @@ class AlphaVantageClient:
                 del self.cache[key]
         return None
     
-    def _set_cache(self, key: str, data: Any, ttl: int = None):
+    def _set_cache(self, key: str, data: Any, ttl: Optional[int] = None):
         """Set cache with TTL"""
         if ttl is None:
             # Try to get TTLs from config first

@@ -28,7 +28,7 @@ class RateLimiter:
         self.reset_time = 0
         self._lock = asyncio.Lock()
     
-    async def acquire(self, cost: int = 1):
+    async def acquire(self, cost: int = 1) -> bool:
         """Acquire permission to make API call"""
         async with self._lock:
             # Refill bucket
@@ -55,6 +55,7 @@ class RateLimiter:
                 
                 # Wait for refill
                 await asyncio.sleep(wait_time)
+                # Recursive call - already async
                 return await self.acquire(cost)
     
     def check_limit(self) -> bool:

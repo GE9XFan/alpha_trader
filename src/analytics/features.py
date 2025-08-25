@@ -38,7 +38,7 @@ class FeatureEngine:
         features = {}
         
         # Get IBKR price data for basic returns
-        bars = await self.options.market.get_bars(symbol, '1 D')
+        bars = await self.options.market.get_historical_bars(symbol, '1 D')
         
         if not bars.empty:
             features['returns_5m'] = self._calculate_returns(bars, 60)
@@ -86,7 +86,7 @@ class FeatureEngine:
         feature_array = np.array([features.get(name, 0.0) for name in self.feature_names])
         
         # Handle any NaN values
-        feature_array = np.nan_to_num(feature_array, 0.0)
+        feature_array = np.nan_to_num(feature_array, nan=0.0)
         
         return feature_array
     
