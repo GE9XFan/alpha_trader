@@ -40,10 +40,10 @@ class CacheManager:
         
         # L2: Check Redis
         if self.l2_cache:
-            value = self.l2_cache.get(key)
+            value = await self.l2_cache.get(key) if asyncio.iscoroutinefunction(self.l2_cache.get) else self.l2_cache.get(key)
             if value:
                 self.hits += 1
-                data = json.loads(value)
+                data = json.loads(value) if isinstance(value, (str, bytes)) else value
                 self.l1_cache[key] = {
                     'data': data,
                     'expires': datetime.now() + timedelta(seconds=ttl)

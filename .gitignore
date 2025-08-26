@@ -52,3 +52,4 @@ htmlcov/
 *_api_key*
 *_secret*
 *_password*
+discovery_output/

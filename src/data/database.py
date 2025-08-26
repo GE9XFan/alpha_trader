@@ -204,7 +204,7 @@ class DatabaseManager:
         if not self.redis:
             return None
         value = self.redis.get(key)
-        return json.loads(value) if value else None
+        return json.loads(value) if isinstance(value, (str, bytes)) else None
     
     def log_av_api_call(self, endpoint: str, symbol: str, 
                        response_time_ms: int, cache_hit: bool,

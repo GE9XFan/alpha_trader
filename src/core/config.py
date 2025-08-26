@@ -7,6 +7,10 @@ from typing import List, Dict, Optional, Any
 import yaml
 import os
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment variables at module import
+load_dotenv()
 
 
 @dataclass
@@ -107,8 +111,21 @@ class ConfigManager:
     def _parse_av_config(self) -> AlphaVantageConfig:
         """Parse Alpha Vantage configuration"""
         av_data = self._raw_config.get('data_sources', {}).get('alpha_vantage', {})
-        return AlphaVantageConfig(**{k: v for k, v in av_data.items() 
-                                    if k in AlphaVantageConfig.__dataclass_fields__})
+        
+        # Handle environment variable expansion for av_api_key
+        if 'av_api_key' in av_data and av_data['av_api_key'].startswith('${') and av_data['av_api_key'].endswith('}'):
+            env_var = av_data['av_api_key'][2:-1]  # Remove ${ and }
+            av_data['av_api_key'] = os.getenv(env_var, '')
+        
+        # Filter to only valid fields
+        config_data = {k: v for k, v in av_data.items() 
+                      if k in AlphaVantageConfig.__dataclass_fields__}
+        
+        # Map av_api_key to api_key (field name in dataclass)
+        if 'av_api_key' in config_data:
+            config_data['api_key'] = config_data.pop('av_api_key')
+            
+        return AlphaVantageConfig(**config_data)
     
     def _parse_trading_config(self) -> TradingConfig:
         """Parse trading configuration"""

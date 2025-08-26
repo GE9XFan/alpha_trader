@@ -124,7 +124,10 @@ class MLPredictor:
             # Train model
             if self.model is None:
                 self._create_default_model()
-            self.model.fit(X, y)
+            if self.model is not None:
+                self.model.fit(X, y)
+            else:
+                logger.error("Failed to create model for training")
             
             # Save model
             joblib.dump(self.model, self.model_path)

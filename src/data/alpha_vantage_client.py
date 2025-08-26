@@ -88,7 +88,16 @@ class AlphaVantageClient:
         # Try to load from ConfigManager first
         try:
             self.config = config.av
-            self.api_key = self.config.api_key or os.getenv('AV_API_KEY', '')
+            # Get API key, handling environment variable references
+            api_key_from_config = self.config.api_key
+            
+            # If config has ${...} pattern, try environment variable
+            if api_key_from_config and api_key_from_config.startswith('${') and api_key_from_config.endswith('}'):
+                env_var = api_key_from_config[2:-1]
+                self.api_key = os.getenv(env_var, '')
+            else:
+                self.api_key = api_key_from_config or os.getenv('AV_API_KEY', '')
+            
             rate_limit = self.config.rate_limit
             rate_window = self.config.rate_window
             logger.info(f"Config loaded from config.yaml")
@@ -100,7 +109,7 @@ class AlphaVantageClient:
             rate_window = 60  # Per minute
             logger.warning("Config not available, using environment variables")
         
-        if not self.api_key:
+        if not self.api_key or self.api_key.startswith('${'):
             logger.error("AV_API_KEY not set - API calls will fail")
             logger.error("Set it via: export AV_API_KEY='your_key' or in config.yaml")
         
@@ -1279,8 +1288,8 @@ class AlphaVantageClient:
         """Set cache with TTL"""
         if ttl is None:
             # Try to get TTLs from config first
-            if self.config and hasattr(self.config, 'cache_ttls'):
-                cache_ttls = self.config.cache_ttls
+            if self.config and hasattr(self.config, 'cache_config'):
+                cache_ttls = self.config.cache_config
                 if 'options' in key:
                     ttl = cache_ttls.get('options', 60)
                 elif 'indicator' in key:
@@ -1306,7 +1315,7 @@ class AlphaVantageClient:
         
         self.cache[key] = {
             'data': data,
-            'expires': datetime.now() + timedelta(seconds=ttl)
+            'expires': datetime.now() + timedelta(seconds=ttl if ttl else 3600)
         }
         
         # Limit cache size to prevent memory issues
