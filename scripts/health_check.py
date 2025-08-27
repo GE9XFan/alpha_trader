@@ -98,8 +98,8 @@ class HealthChecker:
             r.ping()
 
             # Get info (synchronous call)
-            info: dict = r.info()
-            memory_info: dict = r.info('memory')
+            info = r.info()  # type: ignore
+            memory_info = r.info('memory')  # type: ignore
 
             # Calculate memory usage
             used_memory = memory_info.get('used_memory', 0)
