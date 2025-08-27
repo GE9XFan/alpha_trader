@@ -58,9 +58,10 @@ ibkr:
   # Market Data Subscriptions
   market_data:
     level2_depth: 10  # 10 levels each side
+    use_smart_depth: false  # Disable SMART depth to prevent IndexError
     bar_size: "5 secs"
     what_to_show: "TRADES"
-    use_rth: true  # Regular trading hours only
+    use_rth: false  # FALSE for extended hours trading
   
   # Order Defaults
   order_defaults:

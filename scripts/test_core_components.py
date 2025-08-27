@@ -117,7 +117,9 @@ async def test_ibkr_client(cache: CacheManager):
         with open('config/config.yaml', 'r') as f:
             config = yaml.safe_load(f)
 
-        # Initialize IBKR client
+        # Initialize IBKR client with unique ID to avoid conflicts
+        import random
+        config['ibkr']['client_id'] = 200 + random.randint(1, 100)  # Client ID 200-299
         ibkr = IBKRClient(cache, config)
 
         # Connect with retries

@@ -98,12 +98,14 @@ class HealthChecker:
             r.ping()
 
             # Get info (synchronous call)
-            info = r.info()  # type: ignore
-            memory_info = r.info('memory')  # type: ignore
+            info_result = r.info()  # type: ignore
+            info = info_result if isinstance(info_result, dict) else {}  # Ensure it's a dict
+            memory_info_result = r.info('memory')  # type: ignore
+            memory_info = memory_info_result if isinstance(memory_info_result, dict) else {}  # Ensure it's a dict
 
             # Calculate memory usage
-            used_memory = memory_info.get('used_memory', 0)
-            max_memory = memory_info.get('maxmemory', 0)
+            used_memory = memory_info.get('used_memory', 0) if memory_info else 0
+            max_memory = memory_info.get('maxmemory', 0) if memory_info else 0
 
             if max_memory > 0:
                 memory_percent = (used_memory / max_memory) * 100

@@ -445,7 +445,13 @@ class AlphaVantageClient:
             }
 
             data = await self._make_request(params)
-            self.cache.set_indicator(symbol, f"BBANDS_{interval}_{time_period}", data)
+            
+            # Cache the result with proper TTL
+            if data:
+                self.cache.set_indicator(symbol, f"BBANDS_{interval}_{time_period}", data)
+                logger.debug(f"Cached BBANDS for {symbol} with key indicator:{symbol}_BBANDS_{interval}_{time_period}")
+            else:
+                logger.warning(f"BBANDS returned no data for {symbol}")
 
             return data
 
@@ -474,7 +480,13 @@ class AlphaVantageClient:
             }
 
             data = await self._make_request(params)
-            self.cache.set_indicator(symbol, f"ATR_{interval}_{time_period}", data)
+            
+            # Cache the result with proper TTL
+            if data:
+                self.cache.set_indicator(symbol, f"ATR_{interval}_{time_period}", data)
+                logger.debug(f"Cached ATR for {symbol} with key indicator:{symbol}_ATR_{interval}_{time_period}")
+            else:
+                logger.warning(f"ATR returned no data for {symbol}")
 
             return data
 
@@ -548,8 +560,19 @@ class AlphaVantageClient:
     async def get_top_gainers_losers(self) -> Optional[Dict]:
         """Get top gainers and losers"""
         try:
+            # Check cache first
+            cached = self.cache.get("movers:top")
+            if cached:
+                self.stats['cache_hits'] += 1
+                return cached
+            
             params = {'function': 'TOP_GAINERS_LOSERS'}
             data = await self._make_request(params)
+            
+            # Cache the result with 5 minute TTL
+            if data:
+                self.cache.set("movers:top", data, ttl=300)
+            
             return data
 
         except Exception as e:
@@ -559,12 +582,23 @@ class AlphaVantageClient:
     async def get_insider_transactions(self, symbol: str) -> Optional[Dict]:
         """Get insider transactions"""
         try:
+            # Check cache first (1 hour TTL for insider data)
+            cached = self.cache.get(f"insider:{symbol}")
+            if cached:
+                self.stats['cache_hits'] += 1
+                return cached
+            
             params = {
                 'function': 'INSIDER_TRANSACTIONS',
                 'symbol': symbol
             }
 
             data = await self._make_request(params)
+            
+            # Cache with 1 hour TTL
+            if data:
+                self.cache.set(f"insider:{symbol}", data, ttl=3600)
+            
             return data
 
         except Exception as e:
@@ -600,12 +634,23 @@ class AlphaVantageClient:
     async def get_earnings(self, symbol: str) -> Optional[Dict]:
         """Get earnings data"""
         try:
+            # Check cache first (1 hour TTL for earnings)
+            cached = self.cache.get(f"earnings:{symbol}")
+            if cached:
+                self.stats['cache_hits'] += 1
+                return cached
+            
             params = {
                 'function': 'EARNINGS',
                 'symbol': symbol
             }
 
             data = await self._make_request(params)
+            
+            # Cache with 1 hour TTL
+            if data:
+                self.cache.set(f"earnings:{symbol}", data, ttl=3600)
+            
             return data
 
         except Exception as e:
@@ -635,6 +680,11 @@ class AlphaVantageClient:
             }
 
             data = await self._make_request(params)
+            
+            # Cache analytics data with 5 minute TTL
+            if data:
+                self.cache.set(f"analytics:{SYMBOLS}", data, ttl=300)
+            
             return data
 
         except Exception as e:

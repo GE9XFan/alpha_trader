@@ -239,6 +239,10 @@ class IBKRClient:
         # Informational messages - not errors
         if errorCode in [2104, 2106, 2107, 2108, 2158]:  # Market data farm connections
             logger.debug(f"Market data farm message: {errorString}")
+        # Market data permissions - not critical for paper trading
+        elif errorCode == 2152:  # Need additional market data permissions
+            logger.debug(f"Market data permissions: {errorString}")
+            return  # Don't log as error
         # Warning level errors
         elif errorCode in [200, 202, 203]:  # Security/contract related
             logger.warning(f"Contract issue {errorCode}: {errorString}")
@@ -259,33 +263,70 @@ class IBKRClient:
         """Handle general updates"""
         pass  # Process specific updates in their handlers
 
-    async def subscribe_market_depth(self, symbol: str, num_rows: int = 10) -> bool:
-        """Subscribe to Level 2 order book"""
+    async def subscribe_market_depth(self, symbol: str, num_rows: int = 10, exchanges: Optional[List[str]] = None) -> bool:
+        """Subscribe to Level 2 order book from specific exchanges"""
         try:
-            contract = Stock(symbol, 'SMART', 'USD')
+            # Use exchanges with L2 subscriptions - SPY specific optimization
+            if exchanges is None:
+                # For SPY, use ARCA (primary) and optionally BATS
+                # Don't use ISLAND (causes 10089), EDGX (10092), or BZX (use BATS instead)
+                if symbol == 'SPY':
+                    exchanges = ['ARCA', 'BATS']  # SPY primary is ARCA
+                else:
+                    exchanges = ['ARCA', 'NYSE', 'BATS', 'IEX']  # General stocks
+            
+            successful_subs = []
+            
+            for exchange in exchanges:
+                try:
+                    contract = Stock(symbol, exchange, 'USD')
+                    contract.primaryExchange = exchange  # Force specific exchange
 
-            # Request market depth
-            self.ib.reqMktDepth(
-                contract,
-                numRows=num_rows,
-                isSmartDepth=self.config['market_data'].get('use_smart_depth', True)
-            )
+                    # Request market depth with isSmartDepth=False for real L2
+                    self.ib.reqMktDepth(
+                        contract,
+                        numRows=num_rows,
+                        isSmartDepth=False  # CRITICAL: Must be False for real Level 2
+                    )
+                    
+                    successful_subs.append(exchange)
+                    logger.debug(f"Subscribed to L2 for {symbol} on {exchange}")
+                    
+                except Exception as e:
+                    logger.warning(f"L2 subscription failed for {symbol} on {exchange}: {e}")
+                    continue
+            
+            if not successful_subs:
+                logger.error(f"Failed to subscribe to any L2 exchange for {symbol}")
+                return False
 
-            # Set up order book handler
-            ticker = self.ib.ticker(contract)
-            if ticker:
-                ticker.updateEvent += lambda ticker: self._process_order_book(symbol, ticker)
+            # Set up order book handler for aggregated data
+            # Store all exchange contracts
+            self.market_depth_subs[symbol] = {'exchanges': successful_subs, 'contracts': []}
+            
+            # Aggregate order books from all exchanges
+            for exchange in successful_subs:
+                contract = Stock(symbol, exchange, 'USD')
+                contract.primaryExchange = exchange
+                ticker = self.ib.ticker(contract)
+                if ticker and hasattr(ticker, 'updateEvent'):
+                    # Use proper callback binding for ticker updates
+                    def make_handler(exch):
+                        def on_ticker_update(ticker_obj):
+                            self._process_order_book(symbol, ticker_obj, exchange=exch)
+                        return on_ticker_update
+                    ticker.updateEvent += make_handler(exchange)  # type: ignore
+                self.market_depth_subs[symbol]['contracts'].append(contract)
 
-            self.market_depth_subs[symbol] = contract
-            logger.info(f"Subscribed to Level 2 for {symbol}")
+            logger.info(f"Subscribed to Level 2 for {symbol} on exchanges: {successful_subs}")
             return True
 
         except Exception as e:
             logger.error(f"Failed to subscribe to market depth for {symbol}: {e}")
             return False
 
-    def _process_order_book(self, symbol: str, ticker):
-        """Process order book update"""
+    def _process_order_book(self, symbol: str, ticker, exchange: Optional[str] = None):
+        """Process order book update, aggregating from multiple exchanges"""
         try:
             # Build order book from ticker
             bids = []
@@ -332,17 +373,23 @@ class IBKRClient:
         try:
             contract = Stock(symbol, 'SMART', 'USD')
 
-            # Request tick data
+            # Request tick data with extended hours support
             self.ib.reqMktData(
                 contract,
-                genericTickList='',
+                genericTickList='233',  # Add RTVolume for trade tape
                 snapshot=False,
                 regulatorySnapshot=False
             )
+            
+            # Enable extended hours market data
+            self.ib.reqMarketDataType(4)  # 4 = Delayed frozen (works in extended hours)
 
             ticker = self.ib.ticker(contract)
-            if ticker:
-                ticker.updateEvent += lambda ticker: self._process_trade(symbol, ticker)
+            if ticker and hasattr(ticker, 'updateEvent'):
+                # Use proper callback binding for ticker updates
+                def on_trade_update(ticker_obj):
+                    self._process_trade(symbol, ticker_obj)
+                ticker.updateEvent += on_trade_update  # type: ignore
 
             self.ticker_subs[symbol] = ticker
             logger.info(f"Subscribed to trades for {symbol}")
@@ -382,16 +429,19 @@ class IBKRClient:
         try:
             contract = Stock(symbol, 'SMART', 'USD')
 
-            # Request real-time bars
+            # Request real-time bars with extended hours support
             bars = self.ib.reqRealTimeBars(
                 contract,
                 barSize=5,  # Only 5 second bars supported for real-time
-                whatToShow=self.config['market_data'].get('what_to_show', 'TRADES'),
-                useRTH=self.config['market_data'].get('use_rth', True)
+                whatToShow='TRADES',  # Must be TRADES for extended hours
+                useRTH=False  # FALSE for extended hours trading!
             )
 
-            # Set up bar handler
-            bars.updateEvent += lambda bars: self._process_bar(symbol, bars)
+            # Set up bar handler - ib_insync passes TWO arguments: (bars, hasNewBar)
+            def on_bar_update(bars_obj, has_new_bar):
+                if has_new_bar:  # Only process when there's actually a new bar
+                    self._process_bar(symbol, bars_obj)
+            bars.updateEvent += on_bar_update
 
             self.bar_subs[symbol] = bars
             logger.info(f"Subscribed to {bar_size} bars for {symbol}")
@@ -460,7 +510,7 @@ class IBKRClient:
                 durationStr=duration,
                 barSizeSetting=bar_size,
                 whatToShow='TRADES',
-                useRTH=True,
+                useRTH=False,  # FALSE for extended hours data!
                 formatDate=1
             )
 
@@ -669,16 +719,35 @@ class IBKRClient:
             return False
     
     async def unsubscribe_market_depth(self, symbol: str) -> bool:
-        """Unsubscribe from market depth"""
+        """Unsubscribe from market depth for all exchanges"""
         try:
             if symbol in self.market_depth_subs:
-                contract = self.market_depth_subs[symbol]
-                self.ib.cancelMktDepth(contract)
+                sub_info = self.market_depth_subs[symbol]
+                if isinstance(sub_info, dict) and 'contracts' in sub_info:
+                    # New format with multiple exchanges
+                    for contract in sub_info['contracts']:
+                        self.ib.cancelMktDepth(contract)
+                else:
+                    # Legacy single contract format
+                    self.ib.cancelMktDepth(sub_info)  # type: ignore
                 del self.market_depth_subs[symbol]
                 logger.info(f"Unsubscribed from Level 2 for {symbol}")
                 return True
         except Exception as e:
             logger.error(f"Failed to unsubscribe from market depth for {symbol}: {e}")
+        return False
+    
+    def unsubscribe_bars(self, symbol: str) -> bool:
+        """Unsubscribe from real-time bars"""
+        try:
+            if symbol in self.bar_subs:
+                bars = self.bar_subs[symbol]
+                self.ib.cancelRealTimeBars(bars)
+                del self.bar_subs[symbol]
+                logger.info(f"Unsubscribed from real-time bars for {symbol}")
+                return True
+        except Exception as e:
+            logger.error(f"Failed to unsubscribe from bars for {symbol}: {e}")
         return False
     
     def get_last_price(self, symbol: str) -> Optional[float]:
@@ -692,22 +761,53 @@ class IBKRClient:
             logger.error(f"Error getting last price for {symbol}: {e}")
         return None
     
-    async def get_spot_price(self, symbol: str) -> Optional[float]:
-        """Get spot price, subscribing if necessary"""
-        # First try existing subscription
+    async def get_spot_price(self, symbol: str, timeout: int = 5) -> Optional[float]:
+        """Get spot price with multiple fallback methods"""
+        # Method 1: Try existing subscription
         price = self.get_last_price(symbol)
-        if price:
+        if price and price > 0:
             return price
         
-        # Subscribe temporarily if not already subscribed
         try:
             contract = Stock(symbol, 'SMART', 'USD')
-            self.ib.reqMktData(contract)
-            await asyncio.sleep(1)  # Wait for data
-            ticker = self.ib.ticker(contract)
-            price = ticker.last if ticker and hasattr(ticker, 'last') else None
+            
+            # Method 2: Request snapshot with extended hours
+            self.ib.reqMarketDataType(4)  # Enable extended hours
+            ticker = self.ib.reqMktData(contract, '', True, False)  # Snapshot mode
+            await asyncio.sleep(2)  # Wait for snapshot
+            
+            if ticker.last and ticker.last > 0:
+                self.ib.cancelMktData(contract)
+                return float(ticker.last)
+            elif ticker.close and ticker.close > 0:
+                self.ib.cancelMktData(contract)
+                return float(ticker.close)
+            
+            # Method 3: Get from historical data (most recent bar)
+            bars = self.ib.reqHistoricalData(
+                contract,
+                endDateTime='',
+                durationStr='1 D',
+                barSizeSetting='1 min',
+                whatToShow='TRADES',
+                useRTH=False,  # Include extended hours
+                formatDate=1
+            )
+            
+            if bars and len(bars) > 0:
+                self.ib.cancelMktData(contract)
+                return float(bars[-1].close)
+            
+            # Method 4: Use bid/ask midpoint
+            if ticker.bid and ticker.ask and ticker.bid > 0 and ticker.ask > 0:
+                midpoint = (ticker.bid + ticker.ask) / 2
+                self.ib.cancelMktData(contract)
+                return float(midpoint)
+            
             self.ib.cancelMktData(contract)
-            return float(price) if price else None
+            logger.error(f"Cannot get spot price for {symbol} - all methods failed")
+            return None
+            
         except Exception as e:
             logger.error(f"Failed to get spot price for {symbol}: {e}")
             return None
