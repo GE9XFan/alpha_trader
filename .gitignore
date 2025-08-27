@@ -1,0 +1,102 @@
+# Environment Variables - NEVER commit these!
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+logs/
+*.log
+*.out
+*.err
+
+# Data files
+data/
+temp/
+cache/
+*.csv
+*.xlsx
+*.json
+
+# Redis
+dump.rdb
+appendonly.aof
+redis.log
+
+# Trading specific
+positions.json
+trades.json
+signals.json
+backtest_results/
+paper_trades/
+
+# Test files
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+
+# Documentation build
+docs/_build/
+docs/_static/
+docs/_templates/
+
+# Jupyter Notebooks (if used for analysis)
+.ipynb_checkpoints
+*.ipynb
+
+# System files
+Thumbs.db
+desktop.ini
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# TWS/IB Gateway
+IBController.ini
+jts.ini
+tws.xml
+
+# Monitoring
+prometheus_data/
+grafana_data/

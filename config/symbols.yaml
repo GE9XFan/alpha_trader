@@ -1,0 +1,117 @@
+# Symbols Configuration
+# Maximum 10 symbols as per spec (~400MB per symbol in Redis)
+
+# Primary Symbols (High Liquidity ETFs)
+primary:
+  - symbol: SPY
+    name: "SPDR S&P 500 ETF"
+    exchange: SMART
+    currency: USD
+    priority: 1
+    strategies: ["0DTE", "1DTE", "MOC"]
+    
+  - symbol: QQQ
+    name: "Invesco QQQ Trust"
+    exchange: SMART
+    currency: USD
+    priority: 1
+    strategies: ["0DTE", "1DTE", "MOC"]
+    
+  - symbol: IWM
+    name: "iShares Russell 2000 ETF"
+    exchange: SMART
+    currency: USD
+    priority: 2
+    strategies: ["0DTE", "1DTE"]
+
+# Secondary Symbols (Individual Stocks)
+secondary:
+  - symbol: AAPL
+    name: "Apple Inc."
+    exchange: SMART
+    currency: USD
+    priority: 2
+    strategies: ["14DTE"]
+    
+  - symbol: TSLA
+    name: "Tesla Inc."
+    exchange: SMART
+    currency: USD
+    priority: 3
+    strategies: ["14DTE"]
+    
+  - symbol: NVDA
+    name: "NVIDIA Corporation"
+    exchange: SMART
+    currency: USD
+    priority: 3
+    strategies: ["14DTE"]
+
+# Volatility Instruments
+volatility:
+  - symbol: VXX
+    name: "iPath Series B S&P 500 VIX"
+    exchange: SMART
+    currency: USD
+    priority: 4
+    strategies: ["1DTE"]
+
+# Configuration per Symbol
+symbol_config:
+  # Default settings (can be overridden per symbol)
+  default:
+    min_volume: 1000000  # Daily volume
+    min_option_volume: 100
+    min_open_interest: 500
+    max_spread_pct: 0.002  # 0.2%
+    
+  # Symbol-specific overrides
+  SPY:
+    min_volume: 50000000
+    min_option_volume: 1000
+    min_open_interest: 5000
+    max_spread_pct: 0.001
+    
+  QQQ:
+    min_volume: 30000000
+    min_option_volume: 500
+    min_open_interest: 2000
+    max_spread_pct: 0.001
+    
+  TSLA:
+    min_volume: 10000000
+    min_option_volume: 200
+    min_open_interest: 1000
+    max_spread_pct: 0.003  # Higher spread tolerance for TSLA
+
+# Market Hours Configuration
+market_hours:
+  pre_market:
+    start: "04:00"
+    end: "09:30"
+    
+  regular:
+    start: "09:30"
+    end: "16:00"
+    
+  after_hours:
+    start: "16:00"
+    end: "20:00"
+    
+  # Strategy-specific trading windows
+  trading_windows:
+    "0DTE":
+      start: "09:45"
+      end: "15:00"
+      
+    "1DTE":
+      start: "14:00"
+      end: "15:30"
+      
+    "14DTE":
+      start: "09:30"
+      end: "16:00"
+      
+    "MOC":
+      start: "15:30"
+      end: "15:50"

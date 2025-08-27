@@ -1,0 +1,59 @@
+# Core Runtime
+python-dotenv==1.0.0
+
+# IBKR Connection
+ib_insync==0.9.86
+
+# Async HTTP for Alpha Vantage
+aiohttp==3.9.0
+requests==2.31.0
+
+# API Server
+fastapi==0.109.0
+uvicorn==0.27.0
+
+# WebSocket Support
+websockets==12.0
+python-socketio==5.11.0
+
+# Redis Cache
+redis==5.0.1
+hiredis==2.3.2  # C parser for better performance
+
+# Data Processing
+numpy==1.26.0
+pandas==2.1.0
+
+# Data Validation
+pydantic==2.5.0
+pydantic-settings==2.1.0
+
+# YAML Configuration
+pyyaml==6.0.1
+
+# Discord Integration
+discord.py==2.3.2
+
+# Dashboard
+streamlit==1.29.0  # Alternative to React for quick setup
+plotly==5.18.0
+
+# Monitoring & Logging
+prometheus-client==0.19.0
+loguru==0.7.2
+
+# Testing (for later phases)
+pytest==7.4.3
+pytest-asyncio==0.21.1
+
+# Development Tools
+black==23.12.0
+isort==5.13.0
+mypy==1.7.0
+
+# Time & Date
+pytz==2023.3
+python-dateutil==2.8.2
+
+# System Monitoring
+psutil==5.9.6
