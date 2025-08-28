@@ -277,18 +277,18 @@ class IBKRClient:
         pass  # Process specific updates in their handlers
 
     async def subscribe_market_depth(self, symbol: str, num_rows: int = 10, exchanges: Optional[List[str]] = None) -> bool:
-        """Subscribe to Level 2 order book - simplified and robust implementation"""
+        """Subscribe to Level 2 order book - SMART routing with aggregated data"""
         try:
-            # SIMPLIFIED APPROACH: Use SMART routing for better data availability
-            # This avoids exchange-specific issues and complexity
+            # Use SMART routing with Smart Depth for aggregated data from all exchanges
+            # API v974+ required - isSmartDepth=True enables SMART exchange support
             contract = Stock(symbol, 'SMART', 'USD')
             
-            # Request market depth
-            logger.debug(f"Requesting market depth for {symbol} with {num_rows} rows")
+            # Request market depth with Smart Depth enabled for SMART exchange
+            logger.debug(f"Requesting SMART market depth for {symbol} with {num_rows} rows")
             req_id = self.ib.reqMktDepth(
                 contract,
                 numRows=num_rows,
-                isSmartDepth=False,  # Real Level 2, not aggregated
+                isSmartDepth=True,  # CRITICAL: Must be True for SMART exchange
                 mktDepthOptions=[]
             )
             
@@ -844,8 +844,11 @@ class IBKRClient:
                 
                 # Handle new dictionary format
                 if isinstance(sub_info, dict):
-                    # Cancel market depth subscription
-                    if 'contract' in sub_info:
+                    # Cancel market depth subscription using request ID
+                    if 'req_id' in sub_info:
+                        self.ib.cancelMktDepth(sub_info['req_id'])
+                    elif 'contract' in sub_info:
+                        # Fallback to contract if req_id not available (legacy)
                         self.ib.cancelMktDepth(sub_info['contract'])
                     
                     # Disconnect event handler if ticker exists
