@@ -89,19 +89,32 @@ class IBKRClient:
             var_expr = config[2:-1]
             if ':' in var_expr:
                 var_name, default = var_expr.split(':', 1)
-                value = os.getenv(var_name, default)
+                # Handle empty default case properly
+                if default == '':
+                    # Empty default means use empty string if env var not set
+                    value = os.getenv(var_name, '')
+                else:
+                    value = os.getenv(var_name, default)
             else:
-                value = os.getenv(var_expr, config)
+                # No default specified, use empty string if not found
+                value = os.getenv(var_expr, '')
+            
+            # CRITICAL FIX: Don't return the template if env var not found
+            # If value is still the original ${...} format, use empty string
+            if value == config:
+                value = ''
             
             # Try to convert to appropriate type
-            if value.isdigit():
-                return int(value)
-            elif value.replace('.', '', 1).isdigit():
-                return float(value)
-            elif value.lower() in ('true', 'yes'):
-                return True
-            elif value.lower() in ('false', 'no'):
-                return False
+            if value and value != '':
+                if value.isdigit():
+                    return int(value)
+                elif value.replace('.', '', 1).replace('-', '', 1).isdigit():
+                    return float(value)
+                elif value.lower() in ('true', 'yes', '1'):
+                    return True
+                elif value.lower() in ('false', 'no', '0'):
+                    return False
+            
             return value
         return config
 
@@ -264,119 +277,143 @@ class IBKRClient:
         pass  # Process specific updates in their handlers
 
     async def subscribe_market_depth(self, symbol: str, num_rows: int = 10, exchanges: Optional[List[str]] = None) -> bool:
-        """Subscribe to Level 2 order book from specific exchanges"""
+        """Subscribe to Level 2 order book - simplified and robust implementation"""
         try:
-            # Use exchanges with L2 subscriptions - SPY specific optimization
-            if exchanges is None:
-                # For SPY, use ARCA (primary) and optionally BATS
-                # Don't use ISLAND (causes 10089), EDGX (10092), or BZX (use BATS instead)
-                if symbol == 'SPY':
-                    exchanges = ['ARCA', 'BATS']  # SPY primary is ARCA
+            # SIMPLIFIED APPROACH: Use SMART routing for better data availability
+            # This avoids exchange-specific issues and complexity
+            contract = Stock(symbol, 'SMART', 'USD')
+            
+            # Request market depth
+            logger.debug(f"Requesting market depth for {symbol} with {num_rows} rows")
+            req_id = self.ib.reqMktDepth(
+                contract,
+                numRows=num_rows,
+                isSmartDepth=False,  # Real Level 2, not aggregated
+                mktDepthOptions=[]
+            )
+            
+            # Store subscription info
+            self.market_depth_subs[symbol] = {
+                'contract': contract,
+                'req_id': req_id,
+                'ticker': None  # Will be set below
+            }
+            
+            # CRITICAL: Get ticker and connect update handler
+            # This is what was missing - we need to properly connect the event
+            ticker = self.ib.ticker(contract)
+            
+            if ticker:
+                # Store ticker reference
+                self.market_depth_subs[symbol]['ticker'] = ticker
+                
+                # Create handler for this specific symbol
+                # Using closure to capture symbol correctly
+                def create_handler(sym):
+                    def on_depth_update(ticker_obj):
+                        # Only process if we have actual depth data
+                        if ticker_obj.domBids or ticker_obj.domAsks:
+                            self._process_order_book(sym, ticker_obj)
+                    return on_depth_update
+                
+                # Connect the handler
+                handler = create_handler(symbol)
+                ticker.updateEvent += handler  # type: ignore
+                
+                # Store handler reference for cleanup
+                self.market_depth_subs[symbol]['handler'] = handler
+                
+                logger.info(f"✓ Subscribed to Level 2 for {symbol} using SMART routing")
+                
+                # Give it a moment to start receiving data
+                await asyncio.sleep(0.5)
+                
+                # Check if we're getting data
+                if ticker.domBids or ticker.domAsks:
+                    logger.success(f"✓ Level 2 data flowing for {symbol}")
                 else:
-                    exchanges = ['ARCA', 'NYSE', 'BATS', 'IEX']  # General stocks
-            
-            successful_subs = []
-            
-            for exchange in exchanges:
-                try:
-                    contract = Stock(symbol, exchange, 'USD')
-                    contract.primaryExchange = exchange  # Force specific exchange
-
-                    # Request market depth with isSmartDepth=False for real L2
-                    self.ib.reqMktDepth(
-                        contract,
-                        numRows=num_rows,
-                        isSmartDepth=False  # CRITICAL: Must be False for real Level 2
-                    )
-                    
-                    successful_subs.append(exchange)
-                    logger.debug(f"Subscribed to L2 for {symbol} on {exchange}")
-                    
-                except Exception as e:
-                    logger.warning(f"L2 subscription failed for {symbol} on {exchange}: {e}")
-                    continue
-            
-            if not successful_subs:
-                logger.error(f"Failed to subscribe to any L2 exchange for {symbol}")
+                    logger.warning(f"⚠ No Level 2 data yet for {symbol}, may take a moment...")
+                
+                return True
+            else:
+                logger.error(f"Failed to get ticker for {symbol}")
                 return False
-
-            # Set up order book handler for aggregated data
-            # Store all exchange contracts
-            self.market_depth_subs[symbol] = {'exchanges': successful_subs, 'contracts': []}
-            
-            # Aggregate order books from all exchanges
-            for exchange in successful_subs:
-                contract = Stock(symbol, exchange, 'USD')
-                contract.primaryExchange = exchange
-                ticker = self.ib.ticker(contract)
-                if ticker and hasattr(ticker, 'updateEvent'):
-                    # Use proper callback binding for ticker updates
-                    def make_handler(exch):
-                        def on_ticker_update(ticker_obj):
-                            self._process_order_book(symbol, ticker_obj, exchange=exch)
-                        return on_ticker_update
-                    ticker.updateEvent += make_handler(exchange)  # type: ignore
-                self.market_depth_subs[symbol]['contracts'].append(contract)
-
-            logger.info(f"Subscribed to Level 2 for {symbol} on exchanges: {successful_subs}")
-            return True
 
         except Exception as e:
             logger.error(f"Failed to subscribe to market depth for {symbol}: {e}")
             return False
 
     def _process_order_book(self, symbol: str, ticker, exchange: Optional[str] = None):
-        """Process order book update, aggregating from multiple exchanges"""
+        """Process order book update with better validation and logging"""
         try:
+            # Validate we have actual depth data
+            if not ticker.domBids and not ticker.domAsks:
+                # No depth data yet - this is normal at startup
+                return
+            
             # Build order book from ticker
             bids = []
             asks = []
 
             if ticker.domBids:
                 for level in ticker.domBids[:10]:  # Max 10 levels
-                    bids.append(OrderBookLevel(
-                        price=level.price,
-                        size=level.size,
-                        market_maker=level.marketMaker
-                    ))
+                    # Validate price is positive
+                    if level.price and level.price > 0:
+                        bids.append(OrderBookLevel(
+                            price=level.price,
+                            size=level.size or 0,
+                            market_maker=level.marketMaker or ""
+                        ))
 
             if ticker.domAsks:
                 for level in ticker.domAsks[:10]:  # Max 10 levels
-                    asks.append(OrderBookLevel(
-                        price=level.price,
-                        size=level.size,
-                        market_maker=level.marketMaker
-                    ))
+                    # Validate price is positive
+                    if level.price and level.price > 0:
+                        asks.append(OrderBookLevel(
+                            price=level.price,
+                            size=level.size or 0,
+                            market_maker=level.marketMaker or ""
+                        ))
 
-            # Create order book object
-            order_book = OrderBook(
-                symbol=symbol,
-                timestamp=int(time.time() * 1000),
-                bids=bids,
-                asks=asks
-            )
+            # Only create order book if we have at least one side
+            if bids or asks:
+                order_book = OrderBook(
+                    symbol=symbol,
+                    timestamp=int(time.time() * 1000),
+                    bids=bids,
+                    asks=asks
+                )
 
-            # Store locally
-            self.order_books[symbol] = order_book
+                # Store locally
+                self.order_books[symbol] = order_book
 
-            # Cache it
-            self.cache.set_order_book(symbol, order_book.dict())
+                # Cache it with verification
+                if self.cache.set_order_book(symbol, order_book.dict()):
+                    # Log periodically to avoid spam
+                    if not hasattr(self, '_last_ob_log') or time.time() - self._last_ob_log > 10:
+                        logger.debug(f"✓ L2 cached for {symbol}: {len(bids)} bids, {len(asks)} asks, spread: {order_book.spread:.4f}")
+                        self._last_ob_log = time.time()
+                else:
+                    logger.warning(f"Failed to cache order book for {symbol}")
 
-            # Trigger callbacks
-            self._trigger_callbacks(f"orderbook_{symbol}", order_book)
+                # Trigger callbacks
+                self._trigger_callbacks(f"orderbook_{symbol}", order_book)
+            else:
+                logger.debug(f"No valid price levels for {symbol} order book")
 
         except Exception as e:
             logger.error(f"Error processing order book for {symbol}: {e}")
 
     async def subscribe_trades(self, symbol: str) -> bool:
-        """Subscribe to trade tape"""
+        """Subscribe to trade tape with improved event handling"""
         try:
             contract = Stock(symbol, 'SMART', 'USD')
 
             # Request tick data with extended hours support
+            logger.debug(f"Requesting market data for {symbol}")
             self.ib.reqMktData(
                 contract,
-                genericTickList='233',  # Add RTVolume for trade tape
+                genericTickList='233',  # RTVolume for trade tape
                 snapshot=False,
                 regulatorySnapshot=False
             )
@@ -384,39 +421,75 @@ class IBKRClient:
             # Enable extended hours market data
             self.ib.reqMarketDataType(4)  # 4 = Delayed frozen (works in extended hours)
 
+            # Get ticker and set up handler
             ticker = self.ib.ticker(contract)
-            if ticker and hasattr(ticker, 'updateEvent'):
-                # Use proper callback binding for ticker updates
-                def on_trade_update(ticker_obj):
-                    self._process_trade(symbol, ticker_obj)
-                ticker.updateEvent += on_trade_update  # type: ignore
-
-            self.ticker_subs[symbol] = ticker
-            logger.info(f"Subscribed to trades for {symbol}")
-            return True
+            if ticker:
+                # Create specific handler for this symbol
+                def create_trade_handler(sym):
+                    def on_trade_update(ticker_obj):
+                        # Check for actual trade data (last price and size)
+                        if ticker_obj.last and ticker_obj.last > 0 and ticker_obj.lastSize and ticker_obj.lastSize > 0:
+                            self._process_trade(sym, ticker_obj)
+                    return on_trade_update
+                
+                # Connect the handler
+                handler = create_trade_handler(symbol)
+                if hasattr(ticker, 'updateEvent'):
+                    ticker.updateEvent += handler  # type: ignore  # type: ignore
+                
+                # Store ticker and handler
+                self.ticker_subs[symbol] = {
+                    'ticker': ticker,
+                    'handler': handler,
+                    'contract': contract
+                }
+                
+                logger.info(f"✓ Subscribed to trades for {symbol}")
+                
+                # Give it a moment to start receiving data
+                await asyncio.sleep(0.5)
+                
+                # Check if we're getting data
+                if ticker.last and ticker.last > 0:
+                    logger.success(f"✓ Trade data flowing for {symbol}: Last ${ticker.last:.2f}")
+                else:
+                    logger.warning(f"⚠ No trade data yet for {symbol}, may take a moment...")
+                
+                return True
+            else:
+                logger.error(f"Failed to get ticker for {symbol}")
+                return False
 
         except Exception as e:
             logger.error(f"Failed to subscribe to trades for {symbol}: {e}")
             return False
 
     def _process_trade(self, symbol: str, ticker):
-        """Process trade update"""
+        """Process trade update with better validation and caching"""
         try:
-            if ticker.last and ticker.lastSize:
+            # Validate we have valid trade data
+            if ticker.last and ticker.last > 0 and ticker.lastSize and ticker.lastSize > 0:
                 trade = TradeModel(
                     symbol=symbol,
                     timestamp=int(time.time() * 1000),
-                    price=ticker.last,
-                    size=ticker.lastSize
+                    price=float(ticker.last),
+                    size=int(ticker.lastSize),
+                    is_buyer=None  # Can't determine from tick data
                 )
 
-                # Store recent trades
+                # Store recent trades locally
                 self.recent_trades[symbol].append(trade)
                 if len(self.recent_trades[symbol]) > 1000:
                     self.recent_trades[symbol] = self.recent_trades[symbol][-1000:]
 
-                # Cache trade
-                self.cache.append_trade(symbol, trade.dict())
+                # Cache trade with verification
+                if self.cache.append_trade(symbol, trade.dict()):
+                    # Log periodically to avoid spam
+                    if not hasattr(self, '_last_trade_log') or time.time() - self._last_trade_log > 10:
+                        logger.debug(f"✓ Trade cached: {symbol} @ ${trade.price:.2f} x {trade.size}")
+                        self._last_trade_log = time.time()
+                else:
+                    logger.warning(f"Failed to cache trade for {symbol}")
 
                 # Trigger callbacks
                 self._trigger_callbacks(f"trade_{symbol}", trade)
@@ -452,23 +525,43 @@ class IBKRClient:
             return False
 
     def _process_bar(self, symbol: str, bars: BarDataList):
-        """Process bar update"""
+        """Process bar update - handles both RealTimeBar and BarData correctly"""
         try:
             if bars:
                 latest_bar = bars[-1]
 
-                # Handle datetime properly
+                # CRITICAL FIX: Handle RealTimeBar vs BarData
+                # RealTimeBar has 'time' attribute (Unix timestamp in seconds)
+                # BarData has 'date' attribute (datetime object)
+                
                 import datetime as dt
-                if hasattr(latest_bar.date, 'timestamp'):
-                    timestamp = int(latest_bar.date.timestamp() * 1000)  # type: ignore
-                elif isinstance(latest_bar.date, dt.date) and not isinstance(latest_bar.date, dt.datetime):
-                    # It's a date object, convert to datetime
-                    dt_obj = dt.datetime.combine(latest_bar.date, dt.time.min)
-                    timestamp = int(dt_obj.timestamp() * 1000)
-                elif isinstance(latest_bar.date, dt.datetime):
-                    timestamp = int(latest_bar.date.timestamp() * 1000)
+                
+                if hasattr(latest_bar, 'time'):
+                    # RealTimeBar - has 'time' as Unix timestamp in seconds
+                    # Convert to milliseconds for consistency
+                    timestamp = int(latest_bar.time * 1000)  # type: ignore
+                    logger.debug(f"Processing RealTimeBar for {symbol}, timestamp: {timestamp}")
+                    
+                elif hasattr(latest_bar, 'date'):
+                    # Historical BarData - has 'date' as datetime
+                    if hasattr(latest_bar.date, 'timestamp'):
+                        timestamp = int(latest_bar.date.timestamp() * 1000)  # type: ignore
+                    elif isinstance(latest_bar.date, dt.datetime):
+                        timestamp = int(latest_bar.date.timestamp() * 1000)
+                    elif isinstance(latest_bar.date, dt.date):
+                        # It's a date object, convert to datetime
+                        dt_obj = dt.datetime.combine(latest_bar.date, dt.time.min)
+                        timestamp = int(dt_obj.timestamp() * 1000)
+                    else:
+                        # Fallback to current time
+                        timestamp = int(time.time() * 1000)
+                        logger.warning(f"Unexpected date format for {symbol}: {type(latest_bar.date)}")
+                    logger.debug(f"Processing BarData for {symbol}, timestamp: {timestamp}")
+                    
                 else:
+                    # Neither 'time' nor 'date' attribute found - shouldn't happen
                     timestamp = int(time.time() * 1000)
+                    logger.warning(f"Bar for {symbol} has neither 'time' nor 'date' attribute, using current time")
 
                 bar = BarModel(
                     symbol=symbol,
@@ -685,21 +778,46 @@ class IBKRClient:
             await self.subscribe_bars(symbol)
 
     async def unsubscribe_all(self):
-        """Unsubscribe from all market data"""
-        for contract in self.market_depth_subs.values():
-            self.ib.cancelMktDepth(contract)
-
-        for ticker in self.ticker_subs.values():
-            self.ib.cancelMktData(ticker.contract)
-
+        """Unsubscribe from all market data with proper cleanup"""
+        # Unsubscribe market depth
+        for symbol in list(self.market_depth_subs.keys()):
+            await self.unsubscribe_market_depth(symbol)
+        
+        # Unsubscribe trades
+        for symbol, sub_info in self.ticker_subs.items():
+            try:
+                if isinstance(sub_info, dict):
+                    if 'ticker' in sub_info:
+                        ticker = sub_info['ticker']
+                        if 'contract' in sub_info:
+                            self.ib.cancelMktData(sub_info['contract'])
+                        elif hasattr(ticker, 'contract'):
+                            self.ib.cancelMktData(ticker.contract)
+                        # Clear event handler
+                        if 'handler' in sub_info and hasattr(ticker, 'updateEvent'):
+                            try:
+                                ticker.updateEvent -= sub_info['handler']
+                            except:
+                                pass
+                else:
+                    # Legacy format - sub_info is the ticker itself
+                    if hasattr(sub_info, 'contract'):
+                        self.ib.cancelMktData(sub_info.contract)
+            except Exception as e:
+                logger.warning(f"Error unsubscribing trades for {symbol}: {e}")
+        
+        # Unsubscribe bars
         for bars in self.bar_subs.values():
-            self.ib.cancelRealTimeBars(bars)
+            try:
+                self.ib.cancelRealTimeBars(bars)
+            except Exception as e:
+                logger.warning(f"Error unsubscribing bars: {e}")
 
         self.market_depth_subs.clear()
         self.ticker_subs.clear()
         self.bar_subs.clear()
 
-        logger.info("Unsubscribed from all market data")
+        logger.info("✓ Unsubscribed from all market data")
 
     def is_connected(self) -> bool:
         """Check connection status"""
@@ -719,20 +837,42 @@ class IBKRClient:
             return False
     
     async def unsubscribe_market_depth(self, symbol: str) -> bool:
-        """Unsubscribe from market depth for all exchanges"""
+        """Unsubscribe from market depth with proper cleanup"""
         try:
             if symbol in self.market_depth_subs:
                 sub_info = self.market_depth_subs[symbol]
-                if isinstance(sub_info, dict) and 'contracts' in sub_info:
-                    # New format with multiple exchanges
-                    for contract in sub_info['contracts']:
-                        self.ib.cancelMktDepth(contract)
+                
+                # Handle new dictionary format
+                if isinstance(sub_info, dict):
+                    # Cancel market depth subscription
+                    if 'contract' in sub_info:
+                        self.ib.cancelMktDepth(sub_info['contract'])
+                    
+                    # Disconnect event handler if ticker exists
+                    if 'ticker' in sub_info and 'handler' in sub_info:
+                        ticker = sub_info['ticker']
+                        handler = sub_info['handler']
+                        # Remove specific handler
+                        try:
+                            ticker.updateEvent -= handler
+                        except:
+                            # Handler might already be removed
+                            pass
+                    
+                    # Legacy multiple contracts format
+                    elif 'contracts' in sub_info:
+                        for contract in sub_info['contracts']:
+                            self.ib.cancelMktDepth(contract)
                 else:
                     # Legacy single contract format
                     self.ib.cancelMktDepth(sub_info)  # type: ignore
+                
+                # Remove from tracking
                 del self.market_depth_subs[symbol]
-                logger.info(f"Unsubscribed from Level 2 for {symbol}")
+                
+                logger.info(f"✓ Unsubscribed from Level 2 for {symbol}")
                 return True
+                
         except Exception as e:
             logger.error(f"Failed to unsubscribe from market depth for {symbol}: {e}")
         return False
@@ -811,3 +951,140 @@ class IBKRClient:
         except Exception as e:
             logger.error(f"Failed to get spot price for {symbol}: {e}")
             return None
+    
+    # =================== MONITORING & DEBUGGING METHODS ===================
+    
+    def get_market_data_status(self) -> Dict:
+        """Get comprehensive status of all market data subscriptions"""
+        status = {
+            'connected': self.is_connected(),
+            'market_depth': {},
+            'trades': {},
+            'bars': {},
+            'data_flowing': {
+                'order_books': 0,
+                'trades': 0,
+                'bars': 0
+            }
+        }
+        
+        # Check market depth subscriptions
+        for symbol, sub_info in self.market_depth_subs.items():
+            if isinstance(sub_info, dict) and 'ticker' in sub_info:
+                ticker = sub_info['ticker']
+                # Handle both dict and Ticker object types
+                if isinstance(ticker, dict):
+                    dom_bids = ticker.get('domBids', [])
+                    dom_asks = ticker.get('domAsks', [])
+                else:
+                    dom_bids = getattr(ticker, 'domBids', []) if ticker else []
+                    dom_asks = getattr(ticker, 'domAsks', []) if ticker else []
+                
+                has_bids = bool(dom_bids)
+                has_asks = bool(dom_asks)
+                status['market_depth'][symbol] = {
+                    'subscribed': True,
+                    'has_bids': has_bids,
+                    'has_asks': has_asks,
+                    'bid_levels': len(dom_bids),
+                    'ask_levels': len(dom_asks)
+                }
+                if has_bids or has_asks:
+                    status['data_flowing']['order_books'] += 1
+        
+        # Check trade subscriptions
+        for symbol, sub_info in self.ticker_subs.items():
+            if isinstance(sub_info, dict) and 'ticker' in sub_info:
+                ticker = sub_info['ticker']
+            else:
+                ticker = sub_info
+            
+            # Handle both dict and Ticker object types
+            if isinstance(ticker, dict):
+                last_price = ticker.get('last', 0)
+                last_size = ticker.get('lastSize', None)
+            else:
+                last_price = getattr(ticker, 'last', 0) if ticker else 0
+                last_size = getattr(ticker, 'lastSize', None) if ticker else None
+            
+            has_last = bool(last_price and last_price > 0)
+            status['trades'][symbol] = {
+                'subscribed': True,
+                'has_last_price': has_last,
+                'last_price': last_price if has_last else None,
+                'last_size': last_size
+            }
+            if has_last:
+                status['data_flowing']['trades'] += 1
+        
+        # Check bar subscriptions
+        for symbol, bars in self.bar_subs.items():
+            has_bars = bool(bars and len(bars) > 0)
+            status['bars'][symbol] = {
+                'subscribed': True,
+                'has_bars': has_bars,
+                'bar_count': len(bars) if bars else 0
+            }
+            if has_bars:
+                status['data_flowing']['bars'] += 1
+        
+        # Check cached data
+        status['cached_data'] = {
+            'order_books': len(self.order_books),
+            'recent_trades': sum(len(trades) for trades in self.recent_trades.values()),
+            'bars': len(self.bars)
+        }
+        
+        return status
+    
+    def log_market_data_status(self):
+        """Log current market data status for debugging"""
+        status = self.get_market_data_status()
+        
+        logger.info("=" * 60)
+        logger.info("MARKET DATA STATUS REPORT")
+        logger.info("=" * 60)
+        logger.info(f"Connected: {status['connected']}")
+        logger.info(f"Data Flowing - Order Books: {status['data_flowing']['order_books']}, "
+                   f"Trades: {status['data_flowing']['trades']}, "
+                   f"Bars: {status['data_flowing']['bars']}")
+        
+        # Market depth details
+        if status['market_depth']:
+            logger.info("\nMARKET DEPTH:")
+            for symbol, depth_status in status['market_depth'].items():
+                logger.info(f"  {symbol}: Bids={depth_status['bid_levels']}, Asks={depth_status['ask_levels']}")
+        
+        # Trades details
+        if status['trades']:
+            logger.info("\nTRADES:")
+            for symbol, trade_status in status['trades'].items():
+                if trade_status['has_last_price']:
+                    logger.info(f"  {symbol}: ${trade_status['last_price']:.2f} x {trade_status['last_size']}")
+                else:
+                    logger.info(f"  {symbol}: No data")
+        
+        # Bars details
+        if status['bars']:
+            logger.info("\nBARS:")
+            for symbol, bar_status in status['bars'].items():
+                logger.info(f"  {symbol}: {bar_status['bar_count']} bars")
+        
+        logger.info("=" * 60)
+    
+    async def monitor_data_flow(self, interval: int = 30):
+        """Monitor and log data flow periodically"""
+        while self.connected:
+            try:
+                self.log_market_data_status()
+                
+                # Check cache performance
+                cache_stats = self.cache.get_stats()
+                logger.info(f"Cache Performance - Hit Rate: {cache_stats['hit_rate']}, "
+                           f"Keys: {cache_stats['keys']}")
+                
+                await asyncio.sleep(interval)
+                
+            except Exception as e:
+                logger.error(f"Error in monitor_data_flow: {e}")
+                await asyncio.sleep(interval)

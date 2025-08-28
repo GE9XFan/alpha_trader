@@ -8,6 +8,7 @@ import json
 import redis
 import yaml
 import os
+import time
 from typing import Any, Optional, Dict, List
 from pathlib import Path
 from datetime import datetime
@@ -315,18 +316,34 @@ class CacheManager:
 
     # Trade/Bar Data Methods
     def append_trade(self, symbol: str, trade: Dict) -> bool:
-        """Append trade to recent trades list (keep last 1000)"""
+        """Append trade to recent trades list with better verification"""
         try:
             key = self._make_key("trades", symbol)
+            
+            # Convert to JSON for Redis
+            trade_json = json.dumps(trade)
 
-            # Add to list
-            self.redis_client.lpush(key, json.dumps(trade))
+            # Add to list (newest first)
+            result = self.redis_client.lpush(key, trade_json)
+            
+            # Verify it was added
+            if not result:
+                logger.warning(f"Failed to lpush trade for {symbol}")
+                return False
 
-            # Trim to last 1000
+            # Trim to last 1000 trades
             self.redis_client.ltrim(key, 0, 999)
 
             # Set expiry on the list
             self.redis_client.expire(key, self._get_ttl("trades"))
+            
+            # Update stats
+            self.stats['sets'] += 1
+            
+            # Debug logging (periodically to avoid spam)
+            if not hasattr(self, '_last_trade_cache_log') or time.time() - self._last_trade_cache_log > 30:
+                logger.debug(f"✓ Trade cached in Redis for {symbol}: price=${trade.get('price', 0):.2f}, size={trade.get('size', 0)}")
+                self._last_trade_cache_log = time.time()
 
             return True
 
