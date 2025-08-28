@@ -15,6 +15,7 @@ from typing import Dict, List, Optional, Tuple
 from loguru import logger
 from dotenv import load_dotenv
 import nest_asyncio
+import os
 
 # Apply nest_asyncio for notebook compatibility
 nest_asyncio.apply()
@@ -34,8 +35,6 @@ from core import (
     Trade,
     Bar
 )
-
-
 class CompletePipelineTest:
     """
     Comprehensive pipeline test with REAL production data
@@ -118,7 +117,8 @@ class CompletePipelineTest:
                 self.timing['ibkr_connect'] = (time.time() - start) * 1000
                 account = self.ibkr.get_account_summary()
                 logger.success(f"✓ IBKR connected in {self.timing['ibkr_connect']:.2f}ms")
-                logger.info(f"  Account: {self.config['ibkr'].get('account', 'N/A')}")
+                account_number = os.getenv('IBKR_ACCOUNT', 'DU1234567')
+                logger.info(f"  Account: {account_number}")
                 logger.info(f"  Buying Power: ${account.get('buying_power', 0):,.2f}")
                 self._record_pass("IBKR connection")
 
@@ -397,17 +397,13 @@ class CompletePipelineTest:
             self._record_failure("Historical Options", str(e))
 
         # 3-8. TECHNICAL INDICATORS
-        if self.av:
-            av_client = self.av  # Capture non-None value for type checker
-            indicators = [
-                ('RSI', lambda: av_client.get_rsi(test_symbol, interval='daily')),
-                ('MACD', lambda: av_client.get_macd(test_symbol, interval='daily')),
-                ('BBANDS', lambda: av_client.get_bbands(test_symbol, interval='daily')),
-                ('ATR', lambda: av_client.get_atr(test_symbol, interval='daily')),
-                ('VWAP', lambda: av_client.get_vwap(test_symbol, interval='15min'))
-            ]
-        else:
-            indicators = []
+        indicators = [
+            ('RSI', lambda: self.av.get_rsi(test_symbol, interval='daily') if self.av else None),
+            ('MACD', lambda: self.av.get_macd(test_symbol, interval='daily') if self.av else None),
+            ('BBANDS', lambda: self.av.get_bbands(test_symbol, interval='daily') if self.av else None),
+            ('ATR', lambda: self.av.get_atr(test_symbol, interval='daily') if self.av else None),
+            ('VWAP', lambda: self.av.get_vwap(test_symbol, interval='15min') if self.av else None)
+        ]
 
         for i, (name, func) in enumerate(indicators, 3):
             logger.info(f"\n[{i}/13] Testing {name}...")
@@ -419,9 +415,16 @@ class CompletePipelineTest:
                     self.test_results['api_coverage']['av_tested'].add(name)
 
                     # Check cache
-                    cache_key = f"{name}_daily_14" if name == 'RSI' else f"{name}_daily"
-                    if name == 'VWAP':
-                        cache_key = f"{name}_15min"
+                    if name == 'RSI':
+                        cache_key = f"RSI_daily_14"
+                    elif name == 'BBANDS':
+                        cache_key = f"BBANDS_daily_20"  # ← Includes time_period!
+                    elif name == 'ATR':
+                        cache_key = f"ATR_daily_14"     # ← Includes time_period!
+                    elif name == 'VWAP':
+                        cache_key = f"VWAP_15min"
+                    else:
+                        cache_key = f"{name}_daily"
 
                     cached = self.cache.get_indicator(test_symbol, cache_key) if self.cache else None
                     cache_status = "✓ Cached" if cached else "✗ Not cached"
@@ -551,21 +554,21 @@ class CompletePipelineTest:
         logger.info("="*70)
 
         results = {}
-        
+
         # Track which data types actually have real data
         available_data = {
             'order_book': False,
             'options_chain': False,
             'metrics': True  # Can always test with synthetic metrics
         }
-        
+
         # Check what data is actually available
         if self.cache:
             # Check if we have real order book data
             test_ob = self.cache.get_order_book('SPY') if self.cache else None
             if test_ob and 'bids' in test_ob and 'asks' in test_ob:
                 available_data['order_book'] = True
-            
+
             # Check if we have real options data
             test_opts = self.cache.get_options_chain('SPY') if self.cache else None
             if test_opts and 'options' in test_opts:
@@ -581,17 +584,17 @@ class CompletePipelineTest:
 
         # Test different TTLs - only test data types that have real data
         ttl_tests = []
-        
+
         if available_data['order_book']:
             ttl_tests.append(('order_book', 'SPY', 1))  # 1 second TTL
         else:
             logger.warning("Skipping order_book TTL test - no real data available")
-            
+
         if available_data['options_chain']:
             ttl_tests.append(('options_chain', 'SPY', 10))  # 10 second TTL
         else:
             logger.warning("Skipping options_chain TTL test - no real data available")
-            
+
         # Always test metrics with synthetic data
         ttl_tests.append(('metrics', 'SPY', 5))  # 5 second TTL
 
@@ -786,17 +789,17 @@ class CompletePipelineTest:
             'Cache initialization',
             'Alpha Vantage initialization'
         ]
-        
+
         # Level 2 is only critical during market hours
         hour = datetime.now().hour
         if 4 <= hour < 20:  # Market hours (roughly)
             critical_failures.append('Level 2')
-        
+
         has_critical_failure = any(
-            failure for failure in self.test_results['failed'] 
+            failure for failure in self.test_results['failed']
             if any(critical in failure for critical in critical_failures)
         )
-        
+
         # Check cache hit rate
         cache_stats = self.cache.get_stats() if self.cache else None
         cache_hit_rate = 0
@@ -804,7 +807,7 @@ class CompletePipelineTest:
             total_ops = int(cache_stats['hits']) + int(cache_stats['misses'])
             if total_ops > 0:
                 cache_hit_rate = int(cache_stats['hits']) / total_ops
-        
+
         # Final Status - More strict criteria
         logger.info("\n" + "="*70)
         if has_critical_failure:

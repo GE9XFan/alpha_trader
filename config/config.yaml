@@ -14,32 +14,32 @@ cache:
   port: ${REDIS_PORT:6379}
   db: ${REDIS_DB:0}
   password: ${REDIS_PASSWORD:}
-  
+
   # Memory Configuration
   max_memory: ${REDIS_MAX_MEMORY:4gb}
   max_memory_policy: volatile-lru
-  
+
   # Connection Pool
   max_connections: 100
   socket_keepalive: true
   socket_connect_timeout: 5
-  
+
   # TTL Strategy (seconds)
   ttl:
     # Ultra-short (microstructure)
-    order_book: 1
-    trades: 1
-    vpin: 1
-    
+    order_book: 10
+    trades: 10
+    vpin: 10
+
     # Short (options)
     options_chain: 10
     greeks: 10
     calculated_metrics: 5
-    
+
     # Medium (indicators)
     technical_indicators: 60
     analytics: 120
-    
+
     # Long (slow-changing)
     sentiment: 300
     fundamentals: 3600
@@ -50,19 +50,19 @@ ibkr:
   port: ${IBKR_PORT:7497}  # 7497 paper, 7496 live
   client_id: ${IBKR_CLIENT_ID:1}
   account: ${IBKR_ACCOUNT:}
-  
+
   # Connection Settings
   timeout: 10
   readonly: false
-  
+
   # Market Data Subscriptions
   market_data:
     level2_depth: 10  # 10 levels each side
-    use_smart_depth: false  # Disable SMART depth to prevent IndexError
+    use_smart_depth: true  # Disable SMART depth to prevent IndexError
     bar_size: "5 secs"
     what_to_show: "TRADES"
     use_rth: false  # FALSE for extended hours trading
-  
+
   # Order Defaults
   order_defaults:
     algo_strategy: "Adaptive"
@@ -76,12 +76,12 @@ alpha_vantage:
   api_key: ${AV_API_KEY:}
   base_url: ${AV_BASE_URL:https://www.alphavantage.co/query}
   rate_limit: ${AV_RATE_LIMIT:600}  # Premium: 600 calls/min
-  
+
   # Request Configuration
   timeout: 10
   max_retries: 3
   retry_delay: 1
-  
+
   # Endpoints to Use
   endpoints:
     - REALTIME_OPTIONS
@@ -99,31 +99,31 @@ alpha_vantage:
 # Trading Configuration
 trading:
   mode: ${TRADING_MODE:paper}
-  
+
   # Position Limits
   limits:
     max_positions: ${MAX_POSITIONS:5}
     max_position_size_pct: ${MAX_POSITION_SIZE_PCT:0.25}
     max_correlation: 0.70
     max_daily_loss: ${MAX_DAILY_LOSS:2000}
-  
+
   # Risk Management
   risk:
     risk_per_trade: ${RISK_PER_TRADE:0.02}
     initial_stop_atr: 1.5
     trailing_stop_pct: 0.5
-    
+
   # Targets (ATR multiples)
   targets:
     - 1.0
     - 2.0
     - 3.0
-  
+
   scale_out_pcts:
     - 0.33
     - 0.50
     - 1.00
-  
+
   # Circuit Breakers
   circuit_breakers:
     max_consecutive_losses: 3
@@ -138,24 +138,24 @@ signals:
     watch: [40, 60]
     standard: [60, 80]
     high_conviction: [80, 100]
-  
+
   # Time Windows for Different Strategies
   strategies:
     "0DTE":
       start_time: "09:45"
       end_time: "15:00"
       min_confidence: 70
-      
+
     "1DTE":
       start_time: "14:00"
       end_time: "15:30"
       min_confidence: 65
-      
+
     "14DTE":
       start_time: "09:30"
       end_time: "16:00"
       min_confidence: 60
-      
+
     "MOC":
       start_time: "15:30"
       end_time: "15:50"
@@ -166,7 +166,7 @@ api:
   host: ${API_HOST:0.0.0.0}
   port: ${API_PORT:8000}
   ws_port: ${WS_PORT:8001}
-  
+
   # CORS Settings
   cors:
     origins: ["*"]
@@ -179,7 +179,7 @@ dashboard:
   host: ${DASHBOARD_HOST:localhost}
   port: ${DASHBOARD_PORT:8080}
   refresh_rate: 1000  # milliseconds
-  
+
   # Panels to Display
   panels:
     - positions
@@ -201,7 +201,7 @@ logging:
 monitoring:
   prometheus_port: ${PROMETHEUS_PORT:9090}
   health_check_interval: 60  # seconds
-  
+
   # Metrics to Track
   metrics:
     - latency_p50
