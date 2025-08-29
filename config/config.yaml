@@ -211,3 +211,95 @@ monitoring:
     - signals_generated
     - positions_open
     - pnl_realized
+
+# Configuration-Driven Strategies
+# These replace hardcoded strategies with discovered parameters
+strategies:
+  intraday_scalping:
+    enabled: ${INTRADAY_ENABLED:false}
+    time_window: "9:30-11:00"
+    
+    risk_limits:
+      max_position_pct: ${INTRADAY_MAX_POS:0.05}  # 5% default
+      max_loss_per_trade: ${INTRADAY_STOP:0.01}   # 1% stop
+      max_daily_loss: ${INTRADAY_DAILY_LOSS:0.02} # 2% daily limit
+      max_positions: ${INTRADAY_MAX_POSITIONS:3}
+      
+    data_requirements:
+      min_trades: 100        # Minimum trades for VPIN calculation
+      min_order_book_levels: 5
+      lookback_bars: null    # To be discovered from YOUR data
+      
+  overnight_positioning:
+    enabled: ${OVERNIGHT_ENABLED:false}
+    time_window: "14:00-15:30"
+    
+    risk_limits:
+      max_position_pct: ${OVERNIGHT_MAX_POS:0.10}
+      max_loss_per_trade: ${OVERNIGHT_STOP:0.02}
+      max_daily_loss: ${OVERNIGHT_DAILY_LOSS:0.03}
+      max_positions: ${OVERNIGHT_MAX_POSITIONS:2}
+      
+    data_requirements:
+      min_trades: 500
+      min_order_book_levels: 5
+      lookback_bars: null    # To be discovered
+      
+  position_trading:
+    enabled: ${POSITION_ENABLED:true}  # Your default strategy
+    time_window: "always"
+    
+    risk_limits:
+      max_position_pct: ${POSITION_MAX_POS:0.15}
+      max_loss_per_trade: ${POSITION_STOP:0.03}
+      max_daily_loss: ${POSITION_DAILY_LOSS:0.05}
+      max_positions: ${POSITION_MAX_POSITIONS:5}
+      
+    data_requirements:
+      min_trades: 1000
+      min_order_book_levels: 2
+      lookback_bars: null    # To be discovered
+
+# Risk Management Global Settings
+risk_management:
+  global:
+    max_account_risk: ${MAX_ACCOUNT_RISK:0.06}  # 6% total risk
+    max_correlation: ${MAX_CORRELATION:0.70}
+    position_sizing_method: ${SIZING_METHOD:kelly_volatility}
+    kelly_fraction: ${KELLY_FRACTION:0.25}  # Use 25% of full Kelly
+    
+  circuit_breakers:
+    max_consecutive_losses: ${MAX_CONSECUTIVE_LOSSES:3}
+    daily_loss_shutdown: ${DAILY_LOSS_SHUTDOWN:0.05}
+    emergency_stop_all: ${EMERGENCY_STOP:true}
+    
+  var_limits:
+    confidence_level: ${VAR_CONFIDENCE:0.95}
+    max_var_1day: ${MAX_VAR_1D:0.04}
+    max_var_5day: ${MAX_VAR_5D:0.08}
+
+# Parameter Discovery Settings
+discovered_parameters:
+  vpin_bucket_size: ${DISCOVERED_VPIN_BUCKET:null}  # Discovered at runtime
+  natural_timeframes: ${DISCOVERED_TIMEFRAMES:null}
+  override_from_cache: true  # Use discovered values when available
+  
+  # Path to auto-generated parameters file
+  discovered_file: "config/discovered.yaml"
+  
+  # Discovery settings
+  discovery:
+    min_trades_for_discovery: 10000
+    min_bars_for_timeframe: 2000
+    min_mm_events_for_analysis: 1000
+    
+# Market Maker Profiles (Will be populated by discovery)
+market_makers:
+  # These are discovered from YOUR Level 2 data
+  # Example structure (populated after discovery):
+  # IBEOS:
+  #   name: "IB Smart Router"
+  #   observed_frequency: 0.45
+  #   avg_order_duration_ms: 12300
+  #   toxicity: 0.15
+  #   classification: "retail_flow"

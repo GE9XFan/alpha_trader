@@ -35,6 +35,12 @@ Unlike traditional trading bots that rely on basic technical indicators, AlphaTr
 
 4. **Multi-Strategy Orchestration**: Simultaneously runs multiple strategies (0DTE gamma scalping, 1DTE overnight positioning, swing trades, MOC imbalance) with intelligent capital allocation.
 
+5. **Configuration-Driven Architecture**: No hardcoded parameters - everything configured via YAML with environment overrides. Parameters discovered from YOUR market data, not academic papers.
+
+6. **Empirical Parameter Discovery**: VPIN bucket sizes, natural timeframes, and optimal lookback windows all discovered from YOUR actual market data, not theoretical assumptions.
+
+7. **Market Maker Intelligence**: Tracks and analyzes real market maker behavior from Level 2 data to identify toxic flow and inform trading decisions.
+
 ## Key Features
 
 ### Data Infrastructure
@@ -283,6 +289,96 @@ primary:
     strategies: ["0DTE", "1DTE"]
     min_volume: 30000000
     max_spread_pct: 0.001
+```
+
+### Configuration Management
+
+The system supports multiple trading environments through configuration files:
+
+#### Environment-Based Configuration
+
+```bash
+# Paper Trading (Default)
+export ENVIRONMENT=paper
+export INTRADAY_ENABLED=false
+export MAX_POSITION_PCT=0.05
+export KELLY_FRACTION=0.10
+export DAILY_LOSS_SHUTDOWN=0.05
+
+# Aggressive Testing (Paper Money)
+export ENVIRONMENT=aggressive
+export INTRADAY_ENABLED=true
+export MAX_POSITION_PCT=0.10
+export KELLY_FRACTION=0.40
+export DAILY_LOSS_SHUTDOWN=0.10
+
+# Production Trading (Real Money)
+export ENVIRONMENT=production
+export INTRADAY_ENABLED=true
+export MAX_POSITION_PCT=0.03
+export KELLY_FRACTION=0.25
+export DAILY_LOSS_SHUTDOWN=0.03
+```
+
+#### Key Configuration Parameters
+
+| Parameter | Description | Paper | Production |
+|-----------|------------|-------|------------|
+| `MAX_POSITION_PCT` | Max % per position | 5% | 3% |
+| `KELLY_FRACTION` | Kelly sizing | 10% | 25% |
+| `DAILY_LOSS_SHUTDOWN` | Daily stop | 5% | 3% |
+| `MAX_CONSECUTIVE_LOSSES` | Circuit breaker | 5 | 3 |
+
+### Parameter Discovery
+
+The system discovers optimal parameters from YOUR market data:
+
+```bash
+# Run discovery after collecting market data (1 week recommended)
+python analytics/indicators.py --discover-parameters
+
+# This discovers:
+# - VPIN bucket sizes from YOUR trade volumes
+# - Natural timeframes from YOUR price autocorrelation
+# - Market maker patterns from YOUR Level 2 data
+# - Optimal lookback windows from YOUR volatility regimes
+```
+
+#### Discovery Process
+
+1. **Data Collection Phase** (1 week minimum)
+   ```bash
+   # Collect market data
+   python scripts/collect_market_data.py --symbol SPY --days 7
+   ```
+
+2. **Run Discovery**
+   ```bash
+   # Analyze and discover parameters
+   python analytics/indicators.py --discover-parameters
+   
+   # Output saved to: config/discovered.yaml
+   ```
+
+3. **Results Example**
+   ```yaml
+   # config/discovered.yaml (AUTO-GENERATED)
+   discovered:
+     vpin_bucket_size: 75  # YOUR market trades in 75-share blocks
+     autocorr_cutoff_bars: 12  # 60 seconds of memory
+     market_makers:
+       IBEOS: {frequency: 0.45, toxicity: 0.15}
+       CDRG: {frequency: 0.08, toxicity: 0.89}
+   ```
+
+#### Using Discovered Parameters
+
+The system automatically uses discovered parameters when available:
+
+```python
+# In your code - parameters are loaded from discovery
+vpin = calculate_vpin(trades)  # Uses YOUR discovered bucket size
+lookback = get_optimal_lookback()  # Uses YOUR discovered timeframe
 ```
 
 ## Usage
@@ -666,7 +762,37 @@ All data sources are operational and ready for analytics implementation:
 - ✅ Options sweep detection ready (real-time data feeds established)
 - ✅ Multi-timeframe correlation analysis ready (all technical indicators caching)
 
-### 📅 UPCOMING (Week 2)
+### 🔬 NEW PHASE - Parameter Discovery & Configuration (Week 2)
+**Status: Ready to Implement**
+
+**Discovery System Implementation**
+- [ ] VPIN bucket size discovery from YOUR trade volumes
+- [ ] Natural timeframe discovery via autocorrelation analysis
+- [ ] Market maker pattern recognition from Level 2 data
+- [ ] Volatility regime identification
+- [ ] Options structure mapping to strategy groupings
+
+**Configuration Framework**
+- [ ] Environment-specific configs (.env for paper/production)
+- [ ] Auto-generated discovered.yaml from market analysis
+- [ ] Strategy configuration without code changes
+- [ ] Risk limits from configuration files
+- [ ] Runtime parameter updates via cache
+
+**Market Maker Intelligence**
+- [ ] Track MM order patterns and durations
+- [ ] Calculate toxicity scores for each MM
+- [ ] Identify spoofing and layering behavior
+- [ ] Integration with VPIN calculation
+- [ ] Real-time MM profile updates
+
+**Implementation Files**
+- [ ] `analytics/indicators.py`: ParameterDiscovery class
+- [ ] `analytics/microstructure.py`: VPIN with discovered params
+- [ ] `trading/risk.py`: ConfigBasedRiskManager
+- [ ] `config/discovered.yaml`: Auto-generated parameters
+
+### 📅 UPCOMING (Week 2-3)
 **Day 7-8: Signal Generation**
 - [ ] Confidence scoring system
 - [ ] Multi-strategy signal combination
