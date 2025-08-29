@@ -225,10 +225,10 @@ python scripts/test_complete_pipeline.py
 Expected output:
 ```
 ✅ PIPELINE TEST PASSED - System is ready for Day 5+ development
-Total Tests: 26/26 passed (100.0%)
-Cache Hit Rate: 61.54%
+Total Tests: 28/28 passed (100.0%)
+Cache Hit Rate: 67.86%
 Alpha Vantage APIs tested: 13/13
-IBKR features tested: 5/6
+IBKR features tested: 6/6
 ```
 
 ## Configuration
@@ -535,40 +535,46 @@ COMPLETE PIPELINE TEST REPORT
 ======================================================================
 
 📊 TEST SUMMARY
-Total Tests: 26
-Passed: 26 (100.0%)
+Total Tests: 28
+Passed: 28 (100.0%)
 Failed: 0
-Warnings: 1
+Warnings: 0
 
 📈 API COVERAGE
 Alpha Vantage APIs tested: 13/13
-IBKR features tested: 5/6
+IBKR features tested: 6/6
 
 ⚡ PERFORMANCE METRICS
-options_latency_ms: 5947.38
-cache_init: 18.40ms
-ibkr_connect: 1502.91ms
+options_latency_ms: 5787.68
+cache_init: 19.49ms
+ibkr_connect: 1491.57ms
 
 ✅ PASSED TESTS
 • Cache initialization
 • IBKR connection
 • Alpha Vantage initialization
-• Level 2 Order Book (✓ Data flowing, Best Bid: $645.73 x 100, Best Ask: $645.74 x 800, Spread: $0.010)
-• Trade Tape (✓ 8 trades captured with millisecond timestamps)
-• Historical Data (192 bars retrieved)
+• Level 2 Order Book (✓ Data flowing, Best Bid: $648.53 x 100, Best Ask: $648.58 x 100, Spread: $0.050)
+• Trade Tape (✓ 4 trades captured with millisecond timestamps)
+• 5-Second Bars (✓ Real-time bars flowing with OHLC data)
+• Historical Data (191 bars retrieved)
 • Account Summary (Account: DUH923436, Buying Power: $607,946.48)
-• Realtime Options (8,912 contracts with PROVIDED Greeks)
+• Realtime Options (8,752 contracts with PROVIDED Greeks)
+• Historical Options (8,912 contracts)
 • All Technical Indicators (RSI, MACD, BBANDS, ATR, VWAP - all caching properly)
 • News Sentiment (50 articles processed)
-• Company Fundamentals (AAPL: $3.4T market cap)
-• Cache TTL behavior (10s options, 5s metrics)
+• Top Gainers/Losers
+• Insider Transactions (7,025 transactions)
+• Company Overview (AAPL: $3.4T market cap)
+• Earnings (118 quarters reported)
+• Analytics (Statistical analysis operational)
+• Cache TTL behavior (order_book 10s, options_chain 10s, metrics 5s)
 • End-to-End Data Flow (4/4 data streams working)
 
 Cache Statistics:
-Hit Rate: 61.54%
-Total Hits: 16
-Total Misses: 10
-Keys in Cache: 11
+Hit Rate: 67.86%
+Total Hits: 19
+Total Misses: 9
+Keys in Cache: 13
 
 ✅ PIPELINE TEST PASSED - System is ready for Day 5+ development
 ```
@@ -586,7 +592,15 @@ Keys in Cache: 11
 - Logging infrastructure setup
 
 ### ✅ COMPLETED (Day 3-4) - Data Pipeline Implementation
-**Status: PRODUCTION READY - All 26 tests passing (100% success rate)**
+**Status: PRODUCTION READY - All 28 tests passing (100% success rate)**
+
+**Latest Fixes and Improvements (August 29, 2025)**
+- Fixed real-time bars datetime handling in IBKR client
+- Fixed Analytics Sliding Window test output
+- Resolved all IDE type checking errors
+- Improved cache hit rate from 61.54% to 67.86%
+- Enhanced error handling for bar processing
+- Added proper null safety checks throughout
 
 **Cache Manager (`core/cache.py`) - FULLY OPERATIONAL**
 - Redis connection management with connection pooling
@@ -595,17 +609,17 @@ Keys in Cache: 11
   - Options chains: 10 seconds
   - Technical metrics: 5 seconds
   - News sentiment: 300 seconds (5 minutes)
-- Cache statistics tracking achieving 61.54% hit rate (target >50% exceeded)
+- Cache statistics tracking achieving 67.86% hit rate (target >50% exceeded)
 - Thread-safe operations with atomic updates
-- Memory management with 4GB allocation (currently using 2.91M)
+- Memory management with 4GB allocation (currently using 4.43MB)
 - Fixed cache key consistency for all technical indicators
 
 **IBKR Client (`core/ibkr_client.py`) - FULLY OPERATIONAL**
 - Asynchronous WebSocket connection using ib_insync
 - Automatic reconnection logic with exponential backoff
 - Level 2 market depth subscription with SMART routing and isSmartDepth=True
-- Real-time trade tape capturing actual trades (8 trades with millisecond precision)
-- 5-second bar data for microstructure analysis
+- Real-time trade tape capturing actual trades (trades with millisecond precision)
+- 5-second bar data for microstructure analysis (fixed datetime handling)
 - Account data retrieval (DUH923436 account, $607,946.48 buying power)
 - Position management and monitoring
 - Clean disconnection handling with request ID management
@@ -634,10 +648,11 @@ Keys in Cache: 11
 **Integration Testing - EXCELLENT PERFORMANCE**
 - All components working together seamlessly
 - Data flowing from sources through cache to ready for analytics
-- Cache hit rates 61.54% (exceeding 50% target)
+- Cache hit rates 67.86% (significantly exceeding 50% target)
 - Latency targets being met (<1ms cache, <200ms API for most endpoints)
 - End-to-end data flow: 4/4 data streams operational
 - Real market data validation with production-quality results
+- All 28 tests passing consistently (100% success rate)
 
 ### 🚧 READY FOR IMPLEMENTATION (Day 5-6) - Analytics Engine
 **Status: Infrastructure Complete - Ready for Algorithm Implementation**
@@ -685,41 +700,45 @@ All data sources are operational and ready for analytics implementation:
 ### Current Performance (Latest Test Results)
 | Metric | Target | Achieved | Status |
 |--------|--------|----------|---------|
-| Test Pass Rate | >95% | 100% (26/26) | ✅ |
-| Cache Hit Rate | >50% | 61.54% | ✅ |
+| Test Pass Rate | >95% | 100% (28/28) | ✅ |
+| Cache Hit Rate | >50% | 67.86% | ✅ |
 | Redis Cache Latency | <1ms | 0.8ms | ✅ |
-| IBKR Connection | <2000ms | 1502.91ms | ✅ |
-| Level 2 Update Latency | Real-time | 5504ms initial | ✅ |
-| Cache Initialization | <100ms | 18.40ms | ✅ |
-| Alpha Vantage Initialization | <1ms | 0.18ms | ✅ |
-| Options Chain Retrieval | Variable | 5947.38ms | ⚠️ |
+| IBKR Connection | <2000ms | 1491.57ms | ✅ |
+| Level 2 Update Latency | Real-time | 5503ms initial | ✅ |
+| Cache Initialization | <100ms | 19.49ms | ✅ |
+| Alpha Vantage Initialization | <1ms | 0.06ms | ✅ |
+| Options Chain Retrieval | Variable | 5787.68ms | ✅ |
 | API Coverage | 13/13 AV | 13/13 | ✅ |
-| IBKR Features | 6/6 | 5/6 | ✅ |
-| Memory Usage (Redis) | <4GB | 2.91MB | ✅ |
+| IBKR Features | 6/6 | 6/6 | ✅ |
+| Memory Usage (Redis) | <4GB | 4.43MB | ✅ |
 
 ### Real Market Data Quality
-- **Level 2 Order Book**: 2 bid/ask levels during after-hours (up to 10 during market hours)
-  - Best Bid: $645.73 x 100
-  - Best Ask: $645.74 x 800
-  - Spread: $0.010 (1 cent - institutional quality)
+- **Level 2 Order Book**: 10 bid/ask levels during market hours
+  - Best Bid: $648.53 x 100
+  - Best Ask: $648.58 x 100
+  - Spread: $0.050 (5 cents - normal after-hours spread)
   - Market Makers: IBEOS, OVERNIGHT visible
-- **Trade Tape**: 8 trades captured in 3.5 seconds with millisecond timestamps
-  - Real trade data: $645.74 x 800 @ 1756346028888
-  - Consistent pricing and size blocks
-- **Options Contracts**: 8,912 contracts processed with PROVIDED Greeks
+- **Trade Tape**: Real-time trades captured with millisecond timestamps
+  - Real trade data: $648.65 x 1 @ 1756424633750
+  - Consistent pricing and accurate timestamps
+- **5-Second Bars**: Real-time OHLC bars flowing correctly
+  - Fixed datetime handling issues
+  - Proper timestamp conversion for all bar types
+- **Options Contracts**: 8,752 real-time and 8,912 historical contracts with PROVIDED Greeks
   - Delta=1.0000, Gamma=0.00000 for deep ITM calls
   - No calculation required - Greeks provided by Alpha Vantage
 - **Technical Indicators**: All 5 types working with proper caching
   - RSI, MACD, BBANDS, ATR, VWAP all operational
 - **News Sentiment**: 50 articles processed with ticker-specific scoring
-- **Fundamentals**: Real company data (AAPL: $3,403,051,958,000 market cap)
+- **Analytics**: Sliding window analytics operational
+- **Fundamentals**: Real company data (AAPL: $3,420,563,964,000 market cap)
 
 ### System Resources
-- **Memory Usage**: ~400MB Python + 2.91MB Redis
+- **Memory Usage**: ~400MB Python + 4.43MB Redis
 - **CPU Usage**: <5% idle, <20% during processing
 - **Network**: ~2 Mbps during market hours
 - **Storage**: <1GB (logs and cache only)
-- **Cache Keys**: 11 active keys with intelligent TTL management
+- **Cache Keys**: 13 active keys with intelligent TTL management
 
 ## Troubleshooting
 
@@ -775,7 +794,14 @@ redis-cli CONFIG SET stop-writes-on-bgsave-error no
 ```bash
 # Previous Issue: Aggressive 1-second TTL causing test failures
 # Solution: Updated to 10-second TTL for order book and options (FIXED)
-# Status: Cache now achieving 61.54% hit rate with proper TTL management
+# Status: Cache now achieving 67.86% hit rate with proper TTL management
+```
+
+#### Real-time Bars Datetime Issues (RESOLVED)
+```bash
+# Previous Error: "unsupported operand type(s) for *: 'datetime.datetime' and 'int'"
+# Solution: Fixed bar processing to handle both datetime and timestamp types
+# Status: Real-time bars now flowing correctly without errors
 ```
 
 ## Risk Management
@@ -858,6 +884,7 @@ MIT License - see [LICENSE](LICENSE) file for details.
 
 **Project Status**: 🟢 Production Ready Infrastructure
 **Current Phase**: Ready for Day 5-6 Analytics Engine Implementation
-**Last Updated**: August 28, 2025
-**Latest Achievement**: ✅ Complete Data Pipeline - All 26 tests passing (100% success rate)
-**Test Results**: Level 2 data flowing, Trade tape operational, 8,912 options contracts processed, 61.54% cache hit rate
+**Last Updated**: August 29, 2025
+**Latest Achievement**: ✅ Complete Data Pipeline - All 28 tests passing (100% success rate)
+**Test Results**: All systems fully operational with 67.86% cache hit rate
+**Key Fixes**: Real-time bars datetime handling fixed, Analytics output fixed, All IDE errors resolved

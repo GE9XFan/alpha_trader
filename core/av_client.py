@@ -445,7 +445,7 @@ class AlphaVantageClient:
             }
 
             data = await self._make_request(params)
-            
+
             # Cache the result with proper TTL
             if data:
                 self.cache.set_indicator(symbol, f"BBANDS_{interval}_{time_period}", data)
@@ -480,7 +480,7 @@ class AlphaVantageClient:
             }
 
             data = await self._make_request(params)
-            
+
             # Cache the result with proper TTL
             if data:
                 self.cache.set_indicator(symbol, f"ATR_{interval}_{time_period}", data)
@@ -565,14 +565,14 @@ class AlphaVantageClient:
             if cached:
                 self.stats['cache_hits'] += 1
                 return cached
-            
+
             params = {'function': 'TOP_GAINERS_LOSERS'}
             data = await self._make_request(params)
-            
+
             # Cache the result with 5 minute TTL
             if data:
                 self.cache.set("movers:top", data, ttl=300)
-            
+
             return data
 
         except Exception as e:
@@ -587,18 +587,18 @@ class AlphaVantageClient:
             if cached:
                 self.stats['cache_hits'] += 1
                 return cached
-            
+
             params = {
                 'function': 'INSIDER_TRANSACTIONS',
                 'symbol': symbol
             }
 
             data = await self._make_request(params)
-            
+
             # Cache with 1 hour TTL
             if data:
                 self.cache.set(f"insider:{symbol}", data, ttl=3600)
-            
+
             return data
 
         except Exception as e:
@@ -639,18 +639,18 @@ class AlphaVantageClient:
             if cached:
                 self.stats['cache_hits'] += 1
                 return cached
-            
+
             params = {
                 'function': 'EARNINGS',
                 'symbol': symbol
             }
 
             data = await self._make_request(params)
-            
+
             # Cache with 1 hour TTL
             if data:
                 self.cache.set(f"earnings:{symbol}", data, ttl=3600)
-            
+
             return data
 
         except Exception as e:
@@ -662,8 +662,8 @@ class AlphaVantageClient:
         self,
         SYMBOLS: str,
         INTERVAL: str = "DAILY",
-        RANGE: str = "1month",
-        WINDOW_SIZE: int = 20,
+        RANGE: str = "6month",
+        WINDOW_SIZE: int = 30,
         CALCULATIONS: str = "MEAN,STDDEV,CUMULATIVE_RETURN",
         OHLC: str = "close"
     ) -> Optional[Dict]:
@@ -680,17 +680,17 @@ class AlphaVantageClient:
             }
 
             data = await self._make_request(params)
-            
+
             # Cache analytics data with 5 minute TTL
             if data:
                 self.cache.set(f"analytics:{SYMBOLS}", data, ttl=300)
-            
+
             return data
 
         except Exception as e:
             logger.error(f"Failed to get analytics for {SYMBOLS}: {e}")
             return None
-    
+
     # Backward compatibility alias
     async def get_analytics_fixed_window(self, *args, **kwargs):
         """Deprecated: Use get_analytics_sliding_window instead"""

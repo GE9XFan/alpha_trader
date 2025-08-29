@@ -285,17 +285,18 @@ class IBKRClient:
             
             # Request market depth with Smart Depth enabled for SMART exchange
             logger.debug(f"Requesting SMART market depth for {symbol} with {num_rows} rows")
-            req_id = self.ib.reqMktDepth(
+            # Note: reqMktDepth doesn't return a request ID in ib_insync
+            self.ib.reqMktDepth(
                 contract,
                 numRows=num_rows,
                 isSmartDepth=True,  # CRITICAL: Must be True for SMART exchange
                 mktDepthOptions=[]
             )
             
-            # Store subscription info
+            # Store subscription info for proper cleanup
             self.market_depth_subs[symbol] = {
                 'contract': contract,
-                'req_id': req_id,
+                'isSmartDepth': True,  # Store this for proper cancellation
                 'ticker': None  # Will be set below
             }
             
@@ -531,18 +532,13 @@ class IBKRClient:
                 latest_bar = bars[-1]
 
                 # CRITICAL FIX: Handle RealTimeBar vs BarData
-                # RealTimeBar has 'time' attribute (Unix timestamp in seconds)
+                # RealTimeBar has 'time' attribute (Unix timestamp)
                 # BarData has 'date' attribute (datetime object)
                 
                 import datetime as dt
                 
-                if hasattr(latest_bar, 'time'):
-                    # RealTimeBar - has 'time' as Unix timestamp in seconds
-                    # Convert to milliseconds for consistency
-                    timestamp = int(latest_bar.time * 1000)  # type: ignore
-                    logger.debug(f"Processing RealTimeBar for {symbol}, timestamp: {timestamp}")
-                    
-                elif hasattr(latest_bar, 'date'):
+                # Check for 'date' first (most common - BarData)
+                if hasattr(latest_bar, 'date'):
                     # Historical BarData - has 'date' as datetime
                     if hasattr(latest_bar.date, 'timestamp'):
                         timestamp = int(latest_bar.date.timestamp() * 1000)  # type: ignore
@@ -558,21 +554,48 @@ class IBKRClient:
                         logger.warning(f"Unexpected date format for {symbol}: {type(latest_bar.date)}")
                     logger.debug(f"Processing BarData for {symbol}, timestamp: {timestamp}")
                     
+                elif hasattr(latest_bar, 'time'):
+                    # RealTimeBar - has 'time' which could be Unix timestamp or datetime
+                    # Use getattr to avoid IDE errors while maintaining same logic
+                    bar_time = getattr(latest_bar, 'time', None)
+                    
+                    if bar_time is not None:
+                        if isinstance(bar_time, dt.datetime):
+                            timestamp = int(bar_time.timestamp() * 1000)
+                        elif isinstance(bar_time, (int, float)):
+                            # Unix timestamp in seconds - convert to milliseconds
+                            timestamp = int(bar_time * 1000)
+                        else:
+                            # Unexpected type - fallback to current time
+                            timestamp = int(time.time() * 1000)
+                            logger.warning(f"Unexpected time type for {symbol}: {type(bar_time)}")
+                    else:
+                        # time attribute exists but is None - shouldn't happen
+                        timestamp = int(time.time() * 1000)
+                        logger.warning(f"Bar for {symbol} has time=None, using current time")
+                    
+                    logger.debug(f"Processing RealTimeBar for {symbol}, timestamp: {timestamp}")
+                    
                 else:
                     # Neither 'time' nor 'date' attribute found - shouldn't happen
                     timestamp = int(time.time() * 1000)
                     logger.warning(f"Bar for {symbol} has neither 'time' nor 'date' attribute, using current time")
 
+                # Handle different attribute names for RealTimeBar vs BarData
+                # RealTimeBar uses 'open_' while BarData uses 'open'
+                open_price = getattr(latest_bar, 'open_', None) or getattr(latest_bar, 'open', 0.0)
+                
+                # Ensure all OHLC values are valid floats (not None)
                 bar = BarModel(
                     symbol=symbol,
                     timestamp=timestamp,
-                    open=latest_bar.open,
-                    high=latest_bar.high,
-                    low=latest_bar.low,
-                    close=latest_bar.close,
-                    volume=int(latest_bar.volume),  # Ensure int type
-                    vwap=getattr(latest_bar, 'wap', None),  # Safe attribute access
-                    bar_count=getattr(latest_bar, 'count', None)  # Safe attribute access
+                    open=float(open_price) if open_price else 0.0,
+                    high=float(latest_bar.high) if latest_bar.high else 0.0,
+                    low=float(latest_bar.low) if latest_bar.low else 0.0,
+                    close=float(latest_bar.close) if latest_bar.close else 0.0,
+                    volume=int(latest_bar.volume) if latest_bar.volume else 0,  # Ensure int type
+                    vwap=getattr(latest_bar, 'wap', None) or getattr(latest_bar, 'average', None),  # RealTimeBar has 'wap', BarData has 'average'
+                    bar_count=getattr(latest_bar, 'count', None) or getattr(latest_bar, 'barCount', None)  # RealTimeBar has 'count', BarData has 'barCount'
                 )
 
                 # Store latest bar
@@ -844,12 +867,14 @@ class IBKRClient:
                 
                 # Handle new dictionary format
                 if isinstance(sub_info, dict):
-                    # Cancel market depth subscription using request ID
-                    if 'req_id' in sub_info:
-                        self.ib.cancelMktDepth(sub_info['req_id'])
-                    elif 'contract' in sub_info:
-                        # Fallback to contract if req_id not available (legacy)
-                        self.ib.cancelMktDepth(sub_info['contract'])
+                    # Cancel market depth subscription using contract with same isSmartDepth flag
+                    if 'contract' in sub_info:
+                        # Use the same isSmartDepth flag as when subscribing
+                        is_smart_depth = sub_info.get('isSmartDepth', True)
+                        self.ib.cancelMktDepth(
+                            sub_info['contract'],
+                            isSmartDepth=is_smart_depth
+                        )
                     
                     # Disconnect event handler if ticker exists
                     if 'ticker' in sub_info and 'handler' in sub_info:
@@ -865,10 +890,15 @@ class IBKRClient:
                     # Legacy multiple contracts format
                     elif 'contracts' in sub_info:
                         for contract in sub_info['contracts']:
-                            self.ib.cancelMktDepth(contract)
+                            self.ib.cancelMktDepth(contract, isSmartDepth=True)
                 else:
-                    # Legacy single contract format
-                    self.ib.cancelMktDepth(sub_info)  # type: ignore
+                    # Legacy: sub_info might be a Ticker object or contract
+                    if hasattr(sub_info, 'contract'):
+                        # It's a Ticker object, use its contract
+                        self.ib.cancelMktDepth(sub_info.contract, isSmartDepth=True)
+                    else:
+                        # Assume it's a contract
+                        self.ib.cancelMktDepth(sub_info, isSmartDepth=True)  # type: ignore
                 
                 # Remove from tracking
                 del self.market_depth_subs[symbol]
@@ -920,10 +950,10 @@ class IBKRClient:
             await asyncio.sleep(2)  # Wait for snapshot
             
             if ticker.last and ticker.last > 0:
-                self.ib.cancelMktData(contract)
+                # No need to cancel - snapshot mode auto-terminates
                 return float(ticker.last)
             elif ticker.close and ticker.close > 0:
-                self.ib.cancelMktData(contract)
+                # No need to cancel - snapshot mode auto-terminates
                 return float(ticker.close)
             
             # Method 3: Get from historical data (most recent bar)
@@ -938,16 +968,16 @@ class IBKRClient:
             )
             
             if bars and len(bars) > 0:
-                self.ib.cancelMktData(contract)
+                # No need to cancel - snapshot mode auto-terminates
                 return float(bars[-1].close)
             
             # Method 4: Use bid/ask midpoint
             if ticker.bid and ticker.ask and ticker.bid > 0 and ticker.ask > 0:
                 midpoint = (ticker.bid + ticker.ask) / 2
-                self.ib.cancelMktData(contract)
+                # No need to cancel - snapshot mode auto-terminates
                 return float(midpoint)
             
-            self.ib.cancelMktData(contract)
+            # No need to cancel - snapshot mode auto-terminates
             logger.error(f"Cannot get spot price for {symbol} - all methods failed")
             return None
             

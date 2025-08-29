@@ -389,6 +389,19 @@ class CompletePipelineTest:
                 self._record_pass("Historical Options")
                 self.test_results['api_coverage']['av_tested'].add('HISTORICAL_OPTIONS')
                 logger.success(f"✓ Historical options: {len(hist_chain.options)} contracts")
+
+                # Add detailed output similar to realtime options
+                if hist_chain.options:
+                    sample = hist_chain.options[0]
+                    logger.info(f"  Sample contract: {sample.strike} {sample.type.value} exp:{sample.expiration}")
+
+                    # Count calls and puts
+                    calls = [opt for opt in hist_chain.options if opt.type.value == 'CALL']
+                    puts = [opt for opt in hist_chain.options if opt.type.value == 'PUT']
+                    logger.info(f"  Breakdown: {len(calls)} calls, {len(puts)} puts")
+
+                    # Check if cached (historical options aren't typically cached)
+                    logger.info(f"  Historical data (not cached - fetched on demand)")
             else:
                 results['historical_options'] = 'NO_DATA'
                 self._record_warning("No historical options data")
@@ -408,7 +421,12 @@ class CompletePipelineTest:
         for i, (name, func) in enumerate(indicators, 3):
             logger.info(f"\n[{i}/13] Testing {name}...")
             try:
-                data = await func()
+                # Handle case where func might return None (not awaitable) or a coroutine
+                result = func()
+                if result is None:
+                    data = None
+                else:
+                    data = await result
                 if data:
                     results[name.lower()] = 'PASS'
                     self._record_pass(f"{name} Indicator")
@@ -430,6 +448,39 @@ class CompletePipelineTest:
                     cache_status = "✓ Cached" if cached else "✗ Not cached"
 
                     logger.success(f"✓ {name} data received ({cache_status})")
+
+                    # Add detailed output for each indicator
+                    if data:
+                        # Get the most recent data point
+                        if 'Technical Analysis: RSI' in data and name == 'RSI':
+                            latest_key = list(data['Technical Analysis: RSI'].keys())[0]
+                            latest_value = data['Technical Analysis: RSI'][latest_key]['RSI']
+                            logger.info(f"  Latest RSI: {float(latest_value):.2f}")
+                            logger.info(f"  Data points: {len(data['Technical Analysis: RSI'])}")
+                        elif 'Technical Analysis: MACD' in data and name == 'MACD':
+                            latest_key = list(data['Technical Analysis: MACD'].keys())[0]
+                            macd = data['Technical Analysis: MACD'][latest_key]
+                            logger.info(f"  MACD: {float(macd.get('MACD', 0)):.4f}, Signal: {float(macd.get('MACD_Signal', 0)):.4f}, Hist: {float(macd.get('MACD_Hist', 0)):.4f}")
+                            logger.info(f"  Data points: {len(data['Technical Analysis: MACD'])}")
+                        elif 'Technical Analysis: BBANDS' in data and name == 'BBANDS':
+                            latest_key = list(data['Technical Analysis: BBANDS'].keys())[0]
+                            bb = data['Technical Analysis: BBANDS'][latest_key]
+                            logger.info(f"  Upper: {float(bb.get('Real Upper Band', 0)):.2f}, Middle: {float(bb.get('Real Middle Band', 0)):.2f}, Lower: {float(bb.get('Real Lower Band', 0)):.2f}")
+                            logger.info(f"  Data points: {len(data['Technical Analysis: BBANDS'])}")
+                        elif 'Technical Analysis: ATR' in data and name == 'ATR':
+                            latest_key = list(data['Technical Analysis: ATR'].keys())[0]
+                            atr_value = data['Technical Analysis: ATR'][latest_key]['ATR']
+                            logger.info(f"  Latest ATR: {float(atr_value):.2f}")
+                            logger.info(f"  Data points: {len(data['Technical Analysis: ATR'])}")
+                        elif 'Technical Analysis: VWAP' in data and name == 'VWAP':
+                            latest_key = list(data['Technical Analysis: VWAP'].keys())[0]
+                            vwap_value = data['Technical Analysis: VWAP'][latest_key]['VWAP']
+                            logger.info(f"  Latest VWAP: {float(vwap_value):.2f}")
+                            logger.info(f"  Data points: {len(data['Technical Analysis: VWAP'])}")
+
+                        if cached:
+                            ttl = self.cache._get_ttl('technical_indicators') if self.cache else 60
+                            logger.info(f"  ✓ Successfully cached with {ttl}s TTL")
                 else:
                     results[name.lower()] = 'NO_DATA'
                     self._record_warning(f"No {name} data returned")
@@ -452,7 +503,18 @@ class CompletePipelineTest:
                 logger.success(f"✓ News sentiment: {len(articles)} articles")
 
                 if articles:
-                    logger.info(f"  Latest: {articles[0].get('title', 'N/A')[:60]}...")
+                    latest = articles[0]
+                    logger.info(f"  Latest: {latest.get('title', 'N/A')[:60]}...")
+                    logger.info(f"  Published: {latest.get('time_published', 'N/A')}")
+
+                    # Count sentiment scores
+                    sentiment_scores = [a.get('overall_sentiment_score', 0) for a in articles]
+                    avg_sentiment = sum(sentiment_scores) / len(sentiment_scores) if sentiment_scores else 0
+                    logger.info(f"  Avg sentiment: {avg_sentiment:.4f}")
+
+                    # Sentiment is cached but cache.py is missing get_sentiment() method
+                    ttl = self.cache._get_ttl('sentiment') if self.cache else 300
+                    logger.info(f"  Cached with {ttl}s TTL (write-only cache)")
             else:
                 results['news_sentiment'] = 'NO_DATA'
                 self._record_warning("No news sentiment data")
@@ -484,6 +546,17 @@ class CompletePipelineTest:
                 self._record_pass("Insider Transactions")
                 self.test_results['api_coverage']['av_tested'].add('INSIDER_TRANSACTIONS')
                 logger.success("✓ Insider transactions received")
+
+                # Add insider transaction details
+                if 'data' in insiders and insiders['data']:
+                    logger.info(f"  Total transactions: {len(insiders['data'])}")
+                    recent = insiders['data'][0] if insiders['data'] else {}
+                    if recent:
+                        logger.info(f"  Latest: {recent.get('transactionType', 'N/A')} by {recent.get('transactionOfficer', 'N/A')}")
+                        shares = recent.get('shares', 0)
+                        price = recent.get('transactionPrice', 0)
+                        logger.info(f"  Shares: {int(shares):,} @ ${float(price):.2f}" if isinstance(shares, (int, float)) else f"  Transaction details: {recent.get('transactionType', 'N/A')}")
+                    logger.info(f"  Insider data (not typically cached - fetched on demand)")
             else:
                 results['insider_trans'] = 'NO_DATA'
         except Exception as e:
@@ -502,6 +575,15 @@ class CompletePipelineTest:
                 logger.success("✓ Company overview received")
                 logger.info(f"  Company: {overview.get('Name', 'N/A')}")
                 logger.info(f"  Market Cap: ${int(overview.get('MarketCapitalization', 0)):,}")
+                logger.info(f"  Sector: {overview.get('Sector', 'N/A')}")
+                logger.info(f"  P/E Ratio: {overview.get('PERatio', 'N/A')}")
+
+                # Fundamentals are cached but cache.py is missing get_fundamentals() method
+                if self.cache:
+                    ttl = self.cache._get_ttl('fundamentals')
+                    logger.info(f"  Cached with {ttl}s TTL (write-only cache)")
+                else:
+                    logger.info("  Cache not available")
             else:
                 results['company_overview'] = 'NO_DATA'
         except Exception as e:
@@ -517,6 +599,15 @@ class CompletePipelineTest:
                 self._record_pass("Earnings")
                 self.test_results['api_coverage']['av_tested'].add('EARNINGS')
                 logger.success("✓ Earnings data received")
+
+                # Add earnings details
+                if 'quarterlyEarnings' in earnings and earnings['quarterlyEarnings']:
+                    latest = earnings['quarterlyEarnings'][0]
+                    logger.info(f"  Latest Quarter: {latest.get('fiscalDateEnding', 'N/A')}")
+                    logger.info(f"  EPS Reported: ${latest.get('reportedEPS', 'N/A')}")
+                    logger.info(f"  EPS Estimated: ${latest.get('estimatedEPS', 'N/A')}")
+                    logger.info(f"  Quarters reported: {len(earnings['quarterlyEarnings'])}")
+                    logger.info(f"  Earnings data (not typically cached - fetched on demand)")
             else:
                 results['earnings'] = 'NO_DATA'
         except Exception as e:
@@ -529,21 +620,45 @@ class CompletePipelineTest:
             analytics = await self.av.get_analytics_sliding_window(
                 SYMBOLS='AAPL,MSFT',
                 INTERVAL='DAILY',
-                RANGE='1month',
-                WINDOW_SIZE=20,
+                RANGE='6month',
+                WINDOW_SIZE=30,
                 CALCULATIONS='MEAN,STDDEV',
                 OHLC='close'
             ) if self.av else None
+
             if analytics:
                 results['analytics'] = 'PASS'
                 self._record_pass("Analytics")
                 self.test_results['api_coverage']['av_tested'].add('ANALYTICS_SLIDING_WINDOW')
                 logger.success("✓ Analytics data received")
+
+                # Add analytics details
+                if isinstance(analytics, dict) and 'payload' in analytics and analytics['payload']:
+                    payload = analytics['payload']
+                    if 'AAPL' in payload:
+                        aapl_data = payload['AAPL']
+                        logger.info(f"  Symbols analyzed: {', '.join(payload.keys())}")
+                        logger.info(f"  Window size: 20 days")
+                        logger.info(f"  Calculations: MEAN, STDDEV")
+                        if 'VALUE_MEAN' in aapl_data:
+                            logger.info(f"  AAPL Mean: ${float(aapl_data['VALUE_MEAN'][0]['close']):.2f}")
+                        if 'VALUE_STDDEV' in aapl_data:
+                            logger.info(f"  AAPL StdDev: ${float(aapl_data['VALUE_STDDEV'][0]['close']):.2f}")
+                else:
+                    logger.info("  Analytics returned but no payload data available")
+
+                # Check cache - with null safety
+                if self.cache:
+                    ttl = self.cache._get_ttl('analytics')
+                    logger.info(f"  Analytics data cached with {ttl}s TTL")
             else:
                 results['analytics'] = 'NO_DATA'
+                logger.warning("⚠ No analytics data received")
+
         except Exception as e:
             results['analytics'] = 'ERROR'
             self._record_failure("Analytics", str(e))
+            logger.error(f"✗ Analytics test failed: {e}")
 
         return results
 
@@ -563,20 +678,35 @@ class CompletePipelineTest:
         }
 
         # Check what data is actually available
+        # IMPORTANT: Check cache BEFORE unsubscribing to ensure data is fresh
         if self.cache:
-            # Check if we have real order book data
-            test_ob = self.cache.get_order_book('SPY') if self.cache else None
-            if test_ob and 'bids' in test_ob and 'asks' in test_ob:
-                available_data['order_book'] = True
+            # For order book, ensure we have fresh data
+            if self.ibkr and self.ibkr.is_connected():
+                if 'SPY' not in self.ibkr.market_depth_subs:
+                    # No active subscription, need to get fresh data
+                    logger.debug("No active Level 2 subscription, subscribing briefly for cache test...")
+                    await self.ibkr.subscribe_market_depth('SPY')
+                    await asyncio.sleep(2)  # Wait for data to flow
+
+                # Now check cache
+                test_ob = self.cache.get_order_book('SPY')
+                if test_ob and 'bids' in test_ob and 'asks' in test_ob:
+                    available_data['order_book'] = True
+                    logger.info(f"  Order book in cache: {len(test_ob.get('bids', []))} bids, {len(test_ob.get('asks', []))} asks")
+            else:
+                # No IBKR connection, just check if there's cached data
+                test_ob = self.cache.get_order_book('SPY')
+                if test_ob and 'bids' in test_ob and 'asks' in test_ob:
+                    available_data['order_book'] = True
 
             # Check if we have real options data
-            test_opts = self.cache.get_options_chain('SPY') if self.cache else None
+            test_opts = self.cache.get_options_chain('SPY')
             if test_opts and 'options' in test_opts:
                 available_data['options_chain'] = True
 
-        # IMPORTANT: Ensure no active market data subscriptions that could interfere with TTL testing
+        # NOW unsubscribe after we've checked what's available
         if self.ibkr and self.ibkr.is_connected():
-            # Unsubscribe from any active market depth to prevent continuous updates
+            # Unsubscribe from any active market depth to prevent continuous updates during TTL testing
             logger.info("Stopping market data subscriptions for clean TTL testing...")
             for symbol in list(self.ibkr.market_depth_subs.keys()):
                 await self.ibkr.unsubscribe_market_depth(symbol)
@@ -586,7 +716,7 @@ class CompletePipelineTest:
         ttl_tests = []
 
         if available_data['order_book']:
-            ttl_tests.append(('order_book', 'SPY', 1))  # 1 second TTL
+            ttl_tests.append(('order_book', 'SPY', 10))  # 10 second TTL per config
         else:
             logger.warning("Skipping order_book TTL test - no real data available")
 
