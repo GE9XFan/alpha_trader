@@ -303,3 +303,77 @@ market_makers:
   #   avg_order_duration_ms: 12300
   #   toxicity: 0.15
   #   classification: "retail_flow"
+
+# Analytics Configuration
+analytics:
+  # VPIN Configuration
+  vpin:
+    default_bucket_size: 100  # Default volume bucket size for VPIN
+    trade_cache_size: 10000
+    min_trades: 100
+    activity_thresholds:
+      high: 1000
+      low: 200
+    bulk_volume_classification: true  # Enable BV-VPIN per Easley 2012
+    enable_discovery: true
+    
+  # Order Book Imbalance
+  obi:
+    imbalance_history_size: 1000
+    pressure_history_size: 100
+    normalization_factor: 100
+    enable_vamp: true  # Volume Adjusted Mid Price
+    vamp_levels: 5
+    
+  # GEX Configuration  
+  gex:
+    mm_hedge_ratio: 0.85
+    pin_range_pct: 0.02
+    high_gamma_threshold: 100
+    distance_decay_factor: 50
+    historical_iv_days: 252
+    historical_sample_frequency: 7  # Weekly samples
+    
+  # Market Patterns
+  market_patterns:
+    retail_sizes: [100, 200, 300, 500]
+    institutional_threshold: 1000
+    odd_lot_threshold: 100
+    round_sizes: [100, 200, 500, 1000]
+    persistent_sizes: [100, 500, 1000]
+    sweep_volume_threshold: 5000
+    
+  # Cache Limits
+  cache_limits:
+    gex_history: 500
+    pin_history: 100
+    bar_history: 1000
+    iceberg_history: 100
+    sweep_history: 100
+    
+  # Volatility
+  volatility:
+    trading_days: 252
+    minutes_per_day: 390
+    annualization_factor: 98280  # 252 * 390
+    
+  # Options Flow
+  options_flow:
+    volume_thresholds:
+      sweep: 500
+      block: 1000
+      unusual_ratio: 2.0  # Volume/OI ratio for unusual activity
+    
+  # Market Maker Profiles (Dynamic Discovery)
+  market_makers:
+    enable_discovery: true
+    default_profiles:
+      IBEOS:
+        name: "IB Smart Router"
+        toxicity_base: 0.15
+      CDRG:
+        name: "Citadel Securities"
+        toxicity_base: 0.89
+      OVERNIGHT:
+        name: "Night Session Specialist"
+        toxicity_base: 0.05
