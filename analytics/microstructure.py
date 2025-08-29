@@ -15,6 +15,7 @@ from loguru import logger
 import json
 import asyncio
 from enum import Enum
+from scipy.stats import norm  # For BV-VPIN Z-score calculation
 
 # Import from existing core modules
 import sys
@@ -101,6 +102,15 @@ class VPINCalculator:
         self.trade_classifications: Dict[str, deque] = defaultdict(
             lambda: deque(maxlen=self.vpin_config.get('trade_cache_size', 10000))
         )
+        
+        # NEW: Quote history buffer for Lee-Ready historical classification
+        self.quote_history: Dict[str, deque] = defaultdict(
+            lambda: deque(maxlen=1000)  # Keep last 1000 quotes per symbol
+        )
+        self.quote_timestamp_index: Dict[str, Dict[int, Dict]] = defaultdict(dict)
+        
+        # Debug mode for detailed logging
+        self.debug_mode = self.config.get('system', {}).get('debug', False)
 
         # Metrics tracking
         self.metrics = {
@@ -180,38 +190,116 @@ class VPINCalculator:
                     cancelled_orders=0
                 )
             }
+    
+    def store_quote_snapshot(self, symbol: str, order_book: Dict, timestamp: Optional[int] = None):
+        """
+        Store order book snapshot for historical Lee-Ready classification
+        Should be called whenever Level 2 data is updated
+        """
+        if order_book and order_book.get('bids') and order_book.get('asks'):
+            # Use provided timestamp or current time
+            ts = timestamp if timestamp else int(datetime.now().timestamp() * 1000)
+            
+            quote = {
+                'timestamp': ts,
+                'best_bid': float(order_book['bids'][0]['price']),
+                'best_ask': float(order_book['asks'][0]['price']),
+                'bid_size': float(order_book['bids'][0].get('size', 0)),
+                'ask_size': float(order_book['asks'][0].get('size', 0))
+            }
+            
+            # Store in history
+            self.quote_history[symbol].append(quote)
+            
+            # Index by timestamp for fast lookup
+            self.quote_timestamp_index[symbol][ts] = quote
+            
+            # Clean old entries from index (keep last 1000)
+            if len(self.quote_timestamp_index[symbol]) > 1000:
+                old_timestamps = sorted(self.quote_timestamp_index[symbol].keys())[:-1000]
+                for old_ts in old_timestamps:
+                    del self.quote_timestamp_index[symbol][old_ts]
+    
+    def _get_quote_at_time(self, symbol: str, timestamp: int, tolerance_ms: int = 100) -> Optional[Dict]:
+        """
+        Get historical quote nearest to trade timestamp
+        Tolerance: Accept quotes within 100ms of trade
+        """
+        # Check exact timestamp match first
+        if timestamp in self.quote_timestamp_index[symbol]:
+            return self.quote_timestamp_index[symbol][timestamp]
+        
+        # Find nearest quote within tolerance
+        if symbol in self.quote_history and self.quote_history[symbol]:
+            for quote in reversed(self.quote_history[symbol]):
+                if abs(quote['timestamp'] - timestamp) <= tolerance_ms:
+                    return quote
+                if quote['timestamp'] < timestamp - tolerance_ms:
+                    break  # No point looking further back
+        
+        return None
 
     def classify_trade(self, trade: Dict, order_book: Optional[Dict] = None) -> TradeSide:
         """
-        Lee-Ready algorithm for trade classification
-        Enhanced with tick test and quote rule
+        Lee-Ready algorithm with proper temporal alignment
+        Per Lee & Ready (1991) - uses quotes at time of trade
         """
-        # Try to get order book at trade time
-        if not order_book:
-            order_book = self.cache.get_order_book(trade['symbol'])
-
-        # Quote rule: Compare to bid/ask
+        # Validate trade structure and extract fields
+        # Handle different field names that might be used
+        trade_price = trade.get('price', trade.get('last', trade.get('trade_price')))
+        if trade_price is None:
+            logger.warning(f"Trade missing price field: {trade.keys()}")
+            return TradeSide.UNKNOWN
+        
+        trade_price = float(trade_price)
+        trade_time = int(trade.get('timestamp', 0))
+        symbol = trade.get('symbol', '')
+        
+        # Step 1: Try to get historical quote at trade time
+        historical_quote = self._get_quote_at_time(symbol, trade_time)
+        
+        # Use provided order book, historical quote, or current quote as fallback
         if order_book and order_book.get('bids') and order_book.get('asks'):
-            best_bid = order_book['bids'][0]['price'] if order_book['bids'] else 0
-            best_ask = order_book['asks'][0]['price'] if order_book['asks'] else float('inf')
-            mid_price = (best_bid + best_ask) / 2 if best_bid and best_ask < float('inf') else trade['price']
-
-            # Clear buy/sell
-            if trade['price'] >= best_ask:
-                return TradeSide.BUY
-            elif trade['price'] <= best_bid:
-                return TradeSide.SELL
-            # At midpoint - use tick test
-            elif abs(trade['price'] - mid_price) < 0.0001:
-                return self._tick_test(trade['symbol'], trade['price'])
-            # Above/below midpoint
-            elif trade['price'] > mid_price:
-                return TradeSide.BUY
+            best_bid = float(order_book['bids'][0]['price'])
+            best_ask = float(order_book['asks'][0]['price'])
+            if self.debug_mode:
+                logger.debug(f"Using provided order book: bid={best_bid:.2f}, ask={best_ask:.2f}")
+        elif historical_quote:
+            best_bid = historical_quote['best_bid']
+            best_ask = historical_quote['best_ask']
+            if self.debug_mode:
+                logger.debug(f"Using historical quote from {trade_time - historical_quote['timestamp']}ms ago")
+        else:
+            # No historical quotes - try current order book as last resort
+            current_book = self.cache.get_order_book(symbol)
+            if current_book and current_book.get('bids') and current_book.get('asks'):
+                best_bid = float(current_book['bids'][0]['price'])
+                best_ask = float(current_book['asks'][0]['price'])
+                if self.debug_mode:
+                    logger.debug(f"WARNING: Using current order book (not historical)")
             else:
-                return TradeSide.SELL
-
-        # Fallback to tick test if no order book
-        return self._tick_test(trade['symbol'], trade['price'])
+                # No quotes available - fall back to tick test
+                return self._tick_test(symbol, trade_price)
+        
+        # Lee-Ready Quote Rule (per original 1991 paper)
+        mid_price = (best_bid + best_ask) / 2
+        
+        # Classification logic from Lee & Ready (1991)
+        if trade_price > best_ask:
+            return TradeSide.BUY
+        elif trade_price < best_bid:
+            return TradeSide.SELL
+        elif trade_price == best_ask:
+            return TradeSide.BUY
+        elif trade_price == best_bid:
+            return TradeSide.SELL
+        elif trade_price > mid_price:
+            return TradeSide.BUY
+        elif trade_price < mid_price:
+            return TradeSide.SELL
+        else:  # trade_price == mid_price
+            # Use tick test for midpoint trades
+            return self._tick_test(symbol, trade_price)
 
     def _tick_test(self, symbol: str, current_price: float) -> TradeSide:
         """Tick test for trade classification"""
@@ -230,37 +318,73 @@ class VPINCalculator:
 
     def _bulk_volume_classify(self, trades: List[Dict]) -> Tuple[float, float]:
         """
-        Bulk Volume Classification (BV-VPIN) per Easley, López de Prado, O'Hara 2012
-        Assigns entire bucket volume based on price movement
+        Bulk Volume Classification per Easley, López de Prado, O'Hara (2012)
+        'Flow Toxicity and Liquidity in a High-Frequency World'
+        Review of Financial Studies 25(5), 1457-1493
+        
+        Uses standardized price changes (Z-score) and normal CDF for classification
         """
-        if not trades:
-            return 0, 0
+        if not trades or len(trades) < 2:
+            # Not enough data for classification
+            total_volume = sum(t.get('size', 0) for t in trades) if trades else 0
+            return total_volume / 2, total_volume / 2
         
-        total_volume = sum(t['size'] for t in trades)
+        # Extract prices and volumes, handling potential missing fields
+        prices = []
+        volumes = []
+        for trade in trades:
+            # Handle different field names
+            price = trade.get('price', trade.get('last', trade.get('trade_price', 0)))
+            size = trade.get('size', trade.get('volume', trade.get('quantity', 0)))
+            if price > 0 and size > 0:
+                prices.append(float(price))
+                volumes.append(float(size))
         
-        # Get price at start and end of bucket
-        start_price = trades[0]['price']
-        end_price = trades[-1]['price']
+        if len(prices) < 2:
+            total_volume = sum(volumes)
+            return total_volume / 2, total_volume / 2
         
-        # Calculate VWAP for the bucket
-        total_value = sum(t['price'] * t['size'] for t in trades)
-        vwap = total_value / total_volume if total_volume > 0 else start_price
+        total_volume = sum(volumes)
         
-        # Bulk classification based on price movement and VWAP
-        if end_price > vwap:
-            # Price above VWAP at end = buy pressure
-            buy_ratio = min(1.0, (end_price - vwap) / vwap * 100)  # Scaled by price change
-            buy_volume = total_volume * (0.5 + buy_ratio * 0.5)
-            sell_volume = total_volume - buy_volume
-        elif end_price < vwap:
-            # Price below VWAP at end = sell pressure
-            sell_ratio = min(1.0, (vwap - end_price) / vwap * 100)
-            sell_volume = total_volume * (0.5 + sell_ratio * 0.5)
-            buy_volume = total_volume - sell_volume
-        else:
-            # Neutral - split 50/50
-            buy_volume = total_volume / 2
-            sell_volume = total_volume / 2
+        # Calculate log returns for the bucket (Easley et al. 2012 method)
+        log_returns = []
+        for i in range(1, len(prices)):
+            if prices[i-1] > 0 and prices[i] > 0:
+                log_return = np.log(prices[i] / prices[i-1])
+                log_returns.append(log_return)
+        
+        if not log_returns:
+            # No valid returns - split 50/50
+            return total_volume / 2, total_volume / 2
+        
+        # Calculate standardized price change (Z-score)
+        # Per Easley et al. (2012) Section 3.2
+        mean_return = np.mean(log_returns)
+        std_return = np.std(log_returns, ddof=1) if len(log_returns) > 1 else np.std(log_returns)
+        
+        # Handle zero variance case
+        if std_return < 1e-10:
+            # No price movement - neutral classification
+            return total_volume / 2, total_volume / 2
+        
+        # Z-score of the bucket's price change
+        # Using sample size adjustment for small samples
+        z_score = mean_return / (std_return / np.sqrt(len(log_returns)))
+        
+        # Apply CDF of standard normal distribution
+        # This gives probability of buy-initiated volume
+        buy_probability = norm.cdf(z_score)
+        
+        # Classify entire bucket volume
+        buy_volume = total_volume * buy_probability
+        sell_volume = total_volume * (1 - buy_probability)
+        
+        # Log classification for debugging
+        if self.debug_mode:
+            logger.debug(f"BV-VPIN: {len(trades)} trades, {len(log_returns)} returns")
+            logger.debug(f"  Mean return: {mean_return:.6f}, Std: {std_return:.6f}")
+            logger.debug(f"  Z-score: {z_score:.4f}, Buy prob: {buy_probability:.4f}")
+            logger.debug(f"  Buy vol: {buy_volume:.0f}, Sell vol: {sell_volume:.0f}")
         
         return buy_volume, sell_volume
 
@@ -285,10 +409,10 @@ class VPINCalculator:
                 side = self.classify_trade(trade)
 
                 # Store classification for future tick tests
-                self.trade_classifications[trade['symbol']].append({
-                    'price': trade['price'],
+                self.trade_classifications[trade.get('symbol', '')].append({
+                    'price': float(trade.get('price', 0)),
                     'side': side.value,
-                    'timestamp': trade['timestamp']
+                    'timestamp': int(trade.get('timestamp', 0))
                 })
 
                 if side == TradeSide.BUY:
@@ -306,7 +430,7 @@ class VPINCalculator:
 
         if total_volume > 0:
             return VolumeBar(
-                timestamp=trades[-1]['timestamp'],
+                timestamp=int(trades[-1].get('timestamp', 0)),
                 buy_volume=buy_volume,
                 sell_volume=sell_volume,
                 total_volume=total_volume,

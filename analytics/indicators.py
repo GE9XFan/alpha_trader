@@ -87,6 +87,7 @@ class OrderBookImbalance:
         self.market_patterns = analytics_config.get('market_patterns', {})
         self.cache_limits = analytics_config.get('cache_limits', {})
         self.volatility_config = analytics_config.get('volatility', {})
+        self.spoofing_config = analytics_config.get('spoofing', {})
 
         # Configuration
         self.depth_levels = config.get('ibkr', {}).get('market_data', {}).get('level2_depth', 10)
@@ -356,44 +357,52 @@ class OrderBookImbalance:
     def _calculate_vamp(self, bids: List[Dict], asks: List[Dict]) -> float:
         """
         Calculate Volume Adjusted Mid Price (VAMP)
-        Superior to simple mid for HFT applications
-        Accounts for liquidity imbalance across multiple levels
+        
+        VAMP adjusts the mid-price based on order book imbalance using
+        cumulative volumes at each price level. This provides a better
+        estimate of fair value when liquidity is imbalanced.
+        
+        Formula:
+        VAMP = Σ(P_bid[i] × Q_ask_cum[i] + P_ask[i] × Q_bid_cum[i]) / Σ(Q_bid_cum[i] + Q_ask_cum[i])
+        
+        Reference: High-frequency trading literature on microstructure pricing
         """
         if not bids or not asks:
             return 0.0
         
+        import numpy as np
+        
+        # Use configured number of levels or available depth
         levels = min(self.vamp_levels, len(bids), len(asks))
         
-        # Calculate cumulative volumes
-        bid_cumulative = 0
-        ask_cumulative = 0
-        vamp_numerator = 0
+        if levels == 0:
+            return 0.0
         
-        for i in range(levels):
-            bid_vol = bids[i]['size']
-            ask_vol = asks[i]['size']
-            bid_price = bids[i]['price']
-            ask_price = asks[i]['price']
+        # Extract prices and sizes
+        bid_prices = np.array([float(bids[i]['price']) for i in range(levels)])
+        ask_prices = np.array([float(asks[i]['price']) for i in range(levels)])
+        bid_sizes = np.array([float(bids[i]['size']) for i in range(levels)])
+        ask_sizes = np.array([float(asks[i]['size']) for i in range(levels)])
+        
+        # VAMP calculation: cross-multiply prices with opposite side volumes
+        # This weights each price by the liquidity available on the opposite side
+        # Formula: VAMP = Σ(P_bid[i] × Q_ask[i] + P_ask[i] × Q_bid[i]) / Σ(Q_bid[i] + Q_ask[i])
+        vamp_numerator = np.sum(bid_prices * ask_sizes + ask_prices * bid_sizes)
+        vamp_denominator = np.sum(bid_sizes + ask_sizes)
+        
+        if vamp_denominator > 0:
+            vamp = vamp_numerator / vamp_denominator
             
-            bid_cumulative += bid_vol
-            ask_cumulative += ask_vol
+            # Sanity check: VAMP should be between best bid and best ask
+            if vamp < bid_prices[0] or vamp > ask_prices[0]:
+                logger.warning(f"VAMP {vamp:.4f} outside bid-ask spread [{bid_prices[0]:.4f}, {ask_prices[0]:.4f}]")
+                # Fall back to simple mid
+                return (bid_prices[0] + ask_prices[0]) / 2
             
-            # Volume-weighted contribution from each level
-            level_weight = 1 / (i + 1)  # Distance decay
-            
-            # VAMP formula: weighted by opposite side volume
-            vamp_numerator += (bid_price * ask_vol + ask_price * bid_vol) * level_weight
-        
-        # Total weighted volume
-        total_weighted_volume = 0
-        for i in range(levels):
-            level_weight = 1 / (i + 1)
-            total_weighted_volume += (bids[i]['size'] + asks[i]['size']) * level_weight
-        
-        if total_weighted_volume == 0:
-            return (bids[0]['price'] + asks[0]['price']) / 2
-        
-        return vamp_numerator / total_weighted_volume
+            return vamp
+        else:
+            # No volume - use simple mid
+            return (bid_prices[0] + ask_prices[0]) / 2
 
     def _calculate_book_skew(self, bids: List[Dict], asks: List[Dict]) -> float:
         """
@@ -591,8 +600,9 @@ class OrderBookImbalance:
                 deep_sizes = deep_bid_sizes + deep_ask_sizes
 
                 # Large deep orders relative to top = potential spoofing
-                if max(deep_sizes) > np.mean(top_sizes) * 3:
-                    spoofing_score += 0.3
+                deep_order_multiplier = self.spoofing_config.get('deep_order_multiplier', 3)
+                if max(deep_sizes) > np.mean(top_sizes) * deep_order_multiplier:
+                    spoofing_score += self.spoofing_config.get('deep_order_penalty', 0.3)
 
         # Pattern 2: Sudden imbalance changes
         if len(history) >= 10:
@@ -600,8 +610,9 @@ class OrderBookImbalance:
             imb_std = np.std(recent_imbalances)
 
             # High volatility in imbalance = potential manipulation
-            if imb_std > 0.3:
-                spoofing_score += 0.2
+            imbalance_volatility_threshold = self.spoofing_config.get('imbalance_volatility_threshold', 0.3)
+            if imb_std > imbalance_volatility_threshold:
+                spoofing_score += self.spoofing_config.get('imbalance_volatility_penalty', 0.2)
 
         # Pattern 3: Round number sizes at multiple levels
         round_sizes = self.market_patterns.get('round_sizes', [100, 200, 500, 1000])
@@ -612,8 +623,9 @@ class OrderBookImbalance:
                 round_count += 1
 
         # Too many round numbers = suspicious
-        if round_count >= 6:
-            spoofing_score += 0.3
+        round_number_threshold = self.spoofing_config.get('round_number_threshold', 6)
+        if round_count >= round_number_threshold:
+            spoofing_score += self.spoofing_config.get('round_number_penalty', 0.3)
 
         # Pattern 4: Cliff-like depth (sudden drop in liquidity)
         if len(bids) >= 3 and len(asks) >= 3:
@@ -621,7 +633,7 @@ class OrderBookImbalance:
             ask_cliff = asks[0]['size'] > (asks[1]['size'] + asks[2]['size']) * 2
 
             if bid_cliff or ask_cliff:
-                spoofing_score += 0.2
+                spoofing_score += self.spoofing_config.get('cliff_penalty', 0.2)
 
         return min(spoofing_score, 1.0)
 

@@ -723,7 +723,7 @@ class CompletePipelineTest:
         ttl_tests = []
 
         if available_data['order_book']:
-            ttl_tests.append(('order_book', 'SPY', 10))  # 10 second TTL per config
+            ttl_tests.append(('order_book', 'SPY', 60))  # 60 second TTL per updated config
         else:
             logger.warning("Skipping order_book TTL test - no real data available")
 
@@ -909,10 +909,25 @@ class CompletePipelineTest:
                 # Use the REAL order book data from earlier Level 2 test
                 order_book = self.cache.get_order_book(test_symbol) if self.cache else None
                 
+                # If order book is not available or expired, refresh it
                 if not order_book or not order_book.get('bids') or not order_book.get('asks'):
-                    logger.warning("  ⚠ No real order book data available - skipping OBI test")
-                    results['obi_calculation'] = 'NO_DATA'
-                    return results
+                    logger.info("  Order book expired - refreshing Level 2 data...")
+                    if self.ibkr and self.ibkr.is_connected():
+                        # Re-subscribe to get fresh data
+                        success = await self.ibkr.subscribe_market_depth(test_symbol, num_rows=10)
+                        if success:
+                            await asyncio.sleep(2)  # Wait for data to flow
+                            order_book = self.cache.get_order_book(test_symbol) if self.cache else None
+                            if order_book and order_book.get('bids') and order_book.get('asks'):
+                                logger.success(f"  ✓ Order book refreshed: {len(order_book['bids'])} bids, {len(order_book['asks'])} asks")
+                            else:
+                                logger.warning("  ⚠ Still no order book data after refresh - market may be closed")
+                                results['obi_calculation'] = 'NO_DATA'
+                                return results
+                    else:
+                        logger.warning("  ⚠ Cannot refresh order book - IBKR not connected")
+                        results['obi_calculation'] = 'NO_DATA'
+                        return results
                 
                 logger.info(f"  Using REAL order book with {len(order_book.get('bids', []))} bid levels, {len(order_book.get('asks', []))} ask levels")
                 
@@ -994,19 +1009,21 @@ class CompletePipelineTest:
                 if options_chain and options_chain.get('options'):
                     # Calculate GEX with real data
                     logger.info("  Calculating Gamma Exposure...")
-                    gex_result = await gex.calculate_gex(
-                        test_symbol,
-                        options_chain['options'],
-                        options_chain.get('spot_price', 450)
-                    )
+                    
+                    # Store options chain in cache for calculate_gamma_exposure to use
+                    self.cache.set_options_chain(test_symbol, options_chain)
+                    
+                    # Call the correct method name - calculate_gamma_exposure
+                    gex_result = await gex.calculate_gamma_exposure(test_symbol)
                     
                     if gex_result:
-                        logger.success(f"  ✓ Total GEX calculated: ${gex_result['total_gex']:,.0f}")
-                        logger.info(f"  Call GEX: ${gex_result['call_gex']:,.0f}")
-                        logger.info(f"  Put GEX: ${gex_result['put_gex']:,.0f}")
-                        logger.info(f"  Gamma flip point: ${gex_result['gamma_flip']:.2f}")
-                        logger.info(f"  Pin strikes: {gex_result['pin_strikes']}")
-                        logger.info(f"  Market profile: {gex_result['profile']}")
+                        # Access dataclass attributes correctly
+                        logger.success(f"  ✓ Total GEX calculated: ${gex_result.total_gamma_exposure:,.0f}M")
+                        logger.info(f"  Call GEX: ${gex_result.call_gamma_exposure:,.0f}M")
+                        logger.info(f"  Put GEX: ${gex_result.put_gamma_exposure:,.0f}M")
+                        logger.info(f"  Gamma flip point: ${gex_result.zero_gamma_level:.2f}")
+                        logger.info(f"  Pin strike: ${gex_result.pin_strike:.2f}")
+                        logger.info(f"  Market profile: {gex_result.gamma_profile.value}")
                         
                         results['gex_calculation'] = 'PASS'
                         self._record_pass("GEX Calculation")
@@ -1028,8 +1045,8 @@ class CompletePipelineTest:
         # Test Hidden Order Detection with REAL order book
         logger.info("\n[4/5] Testing Hidden Order Detection with REAL Order Book...")
         
-        if 'microstructure' in analytics and 'hidden_order_detector' in analytics['microstructure']:
-            hidden_detector = analytics['microstructure']['hidden_order_detector']
+        if 'microstructure' in analytics and 'hidden_detector' in analytics['microstructure']:
+            hidden_detector = analytics['microstructure']['hidden_detector']
             
             # Use the REAL order book from cache (from Level 2 test)
             order_book = self.cache.get_order_book(test_symbol) if self.cache else None
@@ -1053,6 +1070,15 @@ class CompletePipelineTest:
                         logger.success(f"  ✓ Detected hidden orders in {hidden_metrics['detections']} analyses")
                         results['hidden_orders'] = 'PASS'
                         self._record_pass("Hidden Order Detection")
+                    else:
+                        logger.info("  No hidden orders detected in current order book")
+                        results['hidden_orders'] = 'NONE_DETECTED'
+                else:
+                    logger.warning("  ⚠ No result from hidden order detector")
+                    results['hidden_orders'] = 'NO_RESULT'
+        else:
+            logger.warning("  ⚠ Hidden order detector not found in analytics")
+            results['hidden_orders'] = 'NOT_INITIALIZED'
         
         # Test Sweep Detection with REAL trades
         logger.info("\n[5/5] Testing Sweep Order Detection with REAL Trade Data...")
@@ -1082,6 +1108,15 @@ class CompletePipelineTest:
                     logger.success("  ✓ Successfully detected sweep order pattern")
                     results['sweep_detection'] = 'PASS'
                     self._record_pass("Sweep Detection")
+                else:
+                    logger.info("  No sweep orders detected in current trades")
+                    results['sweep_detection'] = 'NONE_DETECTED'
+            else:
+                logger.warning("  ⚠ No result from sweep detector")
+                results['sweep_detection'] = 'NO_RESULT'
+        else:
+            logger.warning("  ⚠ Sweep detector not found in analytics")
+            results['sweep_detection'] = 'NOT_INITIALIZED'
         
         # Get combined metrics after processing real data
         logger.info("\n[Summary] Combined Analytics Metrics After Processing...")

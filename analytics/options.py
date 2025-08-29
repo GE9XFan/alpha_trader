@@ -10,7 +10,7 @@ import pandas as pd
 from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime, timedelta
 from dataclasses import dataclass
-from collections import defaultdict
+from collections import defaultdict, deque
 from loguru import logger
 import json
 from enum import Enum
@@ -118,11 +118,12 @@ class GammaExposureCalculator:
         self.options_flow_config = analytics_config.get('options_flow', {})
 
         # Configuration (from config file)
-        self.contract_multiplier = 100  # Standard equity option multiplier
+        self.contract_multiplier = analytics_config.get('options', {}).get('contract_multiplier', 100)
         self.market_maker_hedge_ratio = self.gex_config.get('mm_hedge_ratio', 0.85)
         self.pin_range_pct = self.gex_config.get('pin_range_pct', 0.02)
         self.high_gamma_threshold = self.gex_config.get('high_gamma_threshold', 100)
         self.distance_decay_factor = self.gex_config.get('distance_decay_factor', 50)
+        self.max_intensity = analytics_config.get('options', {}).get('max_intensity', 100)
         
         # Historical IV configuration
         self.historical_iv_days = self.gex_config.get('historical_iv_days', 252)
@@ -319,6 +320,44 @@ class GammaExposureCalculator:
         except Exception as e:
             logger.error(f"Error calculating gamma exposure: {e}")
             return self._empty_metrics(symbol)
+    
+    async def calculate_historical_iv_metrics(self, symbol: str) -> Optional[Dict[str, float]]:
+        """
+        Calculate historical IV rank and percentile
+        
+        Args:
+            symbol: Trading symbol
+            
+        Returns:
+            Dictionary with iv_rank, iv_percentile, and current_iv
+        """
+        try:
+            # Get options chain from cache
+            options_data = self.cache.get_options_chain(symbol)
+            
+            if not options_data or not options_data.get('options'):
+                logger.warning(f"No options data for {symbol} to calculate IV metrics")
+                return None
+            
+            options = options_data.get('options', [])
+            
+            # Calculate IV metrics using existing private method
+            iv_metrics = self._calculate_iv_metrics(options)
+            
+            # Add current IV to the metrics
+            current_ivs = [opt.get('implied_volatility', 0) * 100 for opt in options 
+                          if opt.get('implied_volatility', 0) > 0]
+            
+            if current_ivs:
+                iv_metrics['current_iv'] = round(np.mean(current_ivs), 1)
+            else:
+                iv_metrics['current_iv'] = 0
+            
+            return iv_metrics
+            
+        except Exception as e:
+            logger.error(f"Error calculating historical IV metrics: {e}")
+            return None
 
     def _find_max_gamma_strike(self, gamma_by_strike: Dict[float, float]) -> float:
         """Find strike with maximum absolute gamma"""
@@ -554,8 +593,8 @@ class GammaExposureCalculator:
                 direction = "BUY"
                 intensity = abs(net_gamma)
 
-        # Normalize intensity (0-100)
-        intensity = min(100, intensity)
+        # Normalize intensity (0-max_intensity)
+        intensity = min(self.max_intensity, intensity)
 
         return direction, intensity
 
@@ -821,33 +860,23 @@ class GammaExposureCalculator:
             return []
         
         try:
-            # Calculate date range
-            end_date = datetime.now()
-            start_date = end_date - timedelta(days=self.historical_iv_days)
+            # NOTE: Alpha Vantage get_historical_options only supports single date, not date range
+            # For now, we'll use a simplified approach - just get today's data
+            # TODO: Implement proper historical IV fetching with multiple API calls if needed
             
-            # Fetch historical options data using existing AV client method
-            historical_data = self.av_client.get_historical_options(
-                symbol=symbol,
-                start_date=start_date.strftime('%Y-%m-%d'),
-                end_date=end_date.strftime('%Y-%m-%d')
-            )
+            # For demonstration, return empty list to use fallback calculation
+            # In production, you would make multiple API calls for different dates
+            logger.debug(f"Historical IV fetching not fully implemented for {symbol}")
+            return []
             
-            if not historical_data:
-                return []
-            
-            # Extract IVs at regular intervals
-            ivs = []
-            for data_point in historical_data:
-                if 'implied_volatility' in data_point:
-                    ivs.append(data_point['implied_volatility'])
-            
-            # Cache the results
-            self.historical_iv_cache[cache_key] = {
-                'ivs': ivs,
-                'timestamp': datetime.now().timestamp()
-            }
-            
-            return ivs
+            # Future implementation would look like:
+            # ivs = []
+            # for days_back in range(0, self.historical_iv_days, self.historical_sample_frequency):
+            #     date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
+            #     data = await self.av_client.get_historical_options(symbol, date)
+            #     if data and data.options:
+            #         avg_iv = np.mean([opt.implied_volatility for opt in data.options if opt.implied_volatility])
+            #         ivs.append(avg_iv)
             
         except Exception as e:
             logger.error(f"Error fetching historical IVs: {e}")

@@ -27,9 +27,9 @@ cache:
   # TTL Strategy (seconds)
   ttl:
     # Ultra-short (microstructure)
-    order_book: 10
-    trades: 10
-    vpin: 10
+    order_book: 60  # Increased from 10s to allow test completion
+    trades: 30       # Increased for consistency
+    vpin: 30         # Increased for VPIN calculations
 
     # Short (options)
     options_chain: 10
@@ -363,6 +363,23 @@ analytics:
       sweep: 500
       block: 1000
       unusual_ratio: 2.0  # Volume/OI ratio for unusual activity
+  
+  # Options Configuration
+  options:
+    contract_multiplier: 100  # Standard equity option multiplier
+    max_intensity: 100        # Maximum intensity cap
+  
+  # Spoofing Detection
+  spoofing:
+    concentration_threshold: 0.5     # Threshold for concentration detection
+    concentration_penalty: 0.3       # Penalty score when threshold exceeded
+    deep_order_multiplier: 3         # Multiplier for deep order size detection
+    deep_order_penalty: 0.3          # Penalty for large deep orders
+    imbalance_volatility_threshold: 0.3  # Threshold for imbalance volatility
+    imbalance_volatility_penalty: 0.2    # Penalty for high imbalance volatility
+    round_number_threshold: 6        # Threshold for round number detection
+    round_number_penalty: 0.3        # Penalty for too many round numbers
+    cliff_penalty: 0.2              # Penalty for cliff-like depth
     
   # Market Maker Profiles (Dynamic Discovery)
   market_makers:

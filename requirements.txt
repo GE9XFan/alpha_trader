@@ -23,6 +23,7 @@ hiredis==2.3.2  # C parser for better performance
 # Data Processing
 numpy==1.26.0
 pandas==2.1.0
+scipy==1.11.4  # For BV-VPIN Z-score calculation
 
 # Data Validation
 pydantic==2.5.0
