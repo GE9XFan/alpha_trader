@@ -1,0 +1,14 @@
+{
+    "typeCheckingMode": "basic",
+    "reportMissingModuleSource": "none",
+    "venvPath": ".",
+    "venv": "venv",
+    "pythonVersion": "3.11",
+    "executionEnvironments": [
+        {
+            "root": ".",
+            "pythonVersion": "3.11",
+            "extraPaths": []
+        }
+    ]
+}

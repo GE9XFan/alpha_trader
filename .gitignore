@@ -1,0 +1,58 @@
+# Environment files
+.env
+config/discovered.yaml
+
+# API Keys and Secrets - NEVER commit actual config.yaml with keys
+# config/config.yaml  # Uncomment after adding real keys
+
+# Data files
+data/redis/*
+data/cache/*
+*.aof
+*.rdb
+logs/*.log
+logs/*.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+*.coverage
+
+# Distribution
+dist/
+build/
+*.egg-info/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# MacOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*~
