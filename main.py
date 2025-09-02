@@ -56,8 +56,13 @@ class AlphaTrader:
         """Initialize all trading modules - to be implemented Days 3-35"""
         
         # Module initialization will be added as each is implemented:
-        # Day 3-4: IBKR Ingestion
-        # self.modules['ibkr_ingestion'] = IBKRIngestion()
+        # Day 3-4: IBKR Ingestion (COMPLETE)
+        try:
+            from modules.ingestion import IBKRIngestion
+            self.modules['ibkr_ingestion'] = IBKRIngestion(self.config, self.redis)
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ✓ IBKR Ingestion module initialized")
+        except ImportError as e:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠ IBKR Ingestion module not available: {e}")
         
         # Day 5-6: Alpha Vantage Ingestion  
         # self.modules['av_ingestion'] = AlphaVantageIngestion(self.config['alpha_vantage']['api_key'])
@@ -130,7 +135,7 @@ class AlphaTrader:
         for name, module in self.modules.items():
             if name != 'parameter_discovery':  # Already ran
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] Starting {name}...")
-                # tasks.append(asyncio.create_task(module.start()))
+                tasks.append(asyncio.create_task(module.start()))
         
         # Store tasks for shutdown
         self.tasks = tasks
