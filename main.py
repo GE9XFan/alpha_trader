@@ -42,23 +42,50 @@ class AlphaTrader:
     def __init__(self, config_path: str = 'config/config.yaml'):
         """
         Initialize the AlphaTrader system.
-        
-        TODO: Implement configuration loading from config/config.yaml
-        TODO: Initialize Redis connection
-        TODO: Set up logging configuration
+        Production-ready initialization with all critical components.
         """
+        # Set up logging first so we can log everything
+        self._setup_logging()
+        self.logger = logging.getLogger(__name__)
+        
         # Load configuration from config/config.yaml
         self.config = self._load_config(config_path)
         
-        # Initialize Redis connection
-        self.redis = None  # TODO: Initialize with config parameters
+        # Initialize Redis connection immediately
+        self.setup_redis()
         
         # Module instances (will be initialized in setup())
         self.modules = {}
         
-        # Logging setup
-        self.logger = logging.getLogger(__name__)
+    def _setup_logging(self):
+        """
+        Set up logging configuration for the application.
+        """
+        # Create logs directory if it doesn't exist
+        log_dir = Path('logs')
+        log_dir.mkdir(exist_ok=True)
         
+        # Configure logging with both file and console handlers
+        log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        
+        # File handler with rotation
+        file_handler = RotatingFileHandler(
+            'logs/alphatrader.log',
+            maxBytes=10485760,  # 10MB
+            backupCount=5
+        )
+        file_handler.setFormatter(logging.Formatter(log_format))
+        
+        # Console handler
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(logging.Formatter(log_format))
+        
+        # Configure root logger
+        logging.basicConfig(
+            level=logging.INFO,
+            handlers=[file_handler, console_handler]
+        )
+    
     def _load_config(self, config_path: str) -> Dict[str, Any]:
         """
         Load configuration from YAML file.
@@ -204,21 +231,30 @@ class AlphaTrader:
         # Start all modules that have a start method
         tasks = []
         
-        # Day 2: Start IBKR ingestion first if enabled
-        if 'ibkr_ingestion' in self.modules:
-            if self.config.get('modules', {}).get('data_ingestion', {}).get('enabled', True):
+        # Day 2-3: Start data ingestion modules first if enabled
+        if self.config.get('modules', {}).get('data_ingestion', {}).get('enabled', True):
+            # Start IBKR ingestion
+            if 'ibkr_ingestion' in self.modules:
                 self.logger.info("Starting IBKR data ingestion module...")
                 ibkr_module = self.modules['ibkr_ingestion']
                 task = asyncio.create_task(ibkr_module.start())
                 task.set_name("module_ibkr_ingestion")
                 tasks.append(task)
                 
-                # Give IBKR time to establish connections before starting other modules
+                # Give IBKR time to establish connections
                 await asyncio.sleep(2)
+            
+            # Start Alpha Vantage ingestion
+            if 'av_ingestion' in self.modules:
+                self.logger.info("Starting Alpha Vantage data ingestion module...")
+                av_module = self.modules['av_ingestion']
+                task = asyncio.create_task(av_module.start())
+                task.set_name("module_av_ingestion")
+                tasks.append(task)
         
         # Start other modules
         for name, module in self.modules.items():
-            if name == 'ibkr_ingestion':  # Already started
+            if name in ['ibkr_ingestion', 'av_ingestion']:  # Already started
                 continue
             if hasattr(module, 'start'):
                 self.logger.info(f"Starting module: {name}")
@@ -252,13 +288,20 @@ class AlphaTrader:
                 self.redis.set('system:halt', '1')
                 self.redis.set('system:shutdown_time', datetime.now().isoformat())
             
-            # Day 2: Stop IBKR ingestion cleanly
+            # Day 2-3: Stop data ingestion modules cleanly
             if 'ibkr_ingestion' in self.modules:
                 self.logger.info("Stopping IBKR data ingestion...")
                 try:
                     await self.modules['ibkr_ingestion'].stop()
                 except Exception as e:
                     self.logger.error(f"Error stopping IBKR: {e}")
+            
+            if 'av_ingestion' in self.modules:
+                self.logger.info("Stopping Alpha Vantage data ingestion...")
+                try:
+                    await self.modules['av_ingestion'].stop()
+                except Exception as e:
+                    self.logger.error(f"Error stopping Alpha Vantage: {e}")
             
             # Day 10: Emergency shutdown (skip for Day 2)
             # if 'emergency_mgr' in self.modules:

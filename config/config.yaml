@@ -36,6 +36,12 @@ alpha_vantage:
   base_url: "https://www.alphavantage.co/query"
   calls_per_minute: 600
   safety_buffer: 10  # Stay 10 calls under limit
+  retry_attempts: 3
+  retry_delay: 2  # Base delay for exponential backoff
+  # Update intervals for different data types
+  options_update_interval: 10  # 10 seconds for options chains
+  sentiment_update_interval: 300  # 5 minutes for sentiment
+  technicals_update_interval: 60  # 1 minute for technical indicators
 
 symbols:
   - SPY
