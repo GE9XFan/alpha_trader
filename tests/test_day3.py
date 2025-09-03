@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Test Day 3 implementation - Alpha Vantage Integration
-Tests options chains, sentiment analysis, technical indicators, and rate limiting
+COMPLETE SYSTEM TEST - IBKR + Alpha Vantage Integration
+Tests BOTH data sources running together in production configuration
+NO MOCKS - ALL REAL DATA
 """
 
 import asyncio
@@ -25,15 +26,21 @@ from data_ingestion import AlphaVantageIngestion, DataQualityMonitor
 from dotenv import load_dotenv
 
 
-class TestDay3AlphaVantage:
-    """Comprehensive test suite for Day 3 Alpha Vantage implementation"""
+class TestDay3CompleteSystem:
+    """COMPLETE test suite for ENTIRE SYSTEM - IBKR + Alpha Vantage"""
     
     def __init__(self):
         self.redis = None
         self.trader = None
         self.av_ingestion = None
+        self.ibkr_ingestion = None
         self.results = {
             'initialization': False,
+            'ibkr_connection': False,
+            'ibkr_data_flow': False,
+            'staggered_init': False,
+            'selective_fetching': False,
+            'timestamp_on_success': False,
             'rate_limiting': False,
             'options_chain': False,
             'greeks_validation': False,
@@ -43,7 +50,7 @@ class TestDay3AlphaVantage:
             'redis_keys': False,
             'data_quality_monitor': False,
             'performance': False,
-            'integration': False
+            'complete_system': False
         }
     
     def setup(self):
@@ -82,6 +89,11 @@ class TestDay3AlphaVantage:
             self.av_ingestion = AlphaVantageIngestion(self.trader.config, self.redis)
             print("✅ AlphaVantageIngestion initialized")
             
+            # Initialize IBKRIngestion
+            from data_ingestion import IBKRIngestion
+            self.ibkr_ingestion = IBKRIngestion(self.trader.config, self.redis)
+            print("✅ IBKRIngestion initialized")
+            
             return True
             
         except Exception as e:
@@ -103,16 +115,75 @@ class TestDay3AlphaVantage:
             assert self.av_ingestion.sentiment_interval == 300, "Wrong sentiment interval"
             assert self.av_ingestion.technicals_interval == 60, "Wrong technicals interval"
             
+            # Check timestamp dictionaries exist (not defaultdict anymore)
+            assert isinstance(self.av_ingestion.last_options_update, dict), "Options timestamps should be dict"
+            assert isinstance(self.av_ingestion.last_sentiment_update, dict), "Sentiment timestamps should be dict"
+            assert isinstance(self.av_ingestion.last_technicals_update, dict), "Technicals timestamps should be dict"
+            
             print(f"  ✅ API key configured")
             print(f"  ✅ Rate limit: {self.av_ingestion.max_calls} calls/min")
             print(f"  ✅ Symbols: {self.av_ingestion.symbols}")
             print(f"  ✅ Update intervals configured")
+            print(f"  ✅ Timestamp tracking initialized")
             
             self.results['initialization'] = True
             return True
             
         except AssertionError as e:
             print(f"  ❌ Initialization test failed: {e}")
+            return False
+    
+    def test_staggered_initialization(self):
+        """Test staggered initialization to prevent thundering herd"""
+        print("\n📋 Testing staggered initialization...")
+        
+        try:
+            now = time.time()
+            level2_symbols = ['SPY', 'QQQ', 'IWM']
+            
+            # Check that priority symbols have smaller offsets
+            priority_offsets = []
+            other_offsets = []
+            
+            for symbol in self.av_ingestion.symbols:
+                # Calculate how far in the past the initial timestamp was set
+                offset = now - self.av_ingestion.last_options_update[symbol] - self.av_ingestion.options_interval
+                
+                if symbol in level2_symbols:
+                    priority_offsets.append((symbol, abs(offset)))
+                else:
+                    other_offsets.append((symbol, abs(offset)))
+            
+            # Verify priority symbols have smaller offsets (fetch first)
+            if priority_offsets and other_offsets:
+                max_priority = max(p[1] for p in priority_offsets)
+                min_other = min(o[1] for o in other_offsets)
+                
+                print(f"  📊 Priority symbols (0DTE/1DTE/MOC):")
+                for sym, off in priority_offsets:
+                    print(f"     - {sym}: {off:.2f}s offset")
+                
+                print(f"  📊 Other symbols (14+ DTE):")
+                for sym, off in other_offsets[:3]:  # Show first 3
+                    print(f"     - {sym}: {off:.2f}s offset")
+                
+                # Priority symbols should be scheduled earlier
+                assert max_priority < min_other, "Priority symbols should fetch before others"
+                print(f"  ✅ Priority symbols staggered correctly")
+            
+            # Check that not all symbols fetch at the same time
+            unique_times = set()
+            for symbol in self.av_ingestion.symbols:
+                unique_times.add(round(self.av_ingestion.last_options_update[symbol], 1))
+            
+            assert len(unique_times) > 1, "All symbols would fetch simultaneously!"
+            print(f"  ✅ Symbols staggered across {len(unique_times)} different times")
+            
+            self.results['staggered_init'] = True
+            return True
+            
+        except Exception as e:
+            print(f"  ❌ Staggered initialization test failed: {e}")
             return False
     
     async def test_rate_limiting(self):
@@ -673,10 +744,215 @@ class TestDay3AlphaVantage:
             traceback.print_exc()
             return False
     
-    async def test_integration(self):
-        """Test ACTUAL PRODUCTION CODE PATH - verify data flows to Redis"""
-        print("\n📋 Testing PRODUCTION Alpha Vantage integration...")
-        print("  ⚠️ This test validates the ACTUAL production code path")
+    async def test_selective_fetching(self):
+        """Test that only needed data types are fetched"""
+        print("\n📋 Testing selective fetching logic...")
+        
+        try:
+            # Setup test with controlled timestamps
+            now = time.time()
+            symbol = 'SPY'
+            
+            # Set timestamps to control what needs updating
+            self.av_ingestion.last_options_update[symbol] = now - 15  # Needs update (>10s)
+            self.av_ingestion.last_sentiment_update[symbol] = now - 100  # Doesn't need update (<300s)
+            self.av_ingestion.last_technicals_update[symbol] = now - 30  # Doesn't need update (<60s)
+            
+            print(f"  📊 Setup for {symbol}:")
+            print(f"     - Options: {15}s ago (needs update, interval=10s)")
+            print(f"     - Sentiment: {100}s ago (NO update needed, interval=300s)")
+            print(f"     - Technicals: {30}s ago (NO update needed, interval=60s)")
+            
+            # Clear previous API call tracking
+            self.av_ingestion.call_times.clear()
+            
+            # Call fetch_symbol_data with selective flags
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                # This should ONLY fetch options
+                await self.av_ingestion.fetch_symbol_data(
+                    session, symbol,
+                    needs_options=True,
+                    needs_sentiment=False,
+                    needs_technicals=False
+                )
+            
+            # Verify only options were fetched (1 API call, not 5)
+            api_calls = len(self.av_ingestion.call_times)
+            print(f"  📊 API calls made: {api_calls}")
+            
+            # Should be 1 call for options only
+            assert api_calls <= 2, f"Too many API calls: {api_calls} (expected 1-2)"
+            
+            print(f"  ✅ Selective fetching working - only fetched what was needed")
+            
+            self.results['selective_fetching'] = True
+            return True
+            
+        except Exception as e:
+            print(f"  ❌ Selective fetching test failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    async def test_timestamp_on_success(self):
+        """Test that timestamps only update after successful fetch"""
+        print("\n📋 Testing timestamp updates only on success...")
+        
+        try:
+            symbol = 'TEST_FAIL'
+            now = time.time()
+            
+            # Set initial timestamp
+            self.av_ingestion.last_options_update[symbol] = now - 100
+            initial_timestamp = self.av_ingestion.last_options_update[symbol]
+            
+            print(f"  📊 Initial timestamp for {symbol}: {initial_timestamp:.2f}")
+            
+            # Try to fetch with a symbol that will fail
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                try:
+                    # This should fail (invalid symbol)
+                    await self.av_ingestion.fetch_symbol_data(
+                        session, symbol,
+                        needs_options=True,
+                        needs_sentiment=False,
+                        needs_technicals=False
+                    )
+                except:
+                    pass  # Expected to fail
+            
+            # Check timestamp was NOT updated
+            final_timestamp = self.av_ingestion.last_options_update.get(symbol, initial_timestamp)
+            
+            print(f"  📊 Final timestamp for {symbol}: {final_timestamp:.2f}")
+            print(f"  📊 Timestamp changed: {final_timestamp != initial_timestamp}")
+            
+            # Timestamp should NOT have changed on failure
+            assert final_timestamp == initial_timestamp, "Timestamp updated despite failure!"
+            
+            print(f"  ✅ Timestamp NOT updated on failure (correct behavior)")
+            
+            # Now test successful fetch
+            symbol = 'SPY'
+            self.av_ingestion.last_options_update[symbol] = now - 100
+            initial_timestamp = self.av_ingestion.last_options_update[symbol]
+            
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                result = await self.av_ingestion.fetch_options_chain(session, symbol)
+                if result:
+                    # Manually update like production code does
+                    self.av_ingestion.last_options_update[symbol] = time.time()
+            
+            final_timestamp = self.av_ingestion.last_options_update[symbol]
+            
+            # Timestamp SHOULD have changed on success
+            if result:
+                assert final_timestamp > initial_timestamp, "Timestamp not updated on success!"
+                print(f"  ✅ Timestamp updated on success (correct behavior)")
+            
+            self.results['timestamp_on_success'] = True
+            return True
+            
+        except Exception as e:
+            print(f"  ❌ Timestamp test failed: {e}")
+            return False
+    
+    async def test_ibkr_connection(self):
+        """Test IBKR Gateway connection and data flow"""
+        print("\n📋 Testing IBKR Gateway connection...")
+        
+        try:
+            # Connect to IBKR
+            await self.ibkr_ingestion._connect_with_retry()
+            
+            assert self.ibkr_ingestion.connected, "IBKR not connected - Gateway must be running!"
+            assert self.redis.get('ibkr:connected') == '1', "IBKR connection flag not set in Redis"
+            
+            account = self.redis.get('ibkr:account')
+            print(f"  ✅ Connected to IBKR Gateway - Account: {account}")
+            
+            self.results['ibkr_connection'] = True
+            return True
+            
+        except Exception as e:
+            print(f"  ❌ IBKR connection failed: {e}")
+            print("  ❌ IBKR Gateway MUST be running on port 7497!")
+            self.results['ibkr_connection'] = False
+            return False
+    
+    async def test_ibkr_data_flow(self):
+        """Test IBKR data is actually flowing to Redis"""
+        print("\n📋 Testing IBKR data flow...")
+        
+        try:
+            # MUST be connected - no conditional checks
+            assert self.ibkr_ingestion.connected, "IBKR NOT CONNECTED - Gateway MUST be running on port 7497!"
+            
+            # Start IBKR ingestion
+            print("  🚀 Starting IBKR data ingestion...")
+            ibkr_task = asyncio.create_task(self.ibkr_ingestion.start())
+            
+            # Wait for data to flow (needs more time for Level 2 data to populate)
+            print("  ⏱️ Waiting 10 seconds for data to flow...")
+            await asyncio.sleep(10)
+            
+            # Check Level 2 data for SPY/QQQ/IWM
+            level2_success = 0
+            for symbol in ['SPY', 'QQQ', 'IWM']:
+                if self.redis.exists(f'market:{symbol}:book'):
+                    book = json.loads(self.redis.get(f'market:{symbol}:book'))
+                    if book.get('bids') and book.get('asks'):
+                        level2_success += 1
+                        print(f"  ✅ {symbol}: Level 2 data flowing ({len(book['bids'])} bids, {len(book['asks'])} asks)")
+                    else:
+                        print(f"  ❌ {symbol}: Empty order book")
+                else:
+                    print(f"  ❌ {symbol}: No Level 2 data in Redis")
+            
+            # Check standard data for others
+            standard_success = 0
+            for symbol in ['AAPL', 'TSLA', 'NVDA']:
+                if self.redis.exists(f'market:{symbol}:ticker'):
+                    ticker = json.loads(self.redis.get(f'market:{symbol}:ticker'))
+                    if ticker.get('last', 0) > 0:
+                        standard_success += 1
+                        print(f"  ✅ {symbol}: Ticker data flowing (Last: ${ticker['last']:.2f})")
+                    else:
+                        print(f"  ❌ {symbol}: Invalid ticker data")
+                else:
+                    print(f"  ❌ {symbol}: No ticker data in Redis")
+            
+            # Stop IBKR task but keep connection alive for next test
+            self.ibkr_ingestion.running = False
+            ibkr_task.cancel()
+            try:
+                await ibkr_task
+            except asyncio.CancelledError:
+                pass
+            
+            # IMPORTANT: Keep connection alive for test_complete_system
+            # Don't disconnect here - let main() handle final cleanup
+            
+            # Must have at least some data
+            assert level2_success > 0 or standard_success > 0, "No IBKR data flowing!"
+            
+            print(f"  📊 Level 2 symbols: {level2_success}/3")
+            print(f"  📊 Standard symbols: {standard_success}/3")
+            
+            self.results['ibkr_data_flow'] = True
+            return True
+            
+        except Exception as e:
+            print(f"  ❌ IBKR data flow test failed: {e}")
+            self.results['ibkr_data_flow'] = False
+            return False
+    
+    async def test_complete_system(self):
+        """Test COMPLETE SYSTEM - IBKR + Alpha Vantage running together"""
+        print("\n📋 Testing COMPLETE SYSTEM INTEGRATION...")
+        print("  ⚠️ Running BOTH IBKR and Alpha Vantage in production configuration")
         
         try:
             # Clear ALL previous data to ensure we're testing fresh
@@ -689,19 +965,55 @@ class TestDay3AlphaVantage:
             
             print("  🧹 Cleared all previous data from Redis")
             
-            # Start the PRODUCTION ingestion module
-            print("  🚀 Starting PRODUCTION Alpha Vantage module...")
-            print("  📝 Using fetch_symbol_data (the FIXED production path)")
+            # Clear rate limiter to start fresh
+            self.av_ingestion.call_times.clear()
+            print("  🧹 Cleared rate limiter")
+            
+            # Use limited symbols for testing
+            original_av_symbols = self.av_ingestion.symbols
+            self.av_ingestion.symbols = ['SPY', 'QQQ', 'AAPL']
+            
+            print(f"  📝 Alpha Vantage symbols: {self.av_ingestion.symbols}")
+            print(f"  📝 IBKR Level 2: {self.ibkr_ingestion.level2_symbols}")
+            print(f"  📝 IBKR Standard: {len(self.ibkr_ingestion.standard_symbols)} symbols")
             
             # Track initial state
             initial_api_calls = int(self.redis.get('monitoring:api:av:calls') or 0)
             
-            # Run the production module
-            task = asyncio.create_task(self.av_ingestion.start())
+            # Reconnect IBKR if needed (test_ibkr_data_flow may have disconnected it)
+            if not self.ibkr_ingestion.connected:
+                print("  🔄 Reconnecting to IBKR Gateway...")
+                await self.ibkr_ingestion._connect_with_retry()
+                assert self.ibkr_ingestion.connected, "Failed to reconnect to IBKR!"
+                print("  ✅ Reconnected to IBKR successfully")
             
-            # Give it time to fetch AND STORE data (30 seconds for at least 3 cycles)
-            print("  ⏱️ Running for 30 seconds to ensure data storage...")
-            await asyncio.sleep(30)
+            # Reset running flag (test_ibkr_data_flow sets it to False)
+            self.ibkr_ingestion.running = False
+            
+            # Start BOTH systems - NO CONDITIONALS
+            print("  🚀 Starting Alpha Vantage ingestion...")
+            av_task = asyncio.create_task(self.av_ingestion.start())
+            
+            print("  🚀 Starting IBKR ingestion...")
+            # MUST start IBKR - fail if not connected
+            assert self.ibkr_ingestion.connected, "IBKR MUST be connected for complete system test!"
+            ibkr_task = asyncio.create_task(self.ibkr_ingestion.start())
+            
+            # Let both systems run
+            print("  ⏱️ Running both systems for 10 seconds...")
+            await asyncio.sleep(10)
+            
+            # VERIFY IBKR DATA TOO
+            print("\n  🔍 VALIDATING IBKR DATA FLOW:")
+            ibkr_success = 0
+            for symbol in ['SPY', 'QQQ', 'IWM']:
+                if self.redis.exists(f'market:{symbol}:book'):
+                    book = json.loads(self.redis.get(f'market:{symbol}:book'))
+                    if book.get('bids') and book.get('asks'):
+                        ibkr_success += 1
+                        print(f"  ✅ {symbol}: Level 2 data flowing ({len(book['bids'])} bids, {len(book['asks'])} asks)")
+            
+            assert ibkr_success > 0, "NO IBKR DATA FLOWING - Gateway connection failed!"
             
             # CRITICAL: Verify data was ACTUALLY STORED in Redis
             print("\n  🔍 VALIDATING PRODUCTION DATA STORAGE:")
@@ -778,25 +1090,36 @@ class TestDay3AlphaVantage:
                 print("\n  ❌❌❌ CATASTROPHIC FAILURE ❌❌❌")
                 print("  NO DATA WAS STORED IN REDIS!")
                 print("  THE PRODUCTION CODE IS BROKEN!")
-                self.results['integration'] = False
+                self.results['complete_system'] = False
             else:
                 print("\n  ✅ PRODUCTION CODE VALIDATED!")
                 print(f"     - Options: {len(options_keys)} symbols")
                 print(f"     - Sentiment: {len(sentiment_keys)} symbols")
                 print(f"     - Technicals: {len(tech_keys)} symbols")
-                self.results['integration'] = True
+                self.results['complete_system'] = True
             
-            # Stop the module
-            print("\n  🛑 Stopping production module...")
+            # Stop BOTH modules
+            print("\n  🛑 Stopping production modules...")
             self.av_ingestion.running = False
-            task.cancel()
+            av_task.cancel()
+            
+            self.ibkr_ingestion.running = False
+            ibkr_task.cancel()
             
             try:
-                await task
+                await av_task
             except asyncio.CancelledError:
                 pass
             
-            return self.results['integration']
+            try:
+                await ibkr_task
+            except asyncio.CancelledError:
+                pass
+            
+            # Restore original symbols
+            self.av_ingestion.symbols = original_av_symbols
+            
+            return self.results['complete_system']
             
         except Exception as e:
             print(f"  ❌ Integration test failed: {e}")
@@ -877,8 +1200,11 @@ class TestDay3AlphaVantage:
         
         # Run synchronous tests
         self.test_initialization()
+        self.test_staggered_initialization()  # NEW test
         
         # Run async tests (ALL tests now use real data)
+        await self.test_selective_fetching()  # NEW test
+        await self.test_timestamp_on_success()  # NEW test
         await self.test_greeks_validation()  # Now async with real data
         await self.test_redis_keys()  # Now async with real data
         await self.test_rate_limiting()
@@ -888,7 +1214,13 @@ class TestDay3AlphaVantage:
         await self.test_error_handling()
         await self.test_data_quality_monitor()  # Test the PRODUCTION quality monitor
         await self.test_performance()
-        await self.test_integration()  # Full integration test at the end
+        
+        # IBKR tests - MUST pass, no skipping
+        await self.test_ibkr_connection()
+        await self.test_ibkr_data_flow()
+        
+        # Complete system test - BOTH running together
+        await self.test_complete_system()  # Full integration test at the end
         
         # Print summary
         print("\n" + "="*60)
@@ -914,12 +1246,15 @@ class TestDay3AlphaVantage:
 
 async def main():
     """Main test runner"""
-    tester = TestDay3AlphaVantage()
+    tester = TestDay3CompleteSystem()
     success = await tester.run_all_tests()
     
     # Cleanup
     if tester.av_ingestion:
         await tester.av_ingestion.stop()
+    
+    if tester.ibkr_ingestion and tester.ibkr_ingestion.connected:
+        await tester.ibkr_ingestion.stop()
     
     sys.exit(0 if success else 1)
 

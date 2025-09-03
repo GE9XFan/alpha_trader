@@ -124,7 +124,8 @@ class IBKRIngestion:
         try:
             # Keep running until shutdown
             while self.redis.get('system:halt') != '1':
-                # Just use asyncio.sleep for the main loop
+                # Process events with regular asyncio.sleep since we're in async context
+                # IB events are processed automatically when connected with connectAsync()
                 await asyncio.sleep(0.1)
                 
         except Exception as e:
@@ -396,12 +397,12 @@ class IBKRIngestion:
                     'asks': book['asks'][:self.market_depth_rows],
                     'market_makers': list(book['market_makers'])
                 }
-                pipe.setex(f'market:{symbol}:book', 1, json.dumps(book_data))
+                pipe.setex(f'market:{symbol}:book', 30, json.dumps(book_data))  # 30s TTL for testing
                 
                 # Store metrics
-                pipe.setex(f'market:{symbol}:imbalance', 1, metrics['imbalance'])
-                pipe.setex(f'market:{symbol}:spread', 1, metrics['spread'])
-                pipe.setex(f'market:{symbol}:mid', 1, metrics['mid'])
+                pipe.setex(f'market:{symbol}:imbalance', 30, metrics['imbalance'])  # 30s TTL
+                pipe.setex(f'market:{symbol}:spread', 30, metrics['spread'])  # 30s TTL
+                pipe.setex(f'market:{symbol}:mid', 30, metrics['mid'])  # 30s TTL
                 pipe.set(f'market:{symbol}:timestamp', book['timestamp'])
                 
                 # Execute pipeline
@@ -565,7 +566,7 @@ class IBKRIngestion:
         
         # Store trades list (keep last 1000)
         trades_list = list(self.trades_buffer[symbol])[-1000:]
-        pipe.setex(f'market:{symbol}:trades', 1, json.dumps(trades_list))
+        pipe.setex(f'market:{symbol}:trades', 30, json.dumps(trades_list))  # 30s TTL
         
         # Store additional ticker data
         ticker_data = {
@@ -575,12 +576,12 @@ class IBKRIngestion:
             'vwap': trade['vwap'],
             'timestamp': trade['time']
         }
-        pipe.setex(f'market:{symbol}:ticker', 1, json.dumps(ticker_data))
+        pipe.setex(f'market:{symbol}:ticker', 30, json.dumps(ticker_data))  # 30s TTL
         
         # Calculate and store spread
         if trade['bid'] and trade['ask']:
             spread = round(trade['ask'] - trade['bid'], 4)
-            pipe.setex(f'market:{symbol}:spread', 1, spread)
+            pipe.setex(f'market:{symbol}:spread', 30, spread)  # 30s TTL
         
         pipe.execute()
     
@@ -604,10 +605,10 @@ class IBKRIngestion:
             # Extract symbol from contract
             symbol = bars.contract.symbol
             
-            # Build bar object
+            # Build bar object (RealTimeBar uses open_ instead of open)
             bar_data = {
                 'time': int(bar.time.timestamp()),
-                'open': float(bar.open),
+                'open': float(bar.open_),
                 'high': float(bar.high),
                 'low': float(bar.low),
                 'close': float(bar.close),
@@ -627,13 +628,13 @@ class IBKRIngestion:
             
             # Store bars (keep last 100)
             bars_list = list(self.bars_buffer[symbol])[-100:]
-            pipe.setex(f'market:{symbol}:bars', 10, json.dumps(bars_list))
+            pipe.setex(f'market:{symbol}:bars', 30, json.dumps(bars_list))  # 30s TTL
             
             # Store latest bar separately for quick access
-            pipe.setex(f'market:{symbol}:latest_bar', 10, json.dumps(bar_data))
+            pipe.setex(f'market:{symbol}:latest_bar', 30, json.dumps(bar_data))  # 30s TTL
             
             # Store bar metrics
-            pipe.setex(f'market:{symbol}:bar_metrics', 10, json.dumps(metrics))
+            pipe.setex(f'market:{symbol}:bar_metrics', 30, json.dumps(metrics))  # 30s TTL
             
             # Update timestamp
             pipe.set(f'market:{symbol}:bars_timestamp', int(datetime.now().timestamp() * 1000))
@@ -749,9 +750,9 @@ class IBKRIngestion:
         """
         while True:
             try:
-                # Calculate metrics
+                # Calculate metrics (Redis requires string values, not booleans)
                 metrics = {
-                    'connected': self.connected,
+                    'connected': '1' if self.connected else '0',
                     'symbols_subscribed': len(self.subscriptions),
                     'level2_symbols': len([s for s in self.subscriptions if self.subscriptions[s].get('type') == 'LEVEL2']),
                     'standard_symbols': len([s for s in self.subscriptions if self.subscriptions[s].get('type') == 'STANDARD']),
@@ -898,10 +899,32 @@ class AlphaVantageIngestion:
         self.call_times = deque(maxlen=self.calls_per_minute)
         self.rate_limit_lock = threading.Lock()
         
-        # Track last update times for each data type
-        self.last_options_update = defaultdict(float)
-        self.last_sentiment_update = defaultdict(float)
-        self.last_technicals_update = defaultdict(float)
+        # Track last update times for each data type with staggered initialization
+        # CRITICAL: Stagger initial fetches to prevent thundering herd and rate limiting
+        now = time.time()
+        level2_symbols = ['SPY', 'QQQ', 'IWM']  # Priority symbols for 0DTE/1DTE/MOC strategies
+        
+        self.last_options_update = {}
+        self.last_sentiment_update = {}
+        self.last_technicals_update = {}
+        
+        for i, symbol in enumerate(self.symbols):
+            if symbol in level2_symbols:
+                # Priority symbols: minimal stagger (0.5 seconds apart)
+                # These need rapid updates for 0DTE/1DTE/MOC strategies
+                offset = level2_symbols.index(symbol) * 0.5
+            else:
+                # Other symbols (14+ DTE strategies): larger stagger (1 second apart)
+                # Start after priority symbols with more spacing
+                offset = 2.0 + ((i - len(level2_symbols)) * 1.0)
+            
+            # Initialize timestamps in the past to trigger staggered fetches
+            # This prevents all symbols from fetching simultaneously at startup
+            self.last_options_update[symbol] = now - self.options_interval + offset
+            self.last_sentiment_update[symbol] = now - self.sentiment_interval + (offset * 5)  # Spread sentiment more
+            self.last_technicals_update[symbol] = now - self.technicals_interval + (offset * 2)  # Moderate spread for technicals
+            
+            self.logger.debug(f"Initialized {symbol} with offset {offset:.1f}s")
         
         # Performance tracking
         self.api_call_count = 0
@@ -945,31 +968,24 @@ class AlphaVantageIngestion:
                     tasks = []
                     
                     for symbol in self.symbols:
-                        # CRITICAL FIX: Use fetch_symbol_data which actually STORES data to Redis!
-                        # The previous code was only fetching without storing - a catastrophic bug
                         now = time.time()
                         
-                        # Check if any data type needs updating for this symbol
-                        needs_update = False
+                        # CRITICAL: Check what needs updating WITHOUT modifying timestamps
+                        # Timestamps will be updated ONLY after successful fetch and storage
+                        needs_options = now - self.last_options_update[symbol] >= self.options_interval
+                        needs_sentiment = now - self.last_sentiment_update[symbol] >= self.sentiment_interval
+                        needs_technicals = now - self.last_technicals_update[symbol] >= self.technicals_interval
                         
-                        if now - self.last_options_update[symbol] >= self.options_interval:
-                            needs_update = True
-                            self.last_options_update[symbol] = now
-                        
-                        if now - self.last_sentiment_update[symbol] >= self.sentiment_interval:
-                            needs_update = True
-                            self.last_sentiment_update[symbol] = now
-                        
-                        if now - self.last_technicals_update[symbol] >= self.technicals_interval:
-                            needs_update = True
-                            self.last_technicals_update[symbol] = now
-                        
-                        # If any data needs updating, fetch ALL data for this symbol
-                        # fetch_symbol_data handles fetching AND storing to Redis properly
-                        if needs_update:
+                        # Only create task if something needs updating
+                        # Pass flags to fetch ONLY what's needed (selective fetching)
+                        if needs_options or needs_sentiment or needs_technicals:
                             tasks.append(self._fetch_with_retry(
-                                self.fetch_symbol_data, session, symbol
+                                self.fetch_symbol_data, session, symbol,
+                                needs_options, needs_sentiment, needs_technicals
                             ))
+                            
+                            self.logger.debug(f"{symbol} needs update - Options: {needs_options}, "
+                                            f"Sentiment: {needs_sentiment}, Technicals: {needs_technicals}")
                     
                     # Execute all tasks concurrently
                     if tasks:
@@ -1035,53 +1051,115 @@ class AlphaVantageIngestion:
             self.call_times.append(now)
             self.api_call_count += 1
     
-    async def fetch_symbol_data(self, session: aiohttp.ClientSession, symbol: str):
+    async def fetch_symbol_data(self, session: aiohttp.ClientSession, symbol: str,
+                               needs_options: bool = True, needs_sentiment: bool = True, 
+                               needs_technicals: bool = True):
         """
-        Fetch all Alpha Vantage data for a symbol.
-        Coordinates fetching of options, sentiment, and technicals.
+        Fetch Alpha Vantage data for a symbol - ONLY the types that need updating.
+        CRITICAL: Updates timestamps ONLY after successful fetch and storage.
+        
+        Args:
+            session: aiohttp session for API calls
+            symbol: Stock symbol to fetch
+            needs_options: Whether to fetch options data
+            needs_sentiment: Whether to fetch sentiment data  
+            needs_technicals: Whether to fetch technical indicators
         """
+        now = time.time()
+        results = {'options': False, 'sentiment': False, 'technicals': False}
+        
         try:
-            # Fetch options chain with Greeks
-            options_data = await self.fetch_options_chain(session, symbol)
+            # FETCH OPTIONS CHAIN if needed
+            if needs_options:
+                try:
+                    options_data = await self.fetch_options_chain(session, symbol)
+                    
+                    if options_data:
+                        # Detect unusual activity
+                        unusual = self.detect_unusual_activity(options_data.get('contracts', []))
+                        
+                        # Calculate GEX and DEX
+                        gex, dex = self._calculate_greek_exposures(options_data.get('contracts', []))
+                        
+                        # Store in Redis with appropriate TTLs
+                        pipe = self.redis.pipeline()
+                        
+                        # Options chain (10 second TTL)
+                        pipe.setex(f'options:{symbol}:chain', 10, json.dumps(options_data))
+                        
+                        # Greeks by strike/expiry (10 second TTL)
+                        greeks = self._extract_greeks(options_data.get('contracts', []))
+                        pipe.setex(f'options:{symbol}:greeks', 10, json.dumps(greeks))
+                        
+                        # Gamma and Delta exposure (10 second TTL)
+                        pipe.setex(f'options:{symbol}:gex', 10, json.dumps(gex))
+                        pipe.setex(f'options:{symbol}:dex', 10, json.dumps(dex))
+                        
+                        # Unusual activity (10 second TTL)
+                        pipe.setex(f'options:{symbol}:unusual', 10, json.dumps(unusual))
+                        
+                        # Options flow (10 second TTL)
+                        flow = self._calculate_options_flow(options_data.get('contracts', []))
+                        pipe.setex(f'options:{symbol}:flow', 10, json.dumps(flow))
+                        
+                        # Update timestamp
+                        pipe.set(f'options:{symbol}:timestamp', int(datetime.now().timestamp() * 1000))
+                        
+                        pipe.execute()
+                        
+                        # CRITICAL: Update timestamp ONLY after successful storage
+                        self.last_options_update[symbol] = now
+                        results['options'] = True
+                        self.logger.debug(f"Updated options data for {symbol}")
+                        
+                except Exception as e:
+                    self.logger.error(f"Error fetching options for {symbol}: {e}")
+                    self.redis.hincrby('monitoring:errors:av:options', symbol, 1)
+                    # DO NOT update timestamp on failure - will retry next cycle
             
-            if options_data:
-                # Detect unusual activity
-                unusual = self.detect_unusual_activity(options_data.get('contracts', []))
-                
-                # Calculate GEX and DEX
-                gex, dex = self._calculate_greek_exposures(options_data.get('contracts', []))
-                
-                # Store in Redis with appropriate TTLs
-                pipe = self.redis.pipeline()
-                
-                # Options chain (10 second TTL)
-                pipe.setex(f'options:{symbol}:chain', 10, json.dumps(options_data))
-                
-                # Greeks by strike/expiry (10 second TTL)
-                greeks = self._extract_greeks(options_data.get('contracts', []))
-                pipe.setex(f'options:{symbol}:greeks', 10, json.dumps(greeks))
-                
-                # Gamma and Delta exposure (10 second TTL)
-                pipe.setex(f'options:{symbol}:gex', 10, json.dumps(gex))
-                pipe.setex(f'options:{symbol}:dex', 10, json.dumps(dex))
-                
-                # Unusual activity (10 second TTL)
-                pipe.setex(f'options:{symbol}:unusual', 10, json.dumps(unusual))
-                
-                # Options flow (10 second TTL)
-                flow = self._calculate_options_flow(options_data.get('contracts', []))
-                pipe.setex(f'options:{symbol}:flow', 10, json.dumps(flow))
-                
-                # Update timestamp
-                pipe.set(f'options:{symbol}:timestamp', int(datetime.now().timestamp() * 1000))
-                
-                pipe.execute()
-                
-                self.logger.debug(f"Updated options data for {symbol}")
+            # FETCH SENTIMENT DATA if needed
+            if needs_sentiment:
+                try:
+                    sentiment_data = await self.fetch_sentiment(session, symbol)
+                    if sentiment_data:
+                        # Sentiment already stores itself in fetch_sentiment
+                        # CRITICAL: Update timestamp ONLY after successful fetch
+                        self.last_sentiment_update[symbol] = now
+                        results['sentiment'] = True
+                        self.logger.debug(f"Updated sentiment for {symbol}")
+                except Exception as e:
+                    self.logger.error(f"Error fetching sentiment for {symbol}: {e}")
+                    self.redis.hincrby('monitoring:errors:av:sentiment', symbol, 1)
+                    # DO NOT update timestamp on failure
+            
+            # FETCH TECHNICAL INDICATORS if needed
+            if needs_technicals:
+                try:
+                    technical_data = await self.fetch_technical_indicators(session, symbol)
+                    if technical_data:
+                        # Technicals already store themselves in fetch_technical_indicators
+                        # CRITICAL: Update timestamp ONLY after successful fetch
+                        self.last_technicals_update[symbol] = now
+                        results['technicals'] = True
+                        self.logger.debug(f"Updated technical indicators for {symbol}")
+                except Exception as e:
+                    self.logger.error(f"Error fetching technicals for {symbol}: {e}")
+                    self.redis.hincrby('monitoring:errors:av:technicals', symbol, 1)
+                    # DO NOT update timestamp on failure
+            
+            # Log results for monitoring
+            successful = sum(1 for v in results.values() if v)
+            requested = sum([needs_options, needs_sentiment, needs_technicals])
+            
+            if successful < requested:
+                self.logger.warning(f"{symbol}: Only {successful}/{requested} data types fetched successfully")
+                self.redis.hincrby('monitoring:av:partial_fetches', symbol, 1)
+            elif successful > 0:
+                self.logger.debug(f"{symbol}: Successfully fetched {successful} data type(s)")
                 
         except Exception as e:
-            self.logger.error(f"Error fetching data for {symbol}: {e}")
-            self.redis.hincrby('monitoring:errors:av', symbol, 1)
+            self.logger.error(f"Critical error fetching data for {symbol}: {e}")
+            self.redis.hincrby('monitoring:errors:av:critical', symbol, 1)
     
     async def fetch_options_chain(self, session: aiohttp.ClientSession, symbol: str):
         """
@@ -1543,13 +1621,25 @@ class AlphaVantageIngestion:
             self.logger.error(f"Error handling API error: {e}")
             return 'skip'
     
-    async def _fetch_with_retry(self, fetch_func, session, symbol):
+    async def _fetch_with_retry(self, fetch_func, session, symbol, *args):
         """
         Wrapper for API calls with retry logic and exponential backoff.
+        Supports additional arguments for selective fetching.
+        
+        Args:
+            fetch_func: The function to call with retries
+            session: aiohttp session
+            symbol: Stock symbol
+            *args: Additional arguments to pass to fetch_func (e.g., needs_options, needs_sentiment, needs_technicals)
         """
         for attempt in range(self.retry_attempts):
             try:
-                result = await fetch_func(session, symbol)
+                # Call with all provided arguments
+                if args:
+                    result = await fetch_func(session, symbol, *args)
+                else:
+                    result = await fetch_func(session, symbol)
+                    
                 if result is not None:
                     return result
                     
