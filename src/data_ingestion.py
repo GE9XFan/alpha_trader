@@ -73,6 +73,7 @@ class IBKRIngestion:
         
         # Connection management
         self.connected = False
+        self.running = False  # Track if data ingestion is actively running
         self.reconnect_attempts = 0
         self.max_reconnect_attempts = self.ibkr_config.get('max_reconnect_attempts', 10)
         self.reconnect_delay_base = self.ibkr_config.get('reconnect_delay_base', 2)  # seconds
@@ -246,7 +247,8 @@ class IBKRIngestion:
             self.depth_req_ids[symbol] = depth_ticker
             
             # Set up ticker update handler for market depth
-            depth_ticker.updateEvent += lambda ticker: self.on_depth_update(ticker)
+            # Type ignore for ib_insync event compatibility
+            depth_ticker.updateEvent += lambda ticker: self.on_depth_update(ticker)  # type: ignore
             
             # Request market data (trades and quotes)
             ticker = self.ib.reqMktData(
@@ -428,7 +430,7 @@ class IBKRIngestion:
         Critical for 0DTE/1DTE/MOC signal generation.
         """
         book = self.order_books[symbol]
-        metrics = {'imbalance': 0, 'spread': 0, 'mid': 0, 'bid_liquidity': 0, 'ask_liquidity': 0}
+        metrics: Dict[str, float] = {'imbalance': 0.0, 'spread': 0.0, 'mid': 0.0, 'bid_liquidity': 0.0, 'ask_liquidity': 0.0}
         
         if book['bids'] and book['asks']:
             # Best bid/ask
@@ -443,8 +445,8 @@ class IBKRIngestion:
             bid_liquidity = sum(level['size'] for level in book['bids'][:5])
             ask_liquidity = sum(level['size'] for level in book['asks'][:5])
             
-            metrics['bid_liquidity'] = bid_liquidity
-            metrics['ask_liquidity'] = ask_liquidity
+            metrics['bid_liquidity'] = float(bid_liquidity)
+            metrics['ask_liquidity'] = float(ask_liquidity)
             
             # Order book imbalance (-1 to 1, positive = more bids)
             total_liquidity = bid_liquidity + ask_liquidity
@@ -1543,7 +1545,12 @@ class AlphaVantageIngestion:
                             
                             # Get current price from Redis
                             last_price_str = self.redis.get(f'market:{symbol}:last')
-                            last_price = float(last_price_str) if last_price_str else middle
+                            # Handle Redis response type properly
+                            if last_price_str:
+                                price_str = last_price_str.decode('utf-8') if isinstance(last_price_str, bytes) else str(last_price_str)
+                                last_price = float(price_str)
+                            else:
+                                last_price = middle
                             
                             indicators['bbands'] = {
                                 'upper': upper,
@@ -1887,7 +1894,9 @@ class DataQualityMonitor:
                     # Check IBKR data freshness
                     ibkr_timestamp = self.redis.get(f'market:{symbol}:timestamp')
                     if ibkr_timestamp:
-                        age = now - (int(ibkr_timestamp) / 1000.0)
+                        # Handle Redis response type properly
+                        timestamp_str = ibkr_timestamp.decode('utf-8') if isinstance(ibkr_timestamp, bytes) else str(ibkr_timestamp)
+                        age = now - (int(timestamp_str) / 1000.0)
                         
                         if age > self.freshness_thresholds['ibkr']:
                             # Data is stale
@@ -1917,7 +1926,9 @@ class DataQualityMonitor:
                     # Check Alpha Vantage options freshness
                     av_options_timestamp = self.redis.get(f'options:{symbol}:timestamp')
                     if av_options_timestamp:
-                        age = now - (int(av_options_timestamp) / 1000.0)
+                        # Handle Redis response type properly
+                        timestamp_str = av_options_timestamp.decode('utf-8') if isinstance(av_options_timestamp, bytes) else str(av_options_timestamp)
+                        age = now - (int(timestamp_str) / 1000.0)
                         
                         if age > self.freshness_thresholds['av_options']:
                             self.logger.warning(f"AV options stale for {symbol}: {age:.2f}s old")
@@ -1938,7 +1949,9 @@ class DataQualityMonitor:
                     # Check technical indicators freshness
                     tech_timestamp = self.redis.get(f'technicals:{symbol}:timestamp')
                     if tech_timestamp:
-                        age = now - (int(tech_timestamp) / 1000.0)
+                        # Handle Redis response type properly
+                        timestamp_str = tech_timestamp.decode('utf-8') if isinstance(tech_timestamp, bytes) else str(tech_timestamp)
+                        age = now - (int(timestamp_str) / 1000.0)
                         if age > self.freshness_thresholds['av_technicals']:
                             self.logger.warning(f"Technicals stale for {symbol}: {age:.2f}s old")
                             self.freshness_violations.append((symbol, 'av_technicals', age))
@@ -2002,7 +2015,9 @@ class DataQualityMonitor:
             # Verify price continuity (if we have previous price)
             last_price_str = self.redis.get(f'market:{symbol}:last')
             if last_price_str:
-                last_price = float(last_price_str)
+                # Handle Redis response type properly
+                price_str = last_price_str.decode('utf-8') if isinstance(last_price_str, bytes) else str(last_price_str)
+                last_price = float(price_str)
                 price_change = abs(data['last'] - last_price) / last_price if last_price > 0 else 0
                 
                 # Alert on > 10% price jump (likely data error)

@@ -14,7 +14,7 @@ import os
 import yaml
 import redis
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Union
 import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
@@ -24,13 +24,13 @@ from dotenv import load_dotenv
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
 # Import all system modules
-from data_ingestion import IBKRIngestion, AlphaVantageIngestion
-from analytics import ParameterDiscovery, AnalyticsEngine
-from signals import SignalGenerator, SignalDistributor
-from execution import ExecutionManager, PositionManager, RiskManager, EmergencyManager
-from social_media import TwitterBot, TelegramBot
-from dashboard import Dashboard
-from morning_analysis import MarketAnalysisGenerator, ScheduledTasks
+from src.data_ingestion import IBKRIngestion, AlphaVantageIngestion
+from src.analytics import ParameterDiscovery, AnalyticsEngine
+from src.signals import SignalGenerator, SignalDistributor
+from src.execution import ExecutionManager, PositionManager, RiskManager, EmergencyManager
+from src.social_media import TwitterBot, TelegramBot
+from src.dashboard import Dashboard
+from src.morning_analysis import MarketAnalysisGenerator, ScheduledTasks
 
 
 class AlphaTrader:
@@ -105,7 +105,7 @@ class AlphaTrader:
         load_dotenv()
         
         # Replace ${VAR} placeholders with environment variables
-        def replace_env_vars(obj):
+        def replace_env_vars(obj: Any) -> Any:
             if isinstance(obj, str) and obj.startswith('${') and obj.endswith('}'):
                 var_name = obj[2:-1]
                 value = os.getenv(var_name)
@@ -120,6 +120,10 @@ class AlphaTrader:
         
         config = replace_env_vars(config)
         
+        # Ensure config is a dict before validation and return
+        if not isinstance(config, dict):
+            raise ValueError("Configuration must be a dictionary")
+        
         # Validate required configuration keys
         required_keys = ['redis', 'ibkr', 'alpha_vantage', 'symbols', 'logging']
         for key in required_keys:
@@ -128,7 +132,7 @@ class AlphaTrader:
         
         return config
     
-    def setup_redis(self):
+    def setup_redis(self) -> None:
         """
         Initialize Redis connection with configuration from config.yaml.
         """
@@ -146,7 +150,7 @@ class AlphaTrader:
         )
         
         # Create Redis client from pool
-        self.redis = redis.Redis(connection_pool=pool)
+        self.redis: redis.Redis = redis.Redis(connection_pool=pool)
         
         # Test connection
         try:
@@ -387,9 +391,12 @@ class AlphaTrader:
                                     self.logger.error("IBKR disconnected for > 30 seconds")
                         
                         # Monitor data freshness
-                        stale_symbols = self.redis.hgetall('monitoring:data:stale')
+                        stale_symbols: Dict[Any, Any] = self.redis.hgetall('monitoring:data:stale')  # type: ignore
                         if stale_symbols:
-                            for symbol, staleness in stale_symbols.items():
+                            for symbol_key, staleness_value in stale_symbols.items():
+                                # Redis with decode_responses=True returns strings
+                                symbol = str(symbol_key)
+                                staleness = str(staleness_value)
                                 if float(staleness) > 30:
                                     self.logger.warning(f"Data stale for {symbol}: {staleness}s")
                     
@@ -402,9 +409,11 @@ class AlphaTrader:
                     # Monitor module heartbeats
                     for name in self.modules.keys():
                         heartbeat_key = f'module:heartbeat:{name}'
-                        last_heartbeat = self.redis.get(heartbeat_key)
+                        last_heartbeat: Optional[str] = self.redis.get(heartbeat_key)  # type: ignore
                         if last_heartbeat:
-                            age = datetime.now().timestamp() - float(last_heartbeat)
+                            # Redis with decode_responses=True returns strings
+                            heartbeat_str = str(last_heartbeat)
+                            age = datetime.now().timestamp() - float(heartbeat_str)
                             if age > 30:  # Alert if no heartbeat for 30 seconds
                                 self.logger.warning(f"Module {name} heartbeat is stale: {age:.1f}s")
                 

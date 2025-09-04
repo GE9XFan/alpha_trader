@@ -12,7 +12,7 @@ import json
 import time
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 from collections import deque
 
 # Add parent directory to path
@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 import redis
 import aiohttp
 from main import AlphaTrader
-from data_ingestion import AlphaVantageIngestion, DataQualityMonitor
+from data_ingestion import AlphaVantageIngestion, DataQualityMonitor, IBKRIngestion
 from dotenv import load_dotenv
 
 
@@ -30,10 +30,10 @@ class TestDay3CompleteSystem:
     """COMPLETE test suite for ENTIRE SYSTEM - IBKR + Alpha Vantage"""
     
     def __init__(self):
-        self.redis = None
-        self.trader = None
-        self.av_ingestion = None
-        self.ibkr_ingestion = None
+        self._redis: Optional[redis.Redis] = None
+        self._trader: Optional[AlphaTrader] = None
+        self._av_ingestion: Optional[AlphaVantageIngestion] = None
+        self._ibkr_ingestion: Optional[IBKRIngestion] = None
         self.results = {
             'initialization': False,
             'ibkr_connection': False,
@@ -53,6 +53,30 @@ class TestDay3CompleteSystem:
             'complete_system': False
         }
     
+    @property
+    def redis(self) -> redis.Redis:
+        if self._redis is None:
+            raise RuntimeError("Redis not initialized. Call setup() first.")
+        return self._redis
+    
+    @property
+    def trader(self) -> AlphaTrader:
+        if self._trader is None:
+            raise RuntimeError("Trader not initialized. Call setup() first.")
+        return self._trader
+    
+    @property
+    def av_ingestion(self) -> AlphaVantageIngestion:
+        if self._av_ingestion is None:
+            raise RuntimeError("AlphaVantage ingestion not initialized. Call setup() first.")
+        return self._av_ingestion
+    
+    @property
+    def ibkr_ingestion(self) -> IBKRIngestion:
+        if self._ibkr_ingestion is None:
+            raise RuntimeError("IBKR ingestion not initialized. Call setup() first.")
+        return self._ibkr_ingestion
+    
     def setup(self):
         """Initialize test environment"""
         print("\n=== Setting up Day 3 Test Environment ===")
@@ -70,8 +94,8 @@ class TestDay3CompleteSystem:
         
         # Initialize AlphaTrader to get config
         try:
-            self.trader = AlphaTrader('config/config.yaml')
-            self.redis = self.trader.redis
+            self._trader = AlphaTrader('config/config.yaml')
+            self._redis = self._trader.redis
             
             # Clear previous test data
             for key in self.redis.scan_iter("options:*"):
@@ -86,12 +110,11 @@ class TestDay3CompleteSystem:
             print("✅ Redis connection established and cleared")
             
             # Initialize AlphaVantageIngestion
-            self.av_ingestion = AlphaVantageIngestion(self.trader.config, self.redis)
+            self._av_ingestion = AlphaVantageIngestion(self._trader.config, self._redis)
             print("✅ AlphaVantageIngestion initialized")
             
             # Initialize IBKRIngestion
-            from data_ingestion import IBKRIngestion
-            self.ibkr_ingestion = IBKRIngestion(self.trader.config, self.redis)
+            self._ibkr_ingestion = IBKRIngestion(self._trader.config, self._redis)
             print("✅ IBKRIngestion initialized")
             
             return True
@@ -374,7 +397,7 @@ class TestDay3CompleteSystem:
                     
                     greeks_key = self.redis.get(f'options:{symbol}:greeks')
                     if greeks_key:
-                        greeks = json.loads(greeks_key)
+                        greeks = json.loads(greeks_key)  # type: ignore
                         print(f"  ✅ Found {len(greeks)} Greeks in Redis")
                         for key in list(greeks.keys())[:3]:
                             print(f"     {key}: Delta={greeks[key]['delta']:.4f}")
@@ -420,10 +443,10 @@ class TestDay3CompleteSystem:
                     # Verify Redis storage
                     stored = self.redis.get(f'sentiment:{symbol}:score')
                     assert stored is not None, "Sentiment not stored in Redis"
-                    ttl = self.redis.ttl(f'sentiment:{symbol}:score')
-                    assert 0 < ttl <= 300, f"Wrong TTL for sentiment: {ttl}"
+                    ttl_value = self.redis.ttl(f'sentiment:{symbol}:score')  # type: ignore
+                    assert ttl_value > 0 and ttl_value <= 300, f"Wrong TTL for sentiment: {ttl_value}"  # type: ignore[operator]
                     
-                    print(f"  ✅ Sentiment stored in Redis with {ttl}s TTL")
+                    print(f"  ✅ Sentiment stored in Redis with {ttl_value}s TTL")
                 else:
                     print(f"  ⚠️ No sentiment data returned (may be rate limited)")
                     self.redis.hincrby('monitoring:tests:warnings', 'no_sentiment_data', 1)
@@ -484,8 +507,8 @@ class TestDay3CompleteSystem:
                     if 'rsi' in indicators:
                         stored = self.redis.get(f'technicals:{symbol}:rsi')
                         assert stored is not None, "RSI not stored in Redis"
-                        ttl = self.redis.ttl(f'technicals:{symbol}:rsi')
-                        assert 0 < ttl <= 60, f"Wrong TTL for RSI: {ttl}"
+                        ttl_value = self.redis.ttl(f'technicals:{symbol}:rsi')  # type: ignore
+                        assert ttl_value > 0 and ttl_value <= 60, f"Wrong TTL for RSI: {ttl_value}"  # type: ignore[operator]
                         print(f"  ✅ Indicators stored in Redis with proper TTLs")
                     
                 else:
@@ -524,7 +547,7 @@ class TestDay3CompleteSystem:
             
             for status, expected_action in errors:
                 response = TestResponse(status)
-                action = await self.av_ingestion.handle_api_error(response, 'TEST')
+                action = await self.av_ingestion.handle_api_error(response, 'TEST')  # type: ignore
                 assert action == expected_action, f"Status {status} should return {expected_action}"
                 print(f"  ✅ Status {status} -> {action} (production logic verified)")
             
@@ -579,9 +602,9 @@ class TestDay3CompleteSystem:
                     
                     # Check TTLs on REAL keys
                     for key in keys[:2]:
-                        ttl = self.redis.ttl(key)
-                        if ttl > 0:
-                            print(f"     {key}: TTL={ttl}s")
+                        ttl_value = self.redis.ttl(key)  # type: ignore
+                        if ttl_value > 0:  # type: ignore[operator]
+                            print(f"     {key}: TTL={ttl_value}s")
             
             # Validate specific production keys exist
             options_keys = list(self.redis.scan_iter("options:*:chain"))
@@ -599,7 +622,7 @@ class TestDay3CompleteSystem:
                 # Check actual data structure
                 chain_data = self.redis.get(real_key)
                 if chain_data:
-                    parsed = json.loads(chain_data)
+                    parsed = json.loads(chain_data)  # type: ignore
                     assert 'contracts' in parsed, "Missing contracts in chain data"
                     assert 'symbol' in parsed, "Missing symbol in chain data"
                     print(f"  ✅ Data structure validated for {symbol}")
@@ -645,7 +668,7 @@ class TestDay3CompleteSystem:
                     # Check specific validation results stored in Redis
                     quality_check = self.redis.get(f'monitoring:data:quality:options:{symbol}')
                     if quality_check:
-                        quality_data = json.loads(quality_check)
+                        quality_data = json.loads(quality_check)  # type: ignore
                         print(f"  📊 Quality status: {quality_data['status']}")
                         if 'errors' in quality_data:
                             print(f"  ⚠️ Validation errors found: {quality_data['errors'][:3]}")
@@ -666,7 +689,7 @@ class TestDay3CompleteSystem:
                 ticker_data = self.redis.get(f'market:{symbol}:ticker')
                 if ticker_data:
                     print(f"\n  📊 Testing with REAL market data from Redis...")
-                    real_market = json.loads(ticker_data)
+                    real_market = json.loads(ticker_data)  # type: ignore
                     
                     # Validate REAL market data
                     is_valid = monitor.validate_market_data(symbol, real_market)
@@ -697,14 +720,14 @@ class TestDay3CompleteSystem:
                 # Check IBKR freshness
                 ibkr_freshness = self.redis.get(f'monitoring:data:freshness:ibkr:{symbol}')
                 if ibkr_freshness:
-                    freshness_data = json.loads(ibkr_freshness)
+                    freshness_data = json.loads(ibkr_freshness)  # type: ignore
                     print(f"  📊 {symbol} IBKR: {freshness_data['status']} (age={freshness_data['age']:.2f}s)")
                     freshness_found = True
                 
                 # Check AV freshness
                 av_freshness = self.redis.get(f'monitoring:data:freshness:av:{symbol}')
                 if av_freshness:
-                    freshness_data = json.loads(av_freshness)
+                    freshness_data = json.loads(av_freshness)  # type: ignore
                     print(f"  📊 {symbol} AV: {freshness_data['status']} (age={freshness_data['age']:.2f}s)")
                     freshness_found = True
             
@@ -716,7 +739,7 @@ class TestDay3CompleteSystem:
             # Check summary metrics
             summary = self.redis.get('monitoring:data:freshness:summary')
             if summary:
-                summary_data = json.loads(summary)
+                summary_data = json.loads(summary)  # type: ignore
                 print(f"  📈 Total violations: {summary_data.get('total_violations', 0)}")
                 if summary_data.get('recent_violations'):
                     print(f"  ⚠️ Recent violations: {len(summary_data['recent_violations'])}")
@@ -868,10 +891,12 @@ class TestDay3CompleteSystem:
             await self.ibkr_ingestion._connect_with_retry()
             
             assert self.ibkr_ingestion.connected, "IBKR not connected - Gateway must be running!"
-            assert self.redis.get('ibkr:connected') == '1', "IBKR connection flag not set in Redis"
+            connected_flag = self.redis.get('ibkr:connected')
+            assert connected_flag == '1', "IBKR connection flag not set in Redis"
             
             account = self.redis.get('ibkr:account')
-            print(f"  ✅ Connected to IBKR Gateway - Account: {account}")
+            account_str = account if account else 'None'
+            print(f"  ✅ Connected to IBKR Gateway - Account: {account_str}")
             
             self.results['ibkr_connection'] = True
             return True
@@ -902,7 +927,8 @@ class TestDay3CompleteSystem:
             level2_success = 0
             for symbol in ['SPY', 'QQQ', 'IWM']:
                 if self.redis.exists(f'market:{symbol}:book'):
-                    book = json.loads(self.redis.get(f'market:{symbol}:book'))
+                    book_data = self.redis.get(f'market:{symbol}:book')
+                    book = json.loads(book_data) if book_data else {}  # type: ignore
                     if book.get('bids') and book.get('asks'):
                         level2_success += 1
                         print(f"  ✅ {symbol}: Level 2 data flowing ({len(book['bids'])} bids, {len(book['asks'])} asks)")
@@ -915,7 +941,8 @@ class TestDay3CompleteSystem:
             standard_success = 0
             for symbol in ['AAPL', 'TSLA', 'NVDA']:
                 if self.redis.exists(f'market:{symbol}:ticker'):
-                    ticker = json.loads(self.redis.get(f'market:{symbol}:ticker'))
+                    ticker_data = self.redis.get(f'market:{symbol}:ticker')
+                    ticker = json.loads(ticker_data) if ticker_data else {}  # type: ignore
                     if ticker.get('last', 0) > 0:
                         standard_success += 1
                         print(f"  ✅ {symbol}: Ticker data flowing (Last: ${ticker['last']:.2f})")
@@ -978,7 +1005,8 @@ class TestDay3CompleteSystem:
             print(f"  📝 IBKR Standard: {len(self.ibkr_ingestion.standard_symbols)} symbols")
             
             # Track initial state
-            initial_api_calls = int(self.redis.get('monitoring:api:av:calls') or 0)
+            api_calls_data = self.redis.get('monitoring:api:av:calls')
+            initial_api_calls = int(api_calls_data) if api_calls_data else 0  # type: ignore
             
             # Reconnect IBKR if needed (test_ibkr_data_flow may have disconnected it)
             if not self.ibkr_ingestion.connected:
@@ -1008,7 +1036,8 @@ class TestDay3CompleteSystem:
             ibkr_success = 0
             for symbol in ['SPY', 'QQQ', 'IWM']:
                 if self.redis.exists(f'market:{symbol}:book'):
-                    book = json.loads(self.redis.get(f'market:{symbol}:book'))
+                    book_data = self.redis.get(f'market:{symbol}:book')
+                    book = json.loads(book_data) if book_data else {}  # type: ignore
                     if book.get('bids') and book.get('asks'):
                         ibkr_success += 1
                         print(f"  ✅ {symbol}: Level 2 data flowing ({len(book['bids'])} bids, {len(book['asks'])} asks)")
@@ -1027,7 +1056,7 @@ class TestDay3CompleteSystem:
                 for key in options_keys[:3]:  # Check first 3
                     data = self.redis.get(key)
                     if data:
-                        parsed = json.loads(data)
+                        parsed = json.loads(data)  # type: ignore
                         symbol = key.split(':')[1]
                         contract_count = len(parsed.get('contracts', []))
                         print(f"     - {symbol}: {contract_count} contracts stored")
@@ -1051,7 +1080,7 @@ class TestDay3CompleteSystem:
                 for key in sentiment_keys[:3]:
                     data = self.redis.get(key)
                     if data:
-                        parsed = json.loads(data)
+                        parsed = json.loads(data)  # type: ignore
                         symbol = key.split(':')[1]
                         score = parsed.get('sentiment_score', 0)
                         print(f"     - {symbol}: score={score:.4f}")
@@ -1065,7 +1094,7 @@ class TestDay3CompleteSystem:
                 for key in tech_keys[:3]:
                     data = self.redis.get(key)
                     if data:
-                        parsed = json.loads(data)
+                        parsed = json.loads(data)  # type: ignore
                         symbol = key.split(':')[1]
                         indicators = list(parsed.keys())
                         print(f"     - {symbol}: {indicators}")
@@ -1073,7 +1102,8 @@ class TestDay3CompleteSystem:
                 print(f"  ⚠️ No technical data (may be rate limited)")
             
             # Verify API calls were made
-            final_api_calls = int(self.redis.get('monitoring:api:av:calls') or 0)
+            api_calls_data_final = self.redis.get('monitoring:api:av:calls')
+            final_api_calls = int(api_calls_data_final) if api_calls_data_final else 0  # type: ignore
             calls_made = final_api_calls - initial_api_calls
             print(f"\n  📊 API Performance:")
             print(f"     - Calls made: {calls_made}")
@@ -1155,7 +1185,7 @@ class TestDay3CompleteSystem:
             if options_key:
                 real_data = self.redis.get(options_key)
                 if real_data:
-                    real_chain = json.loads(real_data)
+                    real_chain = json.loads(real_data)  # type: ignore
                     contracts = real_chain.get('contracts', [])[:100]  # Use first 100 real contracts
                     
                     print(f"  📊 Testing with {len(contracts)} REAL contracts")
@@ -1250,11 +1280,17 @@ async def main():
     success = await tester.run_all_tests()
     
     # Cleanup
-    if tester.av_ingestion:
-        await tester.av_ingestion.stop()
+    try:
+        if tester._av_ingestion:
+            await tester._av_ingestion.stop()
+    except (AttributeError, RuntimeError):
+        pass
     
-    if tester.ibkr_ingestion and tester.ibkr_ingestion.connected:
-        await tester.ibkr_ingestion.stop()
+    try:
+        if tester._ibkr_ingestion and tester._ibkr_ingestion.connected:
+            await tester._ibkr_ingestion.stop()
+    except (AttributeError, RuntimeError):
+        pass
     
     sys.exit(0 if success else 1)
 

@@ -11,7 +11,7 @@ import json
 import time
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional, Any
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -28,9 +28,9 @@ class TestDay2IBKR:
     """Comprehensive test suite for Day 2 IBKR implementation"""
     
     def __init__(self):
-        self.redis = None
-        self.trader = None
-        self.ibkr = None
+        self.redis: Optional[redis.Redis] = None
+        self.trader: Optional[AlphaTrader] = None
+        self.ibkr: Optional[IBKRIngestion] = None
         self.results = {
             'connection': False,
             'symbol_classification': False,
@@ -74,6 +74,8 @@ class TestDay2IBKR:
         
         try:
             # Create IBKR ingestion instance
+            if not self.trader or not self.redis:
+                raise RuntimeError("Trader or Redis not initialized - call setup() first")
             self.ibkr = IBKRIngestion(self.trader.config, self.redis)
             
             # Test connection
@@ -107,6 +109,9 @@ class TestDay2IBKR:
         print("\n=== Test 2: Symbol Classification ===")
         
         try:
+            if not self.ibkr:
+                raise RuntimeError("IBKR not initialized - run test_connection() first")
+            
             # Check Level 2 symbols
             expected_level2 = ['SPY', 'QQQ', 'IWM']
             assert set(self.ibkr.level2_symbols) == set(expected_level2), \
@@ -138,6 +143,9 @@ class TestDay2IBKR:
         print("\n=== Test 3: Market Data Subscriptions ===")
         
         try:
+            if not self.ibkr:
+                raise RuntimeError("IBKR not initialized - run test_connection() first")
+            
             # Subscribe to all symbols
             await self.ibkr._subscribe_all_symbols()
             
@@ -181,6 +189,8 @@ class TestDay2IBKR:
         print("\n=== Test 4: Data Flow to Redis ===")
         
         try:
+            if not self.ibkr or not self.redis:
+                raise RuntimeError("IBKR or Redis not initialized - run setup and test_connection() first")
             # Start data collection for a short period
             print("Collecting data for 10 seconds...")
             
@@ -215,7 +225,9 @@ class TestDay2IBKR:
                 # Check order book structure
                 book_data = self.redis.get(f'market:{symbol}:book')
                 if book_data:
-                    book = json.loads(book_data)
+                    # Handle Redis response type
+                    book_str = book_data.decode('utf-8') if isinstance(book_data, bytes) else str(book_data)
+                    book = json.loads(book_str)
                     if 'bids' in book and 'asks' in book:
                         print(f"✓ {symbol}: Order book with {len(book['bids'])} bids, {len(book['asks'])} asks")
             
@@ -252,6 +264,8 @@ class TestDay2IBKR:
     async def _run_ibkr_briefly(self):
         """Run IBKR ingestion briefly for testing"""
         try:
+            if not self.ibkr:
+                raise RuntimeError("IBKR not initialized")
             # Set up event handlers
             self.ibkr._setup_event_handlers()
             
@@ -268,6 +282,9 @@ class TestDay2IBKR:
         print("\n=== Test 5: Data Quality Validation ===")
         
         try:
+            if not self.ibkr or not self.redis:
+                raise RuntimeError("IBKR or Redis not initialized")
+            
             issues = []
             
             # Check Level 2 data quality
@@ -275,7 +292,8 @@ class TestDay2IBKR:
                 # Check spread
                 spread = self.redis.get(f'market:{symbol}:spread')
                 if spread:
-                    spread_val = float(spread)
+                    spread_str = spread.decode('utf-8') if isinstance(spread, bytes) else str(spread)
+                    spread_val = float(spread_str)
                     if spread_val < 0:
                         issues.append(f"{symbol}: Negative spread {spread_val}")
                     elif spread_val > 10:
@@ -284,14 +302,16 @@ class TestDay2IBKR:
                 # Check imbalance
                 imbalance = self.redis.get(f'market:{symbol}:imbalance')
                 if imbalance:
-                    imb_val = float(imbalance)
+                    imb_str = imbalance.decode('utf-8') if isinstance(imbalance, bytes) else str(imbalance)
+                    imb_val = float(imb_str)
                     if not -1 <= imb_val <= 1:
                         issues.append(f"{symbol}: Imbalance out of range {imb_val}")
                 
                 # Check last price
                 last = self.redis.get(f'market:{symbol}:last')
                 if last:
-                    last_val = float(last)
+                    last_str = last.decode('utf-8') if isinstance(last, bytes) else str(last)
+                    last_val = float(last_str)
                     if last_val <= 0:
                         issues.append(f"{symbol}: Invalid price {last_val}")
             
@@ -300,7 +320,8 @@ class TestDay2IBKR:
                 # Check trades
                 trades_data = self.redis.get(f'market:{symbol}:trades')
                 if trades_data:
-                    trades = json.loads(trades_data)
+                    trades_str = trades_data.decode('utf-8') if isinstance(trades_data, bytes) else str(trades_data)
+                    trades = json.loads(trades_str)
                     if trades:
                         latest_trade = trades[-1]
                         if latest_trade['price'] <= 0:
@@ -325,13 +346,19 @@ class TestDay2IBKR:
         print("\n=== Test 6: Performance Metrics ===")
         
         try:
+            if not self.redis:
+                raise RuntimeError("Redis not initialized")
+            
             # Check processing times
-            metrics = self.redis.hgetall('monitoring:ibkr:metrics')
+            metrics: Dict[Any, Any] = self.redis.hgetall('monitoring:ibkr:metrics')  # type: ignore
             
             if metrics:
                 # Check average processing time
-                avg_ms = float(metrics.get('avg_processing_ms', 0))
-                max_ms = float(metrics.get('max_processing_ms', 0))
+                # Handle bytes keys/values from Redis
+                avg_ms_val = metrics.get(b'avg_processing_ms') or metrics.get('avg_processing_ms') or 0
+                max_ms_val = metrics.get(b'max_processing_ms') or metrics.get('max_processing_ms') or 0
+                avg_ms = float(avg_ms_val.decode('utf-8') if isinstance(avg_ms_val, bytes) else avg_ms_val)
+                max_ms = float(max_ms_val.decode('utf-8') if isinstance(max_ms_val, bytes) else max_ms_val)
                 
                 print(f"Processing times - Avg: {avg_ms}ms, Max: {max_ms}ms")
                 
@@ -348,9 +375,12 @@ class TestDay2IBKR:
                         print(f"⚠️  Max processing time {max_ms}ms > 100ms target")
                 
                 # Check update counts
-                depth_updates = int(metrics.get('depth_updates', 0))
-                trade_updates = int(metrics.get('trade_updates', 0))
-                bar_updates = int(metrics.get('bar_updates', 0))
+                depth_val = metrics.get(b'depth_updates') or metrics.get('depth_updates') or 0
+                trade_val = metrics.get(b'trade_updates') or metrics.get('trade_updates') or 0
+                bar_val = metrics.get(b'bar_updates') or metrics.get('bar_updates') or 0
+                depth_updates = int(depth_val.decode('utf-8') if isinstance(depth_val, bytes) else depth_val)
+                trade_updates = int(trade_val.decode('utf-8') if isinstance(trade_val, bytes) else trade_val)
+                bar_updates = int(bar_val.decode('utf-8') if isinstance(bar_val, bytes) else bar_val)
                 
                 print(f"Update counts - Depth: {depth_updates}, Trades: {trade_updates}, Bars: {bar_updates}")
                 
@@ -369,6 +399,8 @@ class TestDay2IBKR:
         print("\n=== Test 7: Redis Key Structure ===")
         
         try:
+            if not self.redis or not self.ibkr:
+                raise RuntimeError("Redis or IBKR not initialized")
             # Expected key patterns
             expected_patterns = {
                 'market:*:book': "Order books (Level 2 only)",
@@ -385,7 +417,7 @@ class TestDay2IBKR:
             
             found_patterns = {}
             for pattern, description in expected_patterns.items():
-                keys = self.redis.keys(pattern)
+                keys: List[Any] = self.redis.keys(pattern)  # type: ignore
                 if keys:
                     found_patterns[pattern] = len(keys)
                     print(f"✓ {pattern}: {len(keys)} keys - {description}")
@@ -393,9 +425,13 @@ class TestDay2IBKR:
                     print(f"⚠️  {pattern}: No keys found - {description}")
             
             # Verify Level 2 vs Standard separation
-            book_keys = self.redis.keys('market:*:book')
+            book_keys: List[Any] = self.redis.keys('market:*:book')  # type: ignore
             if book_keys:
-                book_symbols = [key.split(':')[1] for key in book_keys]
+                # Handle bytes or string keys from Redis
+                book_symbols = []
+                for key in book_keys:
+                    key_str = key.decode('utf-8') if isinstance(key, bytes) else str(key)
+                    book_symbols.append(key_str.split(':')[1])
                 for symbol in book_symbols:
                     assert symbol in self.ibkr.level2_symbols, \
                         f"{symbol} has order book but is not a Level 2 symbol"
@@ -418,9 +454,17 @@ class TestDay2IBKR:
                 await self.ibkr.stop()
             
             # Clear test keys from Redis
-            test_keys = self.redis.keys('market:*')
-            if test_keys:
-                self.redis.delete(*test_keys)
+            if self.redis:
+                test_keys: List[Any] = self.redis.keys('market:*')  # type: ignore
+                if test_keys:
+                    # Convert bytes keys to strings if necessary
+                    keys_to_delete = []
+                    for key in test_keys:
+                        if isinstance(key, bytes):
+                            keys_to_delete.append(key.decode('utf-8'))
+                        else:
+                            keys_to_delete.append(str(key))
+                    self.redis.delete(*keys_to_delete)
             
             # Close Redis connection
             if self.redis:
