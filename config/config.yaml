@@ -104,3 +104,52 @@ risk:
     max_position_loss: 1000
     max_correlation: 0.7
     halt_on_disconnect: true
+
+parameter_discovery:
+  enabled: true
+  run_on_startup: true
+  startup_delay: 60  # Wait 60 seconds after startup to allow data collection
+  interval_seconds: 900  # Run every 15 minutes (900 seconds)
+  schedule: "0 9 * * *"  # Run daily at 9 AM (for cron-based scheduling if needed)
+  ttl_seconds: 86400  # 24 hours
+  data_staleness_threshold: 3600  # 1 hour - data older than this is stale
+  
+  vpin:
+    min_bucket_size: 50
+    max_bucket_size: 500
+    num_clusters: 5
+    min_trades_required: 1000
+    default_bucket_size: 100  # Fallback when insufficient data
+  
+  temporal:
+    max_lookback: 30
+    min_bars_required: 100
+    significance_threshold: 0.05
+    default_lookback: 10  # Fallback value
+  
+  market_makers:
+    toxic_list: ["CDRG", "JANE", "VIRTU", "SUSG"]
+    hft_size_threshold: 100
+    institutional_size_threshold: 1000
+    min_orders_required: 100
+    toxicity_scores:
+      toxic: 1.0
+      hft: 0.7
+      institutional: 0.2
+      other: 0.3
+  
+  volatility:
+    window_bars: 20
+    low_percentile: 33
+    high_percentile: 67
+    # CORRECTED: 6.5 hours × 60 minutes × 60 seconds / 5 seconds per bar = 4,680 bars per day
+    bars_per_day: 4680
+    trading_days_per_year: 252
+    min_bars_for_regime: 500
+    default_regime: "NORMAL"  # Fallback
+  
+  correlation:
+    min_bars: 100
+    calculation_window: 500
+    forward_fill_limit: 5  # Limit for forward fill
+    min_correlation_symbols: 3  # Minimum symbols needed for matrix

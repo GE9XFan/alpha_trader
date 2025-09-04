@@ -568,7 +568,16 @@ class IBKRIngestion:
         
         # Store trades list (keep last 1000)
         trades_list = list(self.trades_buffer[symbol])[-1000:]
-        pipe.setex(f'market:{symbol}:trades', 30, json.dumps(trades_list))  # 30s TTL
+        trades_key = f'market:{symbol}:trades'
+        # Delete existing key to avoid type conflicts
+        pipe.delete(trades_key)
+        # Add trades to list
+        if trades_list:
+            # Store each trade as JSON string in the list
+            for trade in trades_list:
+                pipe.rpush(trades_key, json.dumps(trade))
+        # Set expiration
+        pipe.expire(trades_key, 30)  # 30s TTL
         
         # Store additional ticker data
         ticker_data = {
@@ -630,7 +639,16 @@ class IBKRIngestion:
             
             # Store bars (keep last 100)
             bars_list = list(self.bars_buffer[symbol])[-100:]
-            pipe.setex(f'market:{symbol}:bars', 30, json.dumps(bars_list))  # 30s TTL
+            bars_key = f'market:{symbol}:bars'
+            # Delete existing key to avoid type conflicts
+            pipe.delete(bars_key)
+            # Add bars to list
+            if bars_list:
+                # Store each bar as JSON string in the list
+                for bar in bars_list:
+                    pipe.rpush(bars_key, json.dumps(bar))
+            # Set expiration
+            pipe.expire(bars_key, 30)  # 30s TTL
             
             # Store latest bar separately for quick access
             pipe.setex(f'market:{symbol}:latest_bar', 30, json.dumps(bar_data))  # 30s TTL
@@ -730,6 +748,9 @@ class IBKRIngestion:
         
         for symbol in self.all_symbols:
             last_update = self.last_update_times.get(symbol, 0)
+            # Skip if never updated (0 = uninitialized)
+            if last_update == 0:
+                continue
             if current_time - last_update > stale_threshold:
                 self.logger.warning(f"Data stale for {symbol}: {current_time - last_update:.1f}s")
                 self.redis.hset('monitoring:data:stale', symbol, current_time - last_update)
@@ -1896,7 +1917,11 @@ class DataQualityMonitor:
                     if ibkr_timestamp:
                         # Handle Redis response type properly
                         timestamp_str = ibkr_timestamp.decode('utf-8') if isinstance(ibkr_timestamp, bytes) else str(ibkr_timestamp)
-                        age = now - (int(timestamp_str) / 1000.0)
+                        timestamp_ms = int(timestamp_str)
+                        # Skip if timestamp is 0 (uninitialized)
+                        if timestamp_ms == 0:
+                            continue
+                        age = now - (timestamp_ms / 1000.0)
                         
                         if age > self.freshness_thresholds['ibkr']:
                             # Data is stale
@@ -1928,7 +1953,11 @@ class DataQualityMonitor:
                     if av_options_timestamp:
                         # Handle Redis response type properly
                         timestamp_str = av_options_timestamp.decode('utf-8') if isinstance(av_options_timestamp, bytes) else str(av_options_timestamp)
-                        age = now - (int(timestamp_str) / 1000.0)
+                        timestamp_ms = int(timestamp_str)
+                        # Skip if timestamp is 0 (uninitialized)
+                        if timestamp_ms == 0:
+                            continue
+                        age = now - (timestamp_ms / 1000.0)
                         
                         if age > self.freshness_thresholds['av_options']:
                             self.logger.warning(f"AV options stale for {symbol}: {age:.2f}s old")
@@ -1951,7 +1980,11 @@ class DataQualityMonitor:
                     if tech_timestamp:
                         # Handle Redis response type properly
                         timestamp_str = tech_timestamp.decode('utf-8') if isinstance(tech_timestamp, bytes) else str(tech_timestamp)
-                        age = now - (int(timestamp_str) / 1000.0)
+                        timestamp_ms = int(timestamp_str)
+                        # Skip if timestamp is 0 (uninitialized)
+                        if timestamp_ms == 0:
+                            continue
+                        age = now - (timestamp_ms / 1000.0)
                         if age > self.freshness_thresholds['av_technicals']:
                             self.logger.warning(f"Technicals stale for {symbol}: {age:.2f}s old")
                             self.freshness_violations.append((symbol, 'av_technicals', age))

@@ -223,14 +223,18 @@ class AlphaTrader:
         """
         Start all system modules asynchronously.
         Day 2: Now includes IBKR data ingestion startup.
+        Day 4: Includes parameter discovery on startup if enabled.
         """
         self.logger.info("Starting AlphaTrader System...")
         
-        # Day 4: Run parameter discovery first (skip for Day 2)
-        # if 'param_discovery' in self.modules:
-        #     self.logger.info("Running parameter discovery...")
-        #     discovery = self.modules['param_discovery']
-        #     await discovery.discover()
+        # Day 4: Schedule parameter discovery after data collection if enabled
+        pd_config = self.config.get('parameter_discovery', {})
+        if pd_config.get('enabled') and pd_config.get('run_on_startup'):
+            if 'param_discovery' in self.modules:
+                # Schedule parameter discovery to run after initial data collection
+                initial_delay = pd_config.get('startup_delay', 60)  # Default 60s delay
+                self.logger.info(f"Scheduling parameter discovery to run in {initial_delay}s (after data collection)")
+                asyncio.create_task(self._delayed_parameter_discovery(initial_delay))
         
         # Start all modules that have a start method
         tasks = []
@@ -353,6 +357,33 @@ class AlphaTrader:
         
         self.logger.info("Signal handlers configured (SIGINT, SIGTERM)")
     
+    async def _delayed_parameter_discovery(self, delay_seconds: int):
+        """
+        Run parameter discovery after a delay to allow data collection.
+        
+        Args:
+            delay_seconds: Seconds to wait before running discovery
+        """
+        await asyncio.sleep(delay_seconds)
+        
+        try:
+            if 'param_discovery' in self.modules:
+                self.logger.info("Running delayed parameter discovery...")
+                param_discovery = self.modules['param_discovery']
+                await param_discovery.run_discovery()
+                self.logger.info("Parameter discovery completed")
+                
+                # Schedule periodic runs if configured
+                pd_config = self.config.get('parameter_discovery', {})
+                interval = pd_config.get('interval_seconds', 3600)  # Default 1 hour
+                if interval > 0:
+                    self.logger.info(f"Scheduling next parameter discovery in {interval}s")
+                    asyncio.create_task(self._delayed_parameter_discovery(interval))
+        except Exception as e:
+            self.logger.error(f"Parameter discovery failed: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+    
     async def health_check(self):
         """
         Continuous health monitoring of all modules.
@@ -461,23 +492,10 @@ class AlphaTrader:
             data_dir.mkdir(parents=True)
             self.logger.info("Created data/redis directory")
         
-        # Day 2: Verify IBKR Gateway/TWS
+        # Day 2: Verify IBKR Gateway/TWS (skip in async context)
+        # NOTE: IBKR connection testing moved to module startup to avoid event loop conflicts
         if self.config.get('modules', {}).get('data_ingestion', {}).get('enabled', True):
-            try:
-                from ib_insync import IB
-                ib = IB()
-                # Use client ID 999 for testing to avoid conflict with main connection
-                ib.connect(
-                    self.config['ibkr']['host'], 
-                    self.config['ibkr']['port'], 
-                    clientId=999,
-                    timeout=5
-                )
-                ib.disconnect()
-                self.logger.info("✓ IBKR Gateway/TWS accessible")
-            except Exception as e:
-                self.logger.warning(f"IBKR not accessible (will retry when module starts): {e}")
-                self.logger.warning("Please ensure IBKR Gateway/TWS is running on port 7497")
+            self.logger.info("IBKR connection will be verified during module startup")
         
         # Validate API keys are present
         if 'alpha_vantage' in self.config:

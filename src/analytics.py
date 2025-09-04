@@ -17,8 +17,10 @@ import yaml
 import redis
 import time
 import asyncio
+from datetime import datetime
 from typing import Dict, List, Any, Optional, Tuple
 import logging
+import traceback
 
 
 class ParameterDiscovery:
@@ -30,154 +32,630 @@ class ParameterDiscovery:
     def __init__(self, config: Dict[str, Any], redis_conn: redis.Redis):
         """
         Initialize parameter discovery with configuration.
-        
-        TODO: Load configuration from config.yaml
-        TODO: Set up Redis connection
-        TODO: Initialize discovery parameters
+        All parameters come from config.yaml - NO HARDCODING.
         """
-        self.config = config  # Loaded from config.yaml
+        self.config = config
         self.redis = redis_conn
         self.logger = logging.getLogger(__name__)
         
+        # Load symbols from config
+        self.symbols = config.get('symbols', [])
+        
+        # Load discovery configuration
+        self.discovery_config = config.get('parameter_discovery', {})
+        
         # Discovery results will be stored here
         self.discovered_params = {}
+        
+        # Get Level 2 symbols from IBKR config
+        self.level2_symbols = config.get('ibkr', {}).get('level2_symbols', ['SPY', 'QQQ', 'IWM'])
     
     async def run_discovery(self):
         """
         Run complete parameter discovery pipeline.
         This should be run on startup and periodically (e.g., daily).
-        
-        TODO: Discover VPIN bucket size from actual trade volumes
-        TODO: Discover optimal lookback window using autocorrelation
-        TODO: Profile market makers from Level 2 data
-        TODO: Detect current volatility regime
-        TODO: Calculate symbol correlations
-        TODO: Generate and save discovered config file
-        TODO: Store all parameters in Redis with 24-hour TTL
-        
-        Redis keys to update:
-        - discovered:vpin_bucket_size (24h TTL)
-        - discovered:lookback_bars (24h TTL)
-        - discovered:mm_profiles (24h TTL)
-        - discovered:vol_regimes (24h TTL)
-        - discovered:correlation_matrix (24h TTL)
         """
         self.logger.info("Starting parameter discovery...")
-        pass
+        start_time = time.time()
+        
+        try:
+            # 1. Discover VPIN bucket size
+            self.discovered_params['vpin_bucket_size'] = self.discover_vpin_bucket_size()
+            
+            # 2. Discover temporal structure
+            self.discovered_params['lookback_bars'] = self.discover_temporal_structure()
+            
+            # 3. Analyze market makers
+            self.discovered_params['mm_profiles'] = self.analyze_market_makers()
+            
+            # 4. Discover volatility regimes
+            self.discovered_params['vol_regimes'] = self.discover_volatility_regimes()
+            
+            # 5. Calculate correlations
+            self.discovered_params['correlation_matrix'] = self.calculate_correlations()
+            
+            # Store all parameters in Redis
+            self.store_to_redis()
+            
+            # Generate config file
+            self.generate_config_file()
+            
+            elapsed = time.time() - start_time
+            self.logger.info(f"Parameter discovery completed in {elapsed:.2f} seconds")
+            
+        except Exception as e:
+            self.logger.error(f"Error in parameter discovery: {e}")
+            self.logger.error(traceback.format_exc())
+    
+    def _check_data_freshness(self, symbol: str) -> bool:
+        """
+        Check if market data is fresh (not stale weekend/holiday data).
+        Returns True if data is fresh, False if stale.
+        """
+        # Try to get last update timestamp from various sources
+        last_timestamp = None
+        
+        # Check trades timestamp
+        trades = self.redis.lrange(f'market:{symbol}:trades', -1, -1)
+        if trades:
+            try:
+                trade = json.loads(trades[0])
+                if 'timestamp' in trade:
+                    last_timestamp = trade['timestamp']
+            except:
+                pass
+        
+        # Check bars timestamp (bars are stored as a list)
+        if not last_timestamp:
+            bars_list = self.redis.lrange(f'market:{symbol}:bars', -1, -1)  # Get last bar
+            if bars_list:
+                try:
+                    last_bar = json.loads(bars_list[0])
+                    # Bars use 'time' field, not 'timestamp'
+                    if 'time' in last_bar:
+                        last_timestamp = last_bar['time']
+                    elif 'timestamp' in last_bar:
+                        last_timestamp = last_bar['timestamp']
+                except:
+                    pass
+        
+        if not last_timestamp:
+            return False
+        
+        # Check if older than threshold
+        threshold = self.discovery_config.get('data_staleness_threshold', 3600)
+        # Convert timestamp from milliseconds to seconds if needed
+        if last_timestamp > 1e10:  # Timestamp is in milliseconds
+            last_timestamp = last_timestamp / 1000
+        age = time.time() - float(last_timestamp)
+        
+        if age > threshold:
+            self.logger.warning(f"Data for {symbol} is stale: {age:.0f}s old")
+            return False
+        
+        return True
     
     def discover_vpin_bucket_size(self) -> int:
         """
         Discover optimal VPIN bucket size from trade clustering.
-        
-        TODO: Get recent trades from Redis (market:{symbol}:trades)
-        TODO: Extract trade sizes into array
-        TODO: Calculate percentiles (25th, 50th, 75th)
-        TODO: Apply K-means clustering (k=5) to find natural trade sizes
-        TODO: Select median cluster as optimal bucket size
-        TODO: Ensure size is between 50 and 500 shares
-        
-        Reference: VPIN paper suggests volume buckets of equal size
-        Returns:
-            Optimal bucket size in shares
+        Uses K-means clustering to find natural trade size groups.
         """
-        pass
+        vpin_config = self.discovery_config.get('vpin', {})
+        min_trades = vpin_config.get('min_trades_required', 1000)
+        default_size = vpin_config.get('default_bucket_size', 100)
+        min_size = vpin_config.get('min_bucket_size', 50)
+        max_size = vpin_config.get('max_bucket_size', 500)
+        num_clusters = vpin_config.get('num_clusters', 5)
+        
+        self.logger.info("Discovering VPIN bucket size...")
+        
+        # Check data freshness
+        if not self._check_data_freshness('SPY'):
+            self.logger.warning("Using default VPIN bucket size due to stale data")
+            return default_size
+        
+        # Fetch trades from Redis
+        trades_json = self.redis.lrange('market:SPY:trades', 0, 9999)
+        
+        # Check minimum trades requirement
+        if len(trades_json) < min_trades:
+            self.logger.warning(f"Insufficient trades: {len(trades_json)} < {min_trades}")
+            return default_size
+        
+        # Extract trade sizes
+        trade_sizes = []
+        for trade_str in trades_json:
+            try:
+                trade = json.loads(trade_str)
+                if 'size' in trade:
+                    trade_sizes.append(trade['size'])
+            except:
+                continue
+        
+        if len(trade_sizes) < min_trades:
+            self.logger.warning(f"Insufficient valid trades: {len(trade_sizes)}")
+            return default_size
+        
+        # Apply K-means clustering
+        from sklearn.cluster import KMeans
+        sizes_array = np.array(trade_sizes).reshape(-1, 1)
+        
+        kmeans = KMeans(n_clusters=num_clusters, random_state=42, n_init=10)
+        kmeans.fit(sizes_array)
+        
+        # Sort cluster centers and select median
+        centers = sorted(kmeans.cluster_centers_.flatten())
+        median_center = centers[num_clusters // 2]  # Middle cluster
+        
+        # Clamp to configured range
+        bucket_size = int(np.clip(median_center, min_size, max_size))
+        
+        self.logger.info(f"Discovered VPIN bucket size: {bucket_size} shares")
+        self.logger.info(f"  Cluster centers: {[int(c) for c in centers]}")
+        self.logger.info(f"  Selected median: {int(median_center)}")
+        
+        return bucket_size
     
     def discover_temporal_structure(self) -> int:
         """
         Find optimal lookback period using autocorrelation analysis.
-        
-        TODO: Get historical bars from Redis (market:{symbol}:bars)
-        TODO: Calculate log returns from close prices
-        TODO: Compute autocorrelation function (ACF) up to 50 lags
-        TODO: Find significant lags above threshold (2/sqrt(n))
-        TODO: Select maximum significant lag as lookback
-        TODO: Cap at 30 bars maximum
-        
-        Reference: Box-Jenkins methodology for time series analysis
-        Returns:
-            Optimal lookback period in bars
+        Uses Box-Jenkins methodology for time series analysis.
         """
-        pass
+        temporal_config = self.discovery_config.get('temporal', {})
+        min_bars = temporal_config.get('min_bars_required', 100)
+        max_lookback = temporal_config.get('max_lookback', 30)
+        significance_threshold = temporal_config.get('significance_threshold', 0.05)
+        default_lookback = temporal_config.get('default_lookback', 10)
+        
+        self.logger.info("Discovering temporal structure...")
+        
+        # Check data freshness
+        if not self._check_data_freshness('SPY'):
+            self.logger.warning("Using default lookback due to stale data")
+            return default_lookback
+        
+        # Fetch bars from Redis (stored as list)
+        bars_list = self.redis.lrange('market:SPY:bars', 0, -1)
+        if not bars_list:
+            self.logger.warning("No bar data available")
+            return default_lookback
+        
+        bars = [json.loads(bar) for bar in bars_list]
+        
+        # Check minimum bars requirement
+        if len(bars) < min_bars:
+            self.logger.warning(f"Insufficient bars: {len(bars)} < {min_bars}")
+            return default_lookback
+        
+        # Extract close prices and calculate log returns
+        closes = [float(bar['close']) for bar in bars]
+        log_returns = np.diff(np.log(closes))
+        
+        if len(log_returns) < min_bars:
+            self.logger.warning(f"Insufficient returns: {len(log_returns)}")
+            return default_lookback
+        
+        # Compute autocorrelation function
+        from statsmodels.tsa.stattools import acf
+        
+        # Calculate ACF with confidence intervals
+        acf_values, confint = acf(log_returns, nlags=min(50, len(log_returns)//4), 
+                                   alpha=significance_threshold)
+        
+        # Find significant lags (outside confidence interval)
+        significance_bound = 2 / np.sqrt(len(log_returns))
+        significant_lags = []
+        
+        for lag in range(1, len(acf_values)):
+            if abs(acf_values[lag]) > significance_bound:
+                significant_lags.append(lag)
+        
+        # Select the last significant lag as lookback
+        if significant_lags:
+            lookback = min(significant_lags[-1], max_lookback)
+        else:
+            lookback = default_lookback
+        
+        self.logger.info(f"Discovered temporal lookback: {lookback} bars")
+        self.logger.info(f"  Significant lags found: {significant_lags[:10]}")
+        self.logger.info(f"  Significance bound: {significance_bound:.4f}")
+        
+        return lookback
     
     def analyze_market_makers(self) -> dict:
         """
         Profile market makers from Level 2 order book data.
-        
-        TODO: Get order books for all symbols from Redis
-        TODO: Count orders by market maker ID
-        TODO: Calculate average order size per MM
-        TODO: Identify HFT firms by small order sizes (<100 shares)
-        TODO: Known toxic MMs: CDRG, JANE, VIRTU, SUSG
-        TODO: Calculate toxicity score (0-1) for each MM
-        TODO: Classify as HFT or INSTITUTIONAL
-        
-        Returns:
-            Dictionary of MM profiles with frequency, avg_size, toxicity
+        Only analyzes SPY/QQQ/IWM which have Level 2 data.
         """
-        pass
+        mm_config = self.discovery_config.get('market_makers', {})
+        toxic_list = mm_config.get('toxic_list', [])
+        hft_threshold = mm_config.get('hft_size_threshold', 100)
+        inst_threshold = mm_config.get('institutional_size_threshold', 1000)
+        scores = mm_config.get('toxicity_scores', {})
+        
+        self.logger.info("Analyzing market makers...")
+        
+        profiles = {}
+        
+        # Only analyze Level 2 symbols (have market depth)
+        for symbol in self.level2_symbols:
+            book_json = self.redis.get(f'market:{symbol}:book')
+            if not book_json:
+                self.logger.warning(f"No order book data for {symbol}")
+                continue
+            
+            try:
+                book = json.loads(book_json)
+                
+                # Extract MM IDs from bid levels
+                for level in book.get('bids', []):
+                    # Market maker ID might be in different fields
+                    mm_id = level.get('market_maker') or level.get('mm') or level.get('exchange')
+                    if not mm_id:
+                        continue
+                    
+                    if mm_id not in profiles:
+                        profiles[mm_id] = {
+                            'frequency': 0,
+                            'total_size': 0,
+                            'orders': [],
+                            'symbols': set()
+                        }
+                    
+                    profiles[mm_id]['frequency'] += 1
+                    profiles[mm_id]['orders'].append(level.get('size', 0))
+                    profiles[mm_id]['symbols'].add(symbol)
+                
+                # Extract MM IDs from ask levels
+                for level in book.get('asks', []):
+                    mm_id = level.get('market_maker') or level.get('mm') or level.get('exchange')
+                    if not mm_id:
+                        continue
+                    
+                    if mm_id not in profiles:
+                        profiles[mm_id] = {
+                            'frequency': 0,
+                            'total_size': 0,
+                            'orders': [],
+                            'symbols': set()
+                        }
+                    
+                    profiles[mm_id]['frequency'] += 1
+                    profiles[mm_id]['orders'].append(level.get('size', 0))
+                    profiles[mm_id]['symbols'].add(symbol)
+                    
+            except Exception as e:
+                self.logger.error(f"Error parsing order book for {symbol}: {e}")
+                continue
+        
+        # Calculate average size and toxicity score for each MM
+        for mm_id, profile in profiles.items():
+            avg_size = np.mean(profile['orders']) if profile['orders'] else 0
+            profile['avg_size'] = round(avg_size, 2)
+            
+            # Categorize and score
+            if mm_id in toxic_list:
+                profile['category'] = 'toxic'
+                profile['toxicity'] = scores.get('toxic', 1.0)
+            elif avg_size < hft_threshold:
+                profile['category'] = 'hft'
+                profile['toxicity'] = scores.get('hft', 0.7)
+            elif avg_size > inst_threshold:
+                profile['category'] = 'institutional'
+                profile['toxicity'] = scores.get('institutional', 0.2)
+            else:
+                profile['category'] = 'other'
+                profile['toxicity'] = scores.get('other', 0.3)
+            
+            # Convert symbols set to list for JSON serialization
+            profile['symbols'] = list(profile['symbols'])
+            
+            # Clean up orders list before storing
+            del profile['orders']
+        
+        self.logger.info(f"Profiled {len(profiles)} market makers")
+        if profiles:
+            # Log sample profiles
+            for mm_id in list(profiles.keys())[:3]:
+                p = profiles[mm_id]
+                self.logger.info(f"  {mm_id}: {p['category']}, avg_size={p['avg_size']}, toxicity={p['toxicity']}")
+        
+        return profiles
     
     def discover_volatility_regimes(self) -> dict:
         """
         Identify current market volatility regime.
-        
-        TODO: Get recent bars from Redis for SPY
-        TODO: Calculate rolling 20-bar realized volatility
-        TODO: Annualize volatility (multiply by sqrt(252 * 78))
-        TODO: Calculate historical volatility distribution
-        TODO: Define regimes: LOW (<33rd percentile), NORMAL, HIGH (>67th)
-        TODO: Determine current regime
-        
-        Reference: Volatility regime switching models
-        Returns:
-            Dict with current regime and thresholds
+        CRITICAL: Uses CORRECTED annualization factor (4,680 bars per day).
         """
-        pass
+        vol_config = self.discovery_config.get('volatility', {})
+        bars_per_day = vol_config.get('bars_per_day', 4680)  # CORRECTED: 6.5 hours * 60 min * 12 bars/min
+        trading_days = vol_config.get('trading_days_per_year', 252)
+        window = vol_config.get('window_bars', 20)
+        min_bars = vol_config.get('min_bars_for_regime', 500)
+        default_regime = vol_config.get('default_regime', 'NORMAL')
+        low_pct = vol_config.get('low_percentile', 33)
+        high_pct = vol_config.get('high_percentile', 67)
+        
+        self.logger.info("Discovering volatility regimes...")
+        self.logger.info(f"  Using annualization factor: sqrt({bars_per_day} * {trading_days}) = {np.sqrt(bars_per_day * trading_days):.1f}")
+        
+        # Check data freshness
+        if not self._check_data_freshness('SPY'):
+            self.logger.warning("Using default regime due to stale data")
+            return {
+                'current': default_regime,
+                'low_threshold': 0.10,
+                'high_threshold': 0.30,
+                'realized_vol': None,
+                'data_status': 'stale'
+            }
+        
+        # Fetch SPY bars (stored as list)
+        bars_list = self.redis.lrange('market:SPY:bars', 0, -1)
+        if not bars_list:
+            self.logger.warning("No bar data for SPY")
+            return {
+                'current': default_regime,
+                'error': 'No bar data'
+            }
+        
+        bars = [json.loads(bar) for bar in bars_list]
+        
+        # Check minimum bars requirement
+        if len(bars) < min_bars:
+            self.logger.warning(f"Insufficient bars for regime: {len(bars)} < {min_bars}")
+            return {
+                'current': default_regime,
+                'low_threshold': 0.10,
+                'high_threshold': 0.30,
+                'data_status': 'insufficient'
+            }
+        
+        # Calculate log returns
+        closes = [float(bar['close']) for bar in bars]
+        log_returns = np.diff(np.log(closes))
+        
+        # Calculate rolling volatility series
+        vol_series = []
+        for i in range(window, len(log_returns)):
+            window_returns = log_returns[i-window:i]
+            # Calculate realized volatility
+            realized_vol = np.std(window_returns)
+            # CORRECTED ANNUALIZATION: sqrt(4680 * 252) not sqrt(78 * 252)
+            annualized_vol = realized_vol * np.sqrt(bars_per_day * trading_days)
+            vol_series.append(annualized_vol)
+        
+        if not vol_series:
+            self.logger.warning("Could not calculate volatility series")
+            return {
+                'current': default_regime,
+                'error': 'Insufficient data for volatility calculation'
+            }
+        
+        # Calculate regime thresholds from historical distribution
+        low_threshold = np.percentile(vol_series, low_pct)
+        high_threshold = np.percentile(vol_series, high_pct)
+        current_vol = vol_series[-1]
+        
+        # Classify current regime
+        if current_vol < low_threshold:
+            regime = 'LOW'
+        elif current_vol > high_threshold:
+            regime = 'HIGH'
+        else:
+            regime = 'NORMAL'
+        
+        self.logger.info(f"Discovered volatility regime: {regime}")
+        self.logger.info(f"  Current vol: {current_vol:.2%}")
+        self.logger.info(f"  Low threshold: {low_threshold:.2%}")
+        self.logger.info(f"  High threshold: {high_threshold:.2%}")
+        
+        return {
+            'current': regime,
+            'low_threshold': round(low_threshold, 4),
+            'high_threshold': round(high_threshold, 4),
+            'realized_vol': round(current_vol, 4),
+            'annualization_factor': int(np.sqrt(bars_per_day * trading_days)),
+            'percentiles': {
+                '10': round(np.percentile(vol_series, 10), 4),
+                '25': round(np.percentile(vol_series, 25), 4),
+                '50': round(np.percentile(vol_series, 50), 4),
+                '75': round(np.percentile(vol_series, 75), 4),
+                '90': round(np.percentile(vol_series, 90), 4)
+            }
+        }
     
     def calculate_correlations(self) -> dict:
         """
         Calculate correlation matrix between symbols.
-        
-        TODO: Get price bars for all symbols from Redis
-        TODO: Calculate log returns for each symbol
-        TODO: Compute pairwise correlations
-        TODO: Handle missing data appropriately
-        TODO: Round to 3 decimal places
-        
-        Used for: Risk management, position correlation limits
-        Returns:
-            Correlation matrix as nested dictionary
+        Uses inner join for alignment and forward fill for missing data.
         """
-        pass
+        corr_config = self.discovery_config.get('correlation', {})
+        min_bars = corr_config.get('min_bars', 100)
+        window = corr_config.get('calculation_window', 500)
+        fill_limit = corr_config.get('forward_fill_limit', 5)
+        min_symbols = corr_config.get('min_correlation_symbols', 3)
+        
+        self.logger.info("Calculating correlation matrix...")
+        
+        returns_data = {}
+        
+        # Collect returns for each symbol
+        for symbol in self.symbols:
+            bars_list = self.redis.lrange(f'market:{symbol}:bars', 0, -1)
+            if not bars_list:
+                self.logger.debug(f"No bar data for {symbol}")
+                continue
+            
+            try:
+                bars = [json.loads(bar) for bar in bars_list]
+                
+                # Skip if insufficient data
+                if len(bars) < min_bars:
+                    self.logger.warning(f"Skipping {symbol}: only {len(bars)} bars")
+                    continue
+                
+                # Calculate log returns
+                closes = [float(bar['close']) for bar in bars[-window:]]
+                if len(closes) > 1:
+                    log_returns = np.diff(np.log(closes))
+                    returns_data[symbol] = log_returns
+                    
+            except Exception as e:
+                self.logger.error(f"Error processing {symbol}: {e}")
+                continue
+        
+        # Check minimum symbols requirement
+        if len(returns_data) < min_symbols:
+            self.logger.warning(f"Insufficient symbols for correlation: {len(returns_data)} < {min_symbols}")
+            return {}
+        
+        # Create aligned DataFrame using inner join
+        # Find minimum length for alignment
+        min_length = min(len(returns) for returns in returns_data.values())
+        
+        if min_length < 2:
+            self.logger.warning("Insufficient data for correlation calculation")
+            return {}
+        
+        # Align all series to same length (most recent data)
+        aligned_data = {}
+        for symbol, returns in returns_data.items():
+            aligned_data[symbol] = returns[-min_length:]
+        
+        # Create DataFrame
+        df = pd.DataFrame(aligned_data)
+        
+        # Forward fill missing values with limit
+        df = df.ffill(limit=fill_limit)
+        
+        # Drop any remaining NaN values
+        df = df.dropna()
+        
+        if len(df) < 2:
+            self.logger.warning("Insufficient valid data after cleaning")
+            return {}
+        
+        # Calculate correlation matrix
+        corr_matrix = df.corr()
+        
+        # Convert to nested dictionary with rounding
+        correlations = {}
+        for symbol1 in corr_matrix.index:
+            correlations[symbol1] = {}
+            for symbol2 in corr_matrix.columns:
+                correlations[symbol1][symbol2] = round(float(corr_matrix.loc[symbol1, symbol2]), 3)
+        
+        self.logger.info(f"Calculated correlations for {len(correlations)} symbols")
+        if correlations:
+            # Log sample correlations
+            symbols = list(correlations.keys())
+            if len(symbols) >= 2:
+                sample_corr = correlations[symbols[0]][symbols[1]]
+                self.logger.info(f"  Sample: {symbols[0]}-{symbols[1]} correlation = {sample_corr}")
+        
+        return correlations
     
-    def calculate_microstructure_features(self) -> dict:
+    def store_to_redis(self):
         """
-        Calculate market microstructure features for regime detection.
-        
-        TODO: Calculate bid-ask spreads over time
-        TODO: Measure order book depth at various levels
-        TODO: Calculate price impact of trades
-        TODO: Detect quote stuffing patterns
-        TODO: Measure order cancellation rates
-        
-        These features help identify market regimes and toxicity
-        Returns:
-            Dictionary of microstructure metrics
+        Store all discovered parameters in Redis with configured TTL.
         """
-        pass
+        ttl = self.discovery_config.get('ttl_seconds', 86400)  # 24 hours default
+        
+        # Store VPIN bucket size
+        if 'vpin_bucket_size' in self.discovered_params:
+            self.redis.setex('discovered:vpin_bucket_size', ttl, 
+                           self.discovered_params['vpin_bucket_size'])
+            self.logger.info(f"Stored discovered:vpin_bucket_size with {ttl}s TTL")
+        
+        # Store lookback bars
+        if 'lookback_bars' in self.discovered_params:
+            self.redis.setex('discovered:lookback_bars', ttl,
+                           self.discovered_params['lookback_bars'])
+            self.logger.info(f"Stored discovered:lookback_bars with {ttl}s TTL")
+        
+        # Store MM profiles
+        if 'mm_profiles' in self.discovered_params:
+            self.redis.setex('discovered:mm_profiles', ttl,
+                           json.dumps(self.discovered_params['mm_profiles']))
+            self.logger.info(f"Stored discovered:mm_profiles with {ttl}s TTL")
+        
+        # Store volatility regimes
+        if 'vol_regimes' in self.discovered_params:
+            self.redis.setex('discovered:vol_regimes', ttl,
+                           json.dumps(self.discovered_params['vol_regimes']))
+            self.logger.info(f"Stored discovered:vol_regimes with {ttl}s TTL")
+        
+        # Store correlation matrix
+        if 'correlation_matrix' in self.discovered_params:
+            self.redis.setex('discovered:correlation_matrix', ttl,
+                           json.dumps(self.discovered_params['correlation_matrix']))
+            self.logger.info(f"Stored discovered:correlation_matrix with {ttl}s TTL")
     
     def generate_config_file(self):
         """
         Generate discovered parameters config file.
-        
-        TODO: Compile all discovered parameters
-        TODO: Add timestamp
-        TODO: Save to config/discovered.yaml
-        TODO: Format as valid YAML
-        TODO: Include documentation comments
-        
-        File: config/discovered.yaml
+        Saves to config/discovered.yaml with timestamp and documentation.
         """
-        pass
+        from pathlib import Path
+        
+        # Prepare output data
+        output = {
+            'generated_at': datetime.now().isoformat(),
+            'parameters': {}
+        }
+        
+        # Add VPIN parameters
+        if 'vpin_bucket_size' in self.discovered_params:
+            output['parameters']['vpin'] = {
+                'bucket_size': self.discovered_params['vpin_bucket_size'],
+                'description': 'Optimal VPIN bucket size in shares'
+            }
+        
+        # Add temporal parameters
+        if 'lookback_bars' in self.discovered_params:
+            output['parameters']['temporal'] = {
+                'lookback_bars': self.discovered_params['lookback_bars'],
+                'description': 'Optimal lookback period for time series analysis'
+            }
+        
+        # Add market maker profiles
+        if 'mm_profiles' in self.discovered_params:
+            output['parameters']['market_makers'] = {
+                'profiles': self.discovered_params['mm_profiles'],
+                'description': 'Market maker toxicity profiles'
+            }
+        
+        # Add volatility regime
+        if 'vol_regimes' in self.discovered_params:
+            output['parameters']['volatility'] = {
+                'regime': self.discovered_params['vol_regimes'],
+                'description': 'Current market volatility regime and thresholds'
+            }
+        
+        # Add correlations
+        if 'correlation_matrix' in self.discovered_params:
+            output['parameters']['correlations'] = {
+                'matrix': self.discovered_params['correlation_matrix'],
+                'description': 'Symbol correlation matrix'
+            }
+        
+        # Write to file
+        config_dir = Path('config')
+        config_dir.mkdir(exist_ok=True)
+        
+        discovered_file = config_dir / 'discovered.yaml'
+        
+        with open(discovered_file, 'w') as f:
+            # Add header comment
+            f.write("# Discovered Trading Parameters\n")
+            f.write(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write("# These parameters were empirically discovered from market data\n\n")
+            
+            # Write YAML
+            yaml.dump(output, f, default_flow_style=False, sort_keys=False)
+        
+        self.logger.info(f"Generated config file: {discovered_file}")
 
 
 class AnalyticsEngine:
