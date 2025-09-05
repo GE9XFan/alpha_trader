@@ -42,8 +42,9 @@ class ParameterDiscovery:
         self.redis = redis_conn
         self.logger = logging.getLogger(__name__)
         
-        # Load symbols from config
-        self.symbols = config.get('symbols', [])
+        # Load symbols from config - extract from dict structure
+        syms = config.get('symbols', {})
+        self.symbols = list({*syms.get('standard', []), *syms.get('level2', [])})
         
         # Load discovery configuration
         self.discovery_config = config.get('parameter_discovery', {})
@@ -133,8 +134,19 @@ class ParameterDiscovery:
             last_timestamp = last_timestamp / 1000
         age = time.time() - float(last_timestamp)
         
+        # If market is closed, allow data from last trading session (up to 24 hours old)
+        import pytz
+        from datetime import datetime
+        ny_tz = pytz.timezone('US/Eastern')
+        now = datetime.now(ny_tz)
+        is_market_hours = now.weekday() < 5 and 9 <= now.hour < 16
+        
+        if not is_market_hours:
+            # Market is closed - allow older data (last trading session)
+            threshold = 86400  # 24 hours
+        
         if age > threshold:
-            self.logger.warning(f"Data for {symbol} is stale: {age:.0f}s old")
+            self.logger.warning(f"Data for {symbol} is stale: {age:.0f}s old (threshold: {threshold}s)")
             return False
         
         return True
@@ -153,7 +165,7 @@ class ParameterDiscovery:
         
         self.logger.info("Discovering VPIN bucket size...")
         
-        # Check data freshness
+        # Check data freshness (now handles market hours internally)
         if not await self._check_data_freshness('SPY'):
             self.logger.warning("Using default VPIN bucket size due to stale data")
             return default_size
@@ -290,56 +302,60 @@ class ParameterDiscovery:
         
         profiles = {}
         
+        # Get exchanges from config
+        exchs = self.config.get('ibkr', {}).get('level2_exchanges', {})
+        
         # Only analyze Level 2 symbols (have market depth)
         for symbol in self.level2_symbols:
-            book_json = await self.redis.get(f'market:{symbol}:book')
-            if not book_json:
-                self.logger.warning(f"No order book data for {symbol}")
-                continue
-            
-            try:
-                book = json.loads(book_json)
+            # Read from per-exchange books to see all market makers
+            for exchange in exchs.get(symbol, ['ARCA']):
+                book_json = await self.redis.get(f'market:{symbol}:{exchange}:book')
+                if not book_json:
+                    continue
                 
-                # Extract MM IDs from bid levels
-                for level in book.get('bids', []):
-                    # Market maker ID might be in different fields
-                    mm_id = level.get('market_maker') or level.get('mm') or level.get('exchange')
-                    if not mm_id:
-                        continue
+                try:
+                    book = json.loads(book_json)
                     
-                    if mm_id not in profiles:
-                        profiles[mm_id] = {
-                            'frequency': 0,
-                            'total_size': 0,
-                            'orders': [],
-                            'symbols': set()
-                        }
+                    # Extract MM IDs from bid levels
+                    for level in book.get('bids', []):
+                        # Market maker ID - use 'mm' field (participant code) with fallback to exchange
+                        mm_id = (level.get('mm') or '').strip() or level.get('exchange', 'UNKNOWN')
+                        if not mm_id:
+                            continue
+                        
+                        if mm_id not in profiles:
+                            profiles[mm_id] = {
+                                'frequency': 0,
+                                'total_size': 0,
+                                'orders': [],
+                                'symbols': set()
+                            }
+                        
+                        profiles[mm_id]['frequency'] += 1
+                        profiles[mm_id]['orders'].append(level.get('size', 0))
+                        profiles[mm_id]['symbols'].add(symbol)
                     
-                    profiles[mm_id]['frequency'] += 1
-                    profiles[mm_id]['orders'].append(level.get('size', 0))
-                    profiles[mm_id]['symbols'].add(symbol)
-                
-                # Extract MM IDs from ask levels
-                for level in book.get('asks', []):
-                    mm_id = level.get('market_maker') or level.get('mm') or level.get('exchange')
-                    if not mm_id:
-                        continue
-                    
-                    if mm_id not in profiles:
-                        profiles[mm_id] = {
-                            'frequency': 0,
-                            'total_size': 0,
-                            'orders': [],
-                            'symbols': set()
-                        }
-                    
-                    profiles[mm_id]['frequency'] += 1
-                    profiles[mm_id]['orders'].append(level.get('size', 0))
-                    profiles[mm_id]['symbols'].add(symbol)
-                    
-            except Exception as e:
-                self.logger.error(f"Error parsing order book for {symbol}: {e}")
-                continue
+                    # Extract MM IDs from ask levels
+                    for level in book.get('asks', []):
+                        mm_id = (level.get('mm') or '').strip() or level.get('exchange', 'UNKNOWN')
+                        if not mm_id:
+                            continue
+                        
+                        if mm_id not in profiles:
+                            profiles[mm_id] = {
+                                'frequency': 0,
+                                'total_size': 0,
+                                'orders': [],
+                                'symbols': set()
+                            }
+                        
+                        profiles[mm_id]['frequency'] += 1
+                        profiles[mm_id]['orders'].append(level.get('size', 0))
+                        profiles[mm_id]['symbols'].add(symbol)
+                        
+                except Exception as e:
+                    self.logger.error(f"Error parsing order book for {symbol}:{exchange}: {e}")
+                    continue
         
         # Calculate average size and toxicity score for each MM
         for mm_id, profile in profiles.items():
@@ -484,8 +500,8 @@ class ParameterDiscovery:
         Uses inner join for alignment and forward fill for missing data.
         """
         corr_config = self.discovery_config.get('correlation', {})
-        min_bars = corr_config.get('min_bars', 100)
-        window = corr_config.get('calculation_window', 500)
+        min_bars = corr_config.get('min_bars', 10)  # Lowered for startup
+        window = corr_config.get('calculation_window', 50)  # Use available bars
         fill_limit = corr_config.get('forward_fill_limit', 5)
         min_symbols = corr_config.get('min_correlation_symbols', 3)
         
@@ -682,6 +698,15 @@ class ParameterDiscovery:
                 'description': 'Symbol correlation matrix'
             }
         
+        # Helper function to convert numpy types to Python built-ins
+        def _to_builtin(x):
+            if isinstance(x, np.generic):
+                return x.item()
+            return x
+        
+        # Clean the output to remove numpy tags
+        clean_output = json.loads(json.dumps(output, default=_to_builtin))
+        
         # Write to file
         config_dir = Path('config')
         config_dir.mkdir(exist_ok=True)
@@ -694,8 +719,8 @@ class ParameterDiscovery:
             f.write(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write("# These parameters were empirically discovered from market data\n\n")
             
-            # Write YAML
-            yaml.dump(output, f, default_flow_style=False, sort_keys=False)
+            # Write YAML - use safe_dump to avoid Python tags
+            yaml.safe_dump(clean_output, f, sort_keys=False)
         
         self.logger.info(f"Generated config file: {discovered_file}")
 

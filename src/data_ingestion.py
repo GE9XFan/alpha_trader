@@ -62,9 +62,9 @@ class IBKRIngestion:
         # Order books per exchange
         self.order_books = {}
         
-        # Trade and bar buffers
-        self.trades_buffer = defaultdict(lambda: deque(maxlen=1000))
-        self.bars_buffer = defaultdict(lambda: deque(maxlen=100))
+        # Trade and bar buffers - increased sizes for proper accumulation
+        self.trades_buffer = defaultdict(lambda: deque(maxlen=5000))
+        self.bars_buffer = defaultdict(lambda: deque(maxlen=500))
         self.last_trade = {}  # Cache last trade prices
         
         # TTL configuration
@@ -131,6 +131,9 @@ class IBKRIngestion:
             
             # Start freshness check loop  
             freshness_task = asyncio.create_task(self._freshness_check_loop())
+            
+            # Start status logger loop
+            status_task = asyncio.create_task(self._status_logger_loop())
             
             # Keep running
             while self.running and self.connected:
@@ -245,7 +248,16 @@ class IBKRIngestion:
             try:
                 # Create exchange-specific contract
                 contract = Stock(symbol, exchange, 'USD')
-                await self.ib.qualifyContractsAsync(contract)
+                # CRITICAL: Must capture and use the qualified contract
+                contracts = await self.ib.qualifyContractsAsync(contract)
+                if contracts:
+                    contract = contracts[0]
+                    # Log if exchange changed during qualification
+                    if contract.exchange != exchange:
+                        self.logger.warning(f"Exchange changed during qualification: {exchange} -> {contract.exchange}")
+                
+                # Set market data type to live
+                self.ib.reqMarketDataType(1)  # 1=Live
                 
                 # Request L2 depth for this exchange
                 depth_ticker = await self._request_exchange_depth(symbol, exchange, contract)
@@ -255,10 +267,33 @@ class IBKRIngestion:
                     key = f"{symbol}:{exchange}"
                     self.depth_tickers[key] = depth_ticker
                     
-                    # Track subscription
-                    self.subscriptions[symbol] = {'type': 'LEVEL2', 'ticker': depth_ticker, 'exchange': exchange}
+                    # Also request market data with RTVolume for trades
+                    trade_ticker = self.ib.reqMktData(
+                        contract,
+                        genericTickList='233',
+                        snapshot=False,
+                        regulatorySnapshot=False
+                    )
                     
-                    self.logger.info(f"L2 subscription successful: {symbol} on {exchange}")
+                    # CRITICAL: Also request 5-second bars for L2 symbols
+                    # Analytics needs bar data from ALL symbols including L2
+                    bars = self.ib.reqRealTimeBars(
+                        contract,
+                        barSize=5,
+                        whatToShow='TRADES',
+                        useRTH=False
+                    )
+                    
+                    # Track subscription with depth ticker, trade ticker and bars
+                    self.subscriptions[symbol] = {
+                        'type': 'LEVEL2', 
+                        'depth': depth_ticker,
+                        'ticker': trade_ticker, 
+                        'exchange': exchange,
+                        'bars': bars  # Add bars reference
+                    }
+                    
+                    self.logger.info(f"L2 subscription successful: {symbol} on {exchange} (with 5-sec bars)")
                     
                     # SUCCESS - stop trying other exchanges
                     return
@@ -311,13 +346,13 @@ class IBKRIngestion:
                 # Just request regular market data (TOB)
                 ticker = self.ib.reqMktData(
                     contract,
-                    genericTickList='',
+                    genericTickList='233',
                     snapshot=False,
                     regulatorySnapshot=False
                 )
                 
                 # Note: TOB updates are handled by pendingTickersEvent globally
-                # No need for per-ticker handlers
+                # Bars will be requested by the caller when this ticker is returned
                 
                 return ticker
             
@@ -329,12 +364,14 @@ class IBKRIngestion:
         try:
             # Use SMART routing for standard symbols
             contract = Stock(symbol, 'SMART', 'USD')
-            await self.ib.qualifyContractsAsync(contract)
+            contracts = await self.ib.qualifyContractsAsync(contract)
+            if contracts:
+                contract = contracts[0]
             
-            # Request market data
+            # Request market data with RTVolume for trades
             ticker = self.ib.reqMktData(
                 contract,
-                genericTickList='',
+                genericTickList='233',
                 snapshot=False,
                 regulatorySnapshot=False
             )
@@ -413,6 +450,10 @@ class IBKRIngestion:
                     # Store exchange-specific book
                     book_ttl = self.ttls['order_book']
                     await pipe.setex(f'market:{symbol}:{exchange}:book', book_ttl, json.dumps(book))
+                    
+                    # CRITICAL: Also store at the aggregated location for analytics
+                    # Analytics and status logger expect market:{symbol}:book
+                    await pipe.setex(f'market:{symbol}:book', book_ttl, json.dumps(book))
                     
                     # CRITICAL: Always update aggregated TOB and :ticker
                     await self._update_aggregated_tob(symbol, book, pipe)
@@ -586,7 +627,7 @@ class IBKRIngestion:
                     # This is a depth ticker update
                     exchange = key.split(':')[1]
                     await self._on_depth_update_async(ticker, exchange)
-                    return
+                    continue
             
             # Process trades - check for valid values (not NaN)
             if (ticker.last and not math.isnan(ticker.last) and 
@@ -662,57 +703,61 @@ class IBKRIngestion:
             
             await pipe.setex(f'market:{symbol}:ticker', ttls['market_data'], json.dumps(ticker_data))
             
-            # Store trades list
+            # Store trades list - APPEND without deleting!
             trades_key = f'market:{symbol}:trades'
-            await pipe.delete(trades_key)
             
-            trades_list = list(self.trades_buffer[symbol])[-1000:]
-            if trades_list:
-                for t in trades_list:
-                    pipe.rpush(trades_key, json.dumps(t))
-            pipe.expire(trades_key, ttls['market_data'])
+            # Only push new trades from buffer
+            if self.trades_buffer[symbol]:
+                # Push the latest trade
+                pipe.rpush(trades_key, json.dumps(trade))
+                # Keep only last 1000 trades
+                pipe.ltrim(trades_key, -1000, -1)
+                pipe.expire(trades_key, ttls.get('trades', 3600))
             
             await pipe.execute()
     
     async def _on_bar_update_async(self, bars, hasNewBar):
         """Process 5-second bar updates."""
-        if not hasNewBar:
+        if not hasNewBar or not bars:
             return
             
-        for bars_list in bars:
-            if not bars_list:
-                continue
+        # bars is a single RealTimeBarList object, not a list
+        # Find which symbol this bars object belongs to
+        symbol = None
+        for sym, sub in self.subscriptions.items():
+            if 'bars' in sub and sub['bars'] == bars:
+                symbol = sym
+                break
                 
-            contract = bars_list.contract
-            if not contract:
-                continue
-                
-            symbol = contract.symbol
-            bar = bars_list[-1]  # Get latest bar
+        if not symbol:
+            return  # Can't identify which symbol these bars belong to
+            
+        # Get the latest bar from the RealTimeBarList
+        if len(bars) > 0:
+            bar = bars[-1]  # Get latest bar
             
             bar_data = {
                 'time': int(bar.time.timestamp() * 1000),
-                'open': float(bar.open),
+                'open': float(bar.open_),  # Note: ib_insync uses open_ with underscore
                 'high': float(bar.high),
                 'low': float(bar.low),
                 'close': float(bar.close),
                 'volume': int(bar.volume),
-                'average': float(bar.average) if hasattr(bar, 'average') else None,
+                'wap': float(bar.wap) if hasattr(bar, 'wap') else None,  # weighted average price
                 'count': int(bar.count) if hasattr(bar, 'count') else None
             }
             
             # Add to buffer
             self.bars_buffer[symbol].append(bar_data)
             
-            # Update Redis
+            # Update Redis - APPEND without deleting!
             async with self.redis.pipeline() as pipe:
                 bars_key = f'market:{symbol}:bars'
-                await pipe.delete(bars_key)
                 
-                bars_list = list(self.bars_buffer[symbol])[-100:]
-                if bars_list:
-                    for b in bars_list:
-                        pipe.rpush(bars_key, json.dumps(b))
+                # Push new bar without deleting existing ones
+                pipe.rpush(bars_key, json.dumps(bar_data))
+                # Keep only last 500 bars for analysis
+                pipe.ltrim(bars_key, -500, -1)
                 pipe.expire(bars_key, self.ttls['bars'])
                 
                 await pipe.execute()
@@ -781,6 +826,69 @@ class IBKRIngestion:
             except Exception as e:
                 self.logger.error(f"Freshness check error: {e}")
                 await asyncio.sleep(5)
+    
+    async def _status_logger_loop(self):
+        """Periodically log IBKR data status - similar to Alpha Vantage logging."""
+        await asyncio.sleep(5)  # Initial delay
+        
+        while self.running:
+            try:
+                # Collect current market data status
+                level2_status = []
+                standard_status = []
+                
+                for symbol, sub in self.subscriptions.items():
+                    # Get current data from Redis (stored as JSON string, not hash)
+                    ticker_json = await self.redis.get(f'market:{symbol}:ticker')
+                    
+                    if ticker_json:
+                        try:
+                            ticker_data = json.loads(ticker_json)
+                            # Handle None values properly - JSON might have null values
+                            bid = float(ticker_data.get('bid') or 0)
+                            ask = float(ticker_data.get('ask') or 0) 
+                            last = float(ticker_data.get('last') or 0)
+                            volume = int(ticker_data.get('volume') or 0)
+                            spread = float(ticker_data.get('spread') or 0)
+                        except (TypeError, ValueError) as e:
+                            # Skip this symbol if data is malformed
+                            continue
+                        
+                        if sub.get('type') == 'LEVEL2':
+                            # Check order book depth
+                            book_data = await self.redis.get(f'market:{symbol}:book')
+                            depth_count = 0
+                            if book_data:
+                                book = json.loads(book_data)
+                                depth_count = len(book.get('bids', [])) + len(book.get('asks', []))
+                            
+                            level2_status.append(f"{symbol}: bid={bid:.2f}, ask={ask:.2f}, spread={spread:.4f}, depth={depth_count}")
+                        else:
+                            standard_status.append(f"{symbol}: last={last:.2f}, vol={volume:,}")
+                
+                # Log summary every 10 seconds
+                if level2_status:
+                    self.logger.info(f"✓ IBKR L2 Depth: {', '.join(level2_status[:3])}")
+                
+                if standard_status:
+                    self.logger.info(f"✓ IBKR Quotes: {', '.join(standard_status[:3])}")
+                
+                # Check for recent trades/sweeps
+                sweep_alerts = await self.redis.lrange('alerts:sweeps', 0, 0)
+                if sweep_alerts:
+                    latest_sweep = json.loads(sweep_alerts[0])
+                    self.logger.info(f"⚡ Sweep detected: {latest_sweep['symbol']} {latest_sweep['size']} @ ${latest_sweep['price']}")
+                
+                # Log bar update counts
+                bars_count = self.update_counts.get('bars', 0)
+                if bars_count > 0:
+                    self.logger.info(f"✓ IBKR Bars: {bars_count} updates in last 10s")
+                
+                await asyncio.sleep(10)
+                
+            except Exception as e:
+                self.logger.error(f"Status logger error: {e}")
+                await asyncio.sleep(10)
     
     async def _metrics_loop(self):
         """Publish performance metrics to Redis."""

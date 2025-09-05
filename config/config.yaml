@@ -63,14 +63,15 @@ modules:
     
     # Single TTL source
     store_ttls:
-      market_data: 5
-      order_book: 2
-      bars: 10
-      options_chain: 15
-      greeks: 15
-      sentiment: 300
-      technicals: 60
-      metrics: 10
+      market_data: 60      # Keep quotes for 1 minute
+      order_book: 60       # Keep order books for 1 minute  
+      bars: 3600           # Keep bars for 1 hour (need 100+ for analytics)
+      trades: 3600         # Keep trades for 1 hour (need 1000+ for VPIN)
+      options_chain: 60    # Keep options for 1 minute
+      greeks: 60          # Keep greeks for 1 minute
+      sentiment: 300      # Keep sentiment for 5 minutes
+      technicals: 300     # Keep technicals for 5 minutes
+      metrics: 60         # Keep metrics for 1 minute
       monitoring: 60
       heartbeat: 15
   
