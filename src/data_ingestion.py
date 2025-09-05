@@ -21,6 +21,20 @@ import logging
 import traceback
 from decimal import Decimal, ROUND_HALF_UP
 
+# Venue normalization mapping for IBKR marketMaker field
+VENUE_MAP = {
+    "NSDQ": "NSDQ", "NASDAQ": "NSDQ",  # Normalize NASDAQ variants to NSDQ
+    "BATS": "BATS", "EDGX": "EDGX", "EDGEA": "EDGEA", 
+    "DRCTEDGE": "DRCTEDGE", "BYX": "BYX",
+    "ARCA": "ARCA", "NYSE": "NYSE", "AMEX": "AMEX", 
+    "NYSENAT": "NYSENAT", "PSX": "PSX", "IEX": "IEX", 
+    "LTSE": "LTSE", "CHX": "CHX", "ISE": "ISE",
+    "PEARL": "PEARL", "MEMX": "MEMX", "BEX": "BEX",
+    "IBEOS": "IBEOS", "IBKRATS": "IBKRATS",
+    "OVERNIGHT": "OVERNIGHT", "ISLAND": "NSDQ",  # ISLAND is NASDAQ
+    "SMART": "SMART", "UNKNOWN": "UNKNOWN", "": "UNKNOWN"
+}
+
 
 class IBKRIngestion:
     """
@@ -226,13 +240,7 @@ class IBKRIngestion:
                 self.logger.error(f"Failed to subscribe {symbol}: {result}")
     
     async def _subscribe_level2_symbol(self, symbol: str):
-        """Subscribe to Level 2 market depth using exchanges as ordered fallbacks."""
-        # Get exchange list from config, DEFAULT TO ARCA if not mapped
-        exchanges = self.config['ibkr'].get('level2_exchanges', {}).get(
-            symbol, 
-            ['ARCA']  # CRITICAL: Default to ARCA, never SMART
-        )
-        
+        """Subscribe to SMART Level 2 market depth to get venue codes in marketMaker field."""
         # Track how many active L2 depth subscriptions we have (max 3 allowed by IBKR)
         active_depth_count = len([k for k in self.depth_tickers.keys() 
                                  if k not in self.l2_fallback_exchanges])
@@ -243,68 +251,59 @@ class IBKRIngestion:
             await self._subscribe_standard_symbol(symbol)
             return
         
-        # Try exchanges in order until one succeeds
-        for exchange in exchanges:
-            try:
-                # Create exchange-specific contract
-                contract = Stock(symbol, exchange, 'USD')
-                # CRITICAL: Must capture and use the qualified contract
-                contracts = await self.ib.qualifyContractsAsync(contract)
-                if contracts:
-                    contract = contracts[0]
-                    # Log if exchange changed during qualification
-                    if contract.exchange != exchange:
-                        self.logger.warning(f"Exchange changed during qualification: {exchange} -> {contract.exchange}")
+        # Use SMART aggregation to get venue codes (NSDQ, ARCA, EDGX, etc.)
+        exchange = 'SMART'
+        try:
+            # Create SMART contract for aggregated depth with venue codes
+            contract = Stock(symbol, 'SMART', 'USD')
+            contracts = await self.ib.qualifyContractsAsync(contract)
+            if contracts:
+                contract = contracts[0]
                 
-                # Set market data type to live
-                self.ib.reqMarketDataType(1)  # 1=Live
+            # Set market data type to live
+            self.ib.reqMarketDataType(1)  # 1=Live
+            
+            # Request SMART L2 depth
+            depth_ticker = await self._request_exchange_depth(symbol, exchange, contract)
+            
+            if depth_ticker:
+                # CRITICAL: Store reference to prevent GC
+                key = f"{symbol}:SMART"
+                self.depth_tickers[key] = depth_ticker
                 
-                # Request L2 depth for this exchange
-                depth_ticker = await self._request_exchange_depth(symbol, exchange, contract)
+                # Also request market data with RTVolume for trades
+                trade_ticker = self.ib.reqMktData(
+                    contract,
+                    genericTickList='233',
+                    snapshot=False,
+                    regulatorySnapshot=False
+                )
                 
-                if depth_ticker:
-                    # CRITICAL: Store reference to prevent GC
-                    key = f"{symbol}:{exchange}"
-                    self.depth_tickers[key] = depth_ticker
-                    
-                    # Also request market data with RTVolume for trades
-                    trade_ticker = self.ib.reqMktData(
-                        contract,
-                        genericTickList='233',
-                        snapshot=False,
-                        regulatorySnapshot=False
-                    )
-                    
-                    # CRITICAL: Also request 5-second bars for L2 symbols
-                    # Analytics needs bar data from ALL symbols including L2
-                    bars = self.ib.reqRealTimeBars(
-                        contract,
-                        barSize=5,
-                        whatToShow='TRADES',
-                        useRTH=False
-                    )
-                    
-                    # Track subscription with depth ticker, trade ticker and bars
-                    self.subscriptions[symbol] = {
-                        'type': 'LEVEL2', 
-                        'depth': depth_ticker,
-                        'ticker': trade_ticker, 
-                        'exchange': exchange,
-                        'bars': bars  # Add bars reference
-                    }
-                    
-                    self.logger.info(f"L2 subscription successful: {symbol} on {exchange} (with 5-sec bars)")
-                    
-                    # SUCCESS - stop trying other exchanges
-                    return
+                # CRITICAL: Also request 5-second bars for L2 symbols
+                # Analytics needs bar data from ALL symbols including L2
+                bars = self.ib.reqRealTimeBars(
+                    contract,
+                    barSize=5,
+                    whatToShow='TRADES',
+                    useRTH=False
+                )
                 
-            except Exception as e:
-                self.logger.warning(f"L2 subscription failed for {symbol} on {exchange}: {e}, trying next exchange...")
-                continue
-        
-        # If all exchanges failed, fall back to standard market data
-        self.logger.warning(f"All L2 exchanges failed for {symbol}, falling back to TOB")
-        await self._subscribe_standard_symbol(symbol)
+                # Track subscription with depth ticker, trade ticker and bars
+                self.subscriptions[symbol] = {
+                    'type': 'LEVEL2', 
+                    'depth': depth_ticker,
+                    'ticker': trade_ticker, 
+                    'exchange': 'SMART',
+                    'bars': bars  # Add bars reference
+                }
+                
+                self.logger.info(f"L2 subscription successful: {symbol} on SMART (with venue codes)")
+                return
+                
+        except Exception as e:
+            self.logger.warning(f"L2 subscription failed for {symbol}: {e}")
+            # Fall back to standard market data
+            await self._subscribe_standard_symbol(symbol)
     
     async def _request_exchange_depth(self, symbol: str, exchange: str, contract):
         """Request depth with automatic fallback to TOB on failure."""
@@ -312,11 +311,12 @@ class IBKRIngestion:
             # Get configured depth rows
             num_rows = self.config['ibkr'].get('l2_num_rows', 10)
             
-            # Request exchange-specific depth (NOT SMART)
+            # Use SMART aggregation to get venue codes in marketMaker field
+            is_smart = (exchange == 'SMART')
             depth_ticker = self.ib.reqMktDepth(
                 contract,
                 numRows=num_rows,
-                isSmartDepth=False  # CRITICAL: No SMART aggregation
+                isSmartDepth=is_smart  # True for SMART to get venue codes
             )
             
             # Initialize per-exchange order book
@@ -424,24 +424,40 @@ class IBKRIngestion:
                 
                 book = self.order_books[book_key]
                 
-                # Update order book from ticker's DOM data
-                book['bids'] = [
-                    {
-                        'price': float(level.price),
-                        'size': int(level.size),
-                        'mm': level.marketMaker if hasattr(level, 'marketMaker') else 'UNKNOWN'
-                    }
-                    for level in (ticker.domBids or [])
-                ]
+                # Update order book from ticker's DOM data with venue normalization
+                venues_seen = set()
                 
-                book['asks'] = [
-                    {
+                # Extract and normalize venue codes from SMART depth
+                book['bids'] = []
+                for level in (ticker.domBids or []):
+                    # When using SMART depth, marketMaker contains venue code
+                    raw_venue = level.marketMaker if hasattr(level, 'marketMaker') else ''
+                    venue = VENUE_MAP.get(raw_venue, 'UNKNOWN') if raw_venue else 'UNKNOWN'
+                    venues_seen.add(venue)
+                    
+                    book['bids'].append({
                         'price': float(level.price),
                         'size': int(level.size),
-                        'mm': level.marketMaker if hasattr(level, 'marketMaker') else 'UNKNOWN'
-                    }
-                    for level in (ticker.domAsks or [])
-                ]
+                        'venue': venue,  # Store normalized venue code
+                        'mm': venue  # Keep for backward compatibility
+                    })
+                
+                book['asks'] = []
+                for level in (ticker.domAsks or []):
+                    raw_venue = level.marketMaker if hasattr(level, 'marketMaker') else ''
+                    venue = VENUE_MAP.get(raw_venue, 'UNKNOWN') if raw_venue else 'UNKNOWN'
+                    venues_seen.add(venue)
+                    
+                    book['asks'].append({
+                        'price': float(level.price),
+                        'size': int(level.size),
+                        'venue': venue,
+                        'mm': venue
+                    })
+                
+                # Log unique venues seen (only occasionally to avoid spam)
+                if venues_seen and venues_seen != {'UNKNOWN'} and random.random() < 0.01:  # 1% sample
+                    self.logger.debug(f"Venues in {symbol} book: {sorted(venues_seen)}")
                 
                 book['timestamp'] = int(datetime.now().timestamp() * 1000)
                 
@@ -632,11 +648,18 @@ class IBKRIngestion:
             # Process trades - check for valid values (not NaN)
             if (ticker.last and not math.isnan(ticker.last) and 
                 ticker.lastSize and not math.isnan(ticker.lastSize)):
+                # Extract venue from ticker's exchange field if available
+                venue = getattr(ticker, 'exchange', 'UNKNOWN')
+                if not venue or venue == 'SMART':
+                    # Try to get venue from lastExchange
+                    venue = getattr(ticker, 'lastExchange', 'UNKNOWN')
+                
                 trade = {
                     'symbol': symbol,
                     'price': float(ticker.last),
                     'size': int(ticker.lastSize),
-                    'time': int(datetime.now().timestamp() * 1000)
+                    'time': int(datetime.now().timestamp() * 1000),
+                    'venue': venue  # Add venue to trade data
                 }
                 
                 # Cache last trade

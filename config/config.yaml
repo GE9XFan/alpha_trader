@@ -135,6 +135,52 @@ parameter_discovery:
       institutional: 0.2
       other: 0.3
   
+  # New pattern-based toxicity detection
+  toxicity_detection:
+    method: "pattern_based"  # Switch from "market_maker_based" to this
+    vpin_thresholds:
+      toxic: 0.70
+      informed: 0.30
+    venue_scores:  # Venue-based toxicity scores (from Warning 2152)
+      # Main exchanges (Depth venues)
+      NASDAQ: 0.50   # NASDAQ main book (full name)
+      NSDQ: 0.50     # NASDAQ main book (short code)
+      NYSE: 0.35     # NYSE institutional
+      ARCA: 0.40     # NYSE ARCA institutional
+      BATS: 0.70     # CBOE BZX, mixed retail/HFT
+      BEX: 0.65      # CBOE BEX, retail flow
+      IEX: 0.20      # Speed bump protects from HFT
+      
+      # Secondary venues (Top venues from warning)
+      BYX: 0.70      # CBOE BYX, retail-heavy
+      PEARL: 0.75    # MIAX PEARL, options/retail
+      AMEX: 0.45     # NYSE American, mixed flow
+      MEMX: 0.65     # Members Exchange, aggressive pricing
+      EDGEA: 0.75    # CBOE EDGA, retail flow
+      EDGX: 0.80     # CBOE EDGX, retail-heavy PFOF
+      DRCTEDGE: 0.75 # Direct Edge, retail
+      PSX: 0.65      # NASDAQ PSX, retail-focused
+      ISE: 0.70      # International Securities Exchange
+      CHX: 0.60      # Chicago Stock Exchange
+      LTSE: 0.40     # Long-Term Stock Exchange
+      NYSENAT: 0.35  # NYSE National, institutional
+      
+      # IB internal and special venues
+      IBEOS: 0.60    # IB's internal smart router
+      IBKRATS: 0.60  # IB internal routing
+      OVERNIGHT: 0.50 # Extended hours trading
+      SMART: 0.50     # IB SMART routing (mixed flow)
+      
+      # Dark pools and unknown
+      DARK: 0.50     # Unknown dark pool
+      UNKNOWN: 0.50  # Default for unknown venues
+    trade_patterns:
+      odd_lot_weight: 0.70   # Odd lots indicate retail
+      sweep_weight: 0.90     # Sweeps indicate aggressive/toxic
+      block_weight: -0.50    # Large blocks indicate institutional
+    block_threshold: 10000   # Shares for block trade
+    sweep_window_ms: 250     # Time window for sweep detection
+  
   volatility:
     window_bars: 20
     low_percentile: 33

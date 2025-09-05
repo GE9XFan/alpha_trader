@@ -70,8 +70,8 @@ class ParameterDiscovery:
             # 2. Discover temporal structure
             self.discovered_params['lookback_bars'] = await self.discover_temporal_structure()
             
-            # 3. Analyze market makers
-            self.discovered_params['mm_profiles'] = await self.analyze_market_makers()
+            # 3. Analyze flow toxicity (replaces market maker profiling)
+            self.discovered_params['flow_toxicity'] = await self.analyze_flow_toxicity()
             
             # 4. Discover volatility regimes
             self.discovered_params['vol_regimes'] = await self.discover_volatility_regimes()
@@ -287,109 +287,251 @@ class ParameterDiscovery:
         
         return lookback
     
+    # Venue alias mapping to handle spelling variations
+    VENUE_ALIASES = {
+        # NASDAQ variants
+        "NSDQ": "NSDQ",
+        "NASDAQ": "NSDQ",
+        "ISLAND": "NSDQ",  # NASDAQ's ISLAND book
+        "PSX": "PSX",      # NASDAQ PSX
+        
+        # NYSE variants
+        "NYSE": "NYSE",
+        "ARCA": "ARCA",
+        "ARCX": "ARCA",    # Alternative ARCA code
+        "AMEX": "AMEX",    # NYSE American
+        "NYSENAT": "NYSENAT",  # NYSE National
+        
+        # CBOE variants
+        "BATS": "BATS",
+        "BZX": "BATS",     # CBOE BZX is BATS
+        "BYX": "BYX",      # CBOE BYX
+        "BEX": "BEX",      # CBOE BEX
+        "EDGX": "EDGX",    # CBOE EDGX
+        "EDGEA": "EDGEA",  # CBOE EDGA
+        "EDGA": "EDGEA",   # Map EDGA to EDGEA
+        
+        # Other exchanges
+        "IEX": "IEX",
+        "MEMX": "MEMX",
+        "CHX": "CHX",
+        "LTSE": "LTSE",
+        "PEARL": "PEARL",  # MIAX PEARL
+        "ISE": "ISE",      # International Securities Exchange
+        "DRCTEDGE": "DRCTEDGE",
+        
+        # IB internal
+        "IBEOS": "IBEOS",
+        "IBKRATS": "IBKRATS",
+        "OVERNIGHT": "OVERNIGHT",
+        "SMART": "SMART",  # If we see SMART, keep it
+    }
+    
+    def _score_venue(self, venue: str) -> float:
+        """Score a single venue with alias resolution and logging."""
+        tox_config = self.discovery_config.get('toxicity_detection', {})
+        venue_scores = tox_config.get('venue_scores', {})
+        
+        # Normalize and map venue
+        v = venue.strip().upper()
+        v = self.VENUE_ALIASES.get(v, v)
+        
+        # Get score or default
+        if v not in venue_scores:
+            default_score = venue_scores.get('UNKNOWN', 0.5)
+            # Use INFO level initially to track unseen venues, can change to DEBUG later
+            self.logger.info(f"[toxicity] unseen venue '{venue}' (mapped to '{v}'), using UNKNOWN={default_score}")
+            return default_score
+            
+        return venue_scores.get(v, 0.5)
+    
+    def _venue_toxicity_from_config(self, venue_counts: dict) -> float:
+        """Calculate venue-based toxicity score from venue distribution."""
+        if not venue_counts:
+            return 0.5  # Default neutral if no venue data
+            
+        total = sum(venue_counts.values()) or 1
+        weighted_sum = 0
+        
+        # Score each venue using alias mapping
+        for venue, count in venue_counts.items():
+            score = self._score_venue(venue)
+            weighted_sum += score * count
+            
+        return weighted_sum / total
+    
+    def _detect_sweeps(self, trades: list, window_ms: float) -> int:
+        """Detect sweep patterns in trades (rapid multi-level takes)."""
+        if not trades:
+            return 0
+            
+        sweeps = 0
+        trades_sorted = sorted(trades, key=lambda t: t.get('time', 0))
+        i = 0
+        
+        while i < len(trades_sorted):
+            j = i + 1
+            # Find all trades within sweep window
+            while (j < len(trades_sorted) and 
+                   trades_sorted[j].get('time', 0) - trades_sorted[i].get('time', 0) <= window_ms):
+                j += 1
+            
+            window = trades_sorted[i:j]
+            if len(window) >= 3:  # Need at least 3 trades for a sweep
+                # Check if same-sided trades with price progression
+                prices = [t.get('price', 0) for t in window]
+                if prices == sorted(prices) or prices == sorted(prices, reverse=True):
+                    sweeps += 1
+            i = j
+            
+        return sweeps
+    
+    def _trade_pattern_toxicity(self, trades: list) -> float:
+        """Calculate toxicity from trade patterns (odd lots, sweeps, blocks)."""
+        if not trades:
+            return 0.5
+            
+        tox_config = self.discovery_config.get('toxicity_detection', {})
+        patterns = tox_config.get('trade_patterns', {})
+        block_threshold = tox_config.get('block_threshold', 10000)
+        sweep_window_ms = tox_config.get('sweep_window_ms', 250)
+        
+        # Odd lot ratio (retail indicator)
+        odd_lots = sum(1 for t in trades if t.get('size', 0) % 100 != 0)
+        odd_ratio = odd_lots / len(trades) if trades else 0
+        
+        # Sweep ratio (aggressive/toxic)
+        sweeps = self._detect_sweeps(trades, sweep_window_ms)
+        sweep_ratio = sweeps / max(1, len(trades) // 3)  # Normalize by potential sweep groups
+        
+        # Block ratio (institutional)
+        blocks = sum(1 for t in trades if t.get('size', 0) >= block_threshold)
+        block_ratio = blocks / len(trades) if trades else 0
+        
+        # Weight and combine
+        toxicity = (odd_ratio * patterns.get('odd_lot_weight', 0.7) +
+                   sweep_ratio * patterns.get('sweep_weight', 0.9) +
+                   block_ratio * patterns.get('block_weight', -0.5))
+        
+        return max(0.0, min(1.0, toxicity))
+    
+    def _book_imbalance_volatility(self, books: list) -> float:
+        """Calculate volatility of order book imbalance (manipulation indicator)."""
+        if not books:
+            return 0.0
+            
+        imbalances = []
+        for book in books:
+            bid_volume = sum(b.get('size', 0) for b in book.get('bids', [])[:5]) or 1
+            ask_volume = sum(a.get('size', 0) for a in book.get('asks', [])[:5]) or 1
+            imbalance = (bid_volume - ask_volume) / (bid_volume + ask_volume)
+            imbalances.append(imbalance)
+            
+        return float(np.std(imbalances)) if len(imbalances) > 1 else 0.0
+    
     async def analyze_market_makers(self) -> dict:
+        """Backward compatibility wrapper - now calls analyze_flow_toxicity."""
+        return await self.analyze_flow_toxicity()
+    
+    async def analyze_flow_toxicity(self) -> dict:
         """
-        Profile market makers from Level 2 order book data.
-        Only analyzes SPY/QQQ/IWM which have Level 2 data.
+        Analyze flow toxicity using venue distribution, trade patterns, and VPIN.
+        Returns comprehensive toxicity metrics for each Level 2 symbol.
         """
-        mm_config = self.discovery_config.get('market_makers', {})
-        toxic_list = mm_config.get('toxic_list', [])
-        hft_threshold = mm_config.get('hft_size_threshold', 100)
-        inst_threshold = mm_config.get('institutional_size_threshold', 1000)
-        scores = mm_config.get('toxicity_scores', {})
+        from collections import Counter
         
-        self.logger.info("Analyzing market makers...")
+        tox_config = self.discovery_config.get('toxicity_detection', {})
+        vpin_thresholds = tox_config.get('vpin_thresholds', {'toxic': 0.7, 'informed': 0.3})
         
-        profiles = {}
+        self.logger.info("Analyzing venue & pattern toxicity...")
         
-        # Get exchanges from config
-        exchs = self.config.get('ibkr', {}).get('level2_exchanges', {})
+        toxicity_results = {}
         
-        # Only analyze Level 2 symbols (have market depth)
+        # Analyze each Level 2 symbol
         for symbol in self.level2_symbols:
-            # Read from per-exchange books to see all market makers
-            for exchange in exchs.get(symbol, ['ARCA']):
-                book_json = await self.redis.get(f'market:{symbol}:{exchange}:book')
-                if not book_json:
-                    continue
+            try:
+                # 1. Get current VPIN if available
+                vpin_str = await self.redis.get(f'vpin:{symbol}')
+                vpin = float(vpin_str) if vpin_str else 0.5
                 
-                try:
-                    book = json.loads(book_json)
-                    
-                    # Extract MM IDs from bid levels
-                    for level in book.get('bids', []):
-                        # Market maker ID - use 'mm' field (participant code) with fallback to exchange
-                        mm_id = (level.get('mm') or '').strip() or level.get('exchange', 'UNKNOWN')
-                        if not mm_id:
-                            continue
-                        
-                        if mm_id not in profiles:
-                            profiles[mm_id] = {
-                                'frequency': 0,
-                                'total_size': 0,
-                                'orders': [],
-                                'symbols': set()
-                            }
-                        
-                        profiles[mm_id]['frequency'] += 1
-                        profiles[mm_id]['orders'].append(level.get('size', 0))
-                        profiles[mm_id]['symbols'].add(symbol)
-                    
-                    # Extract MM IDs from ask levels
-                    for level in book.get('asks', []):
-                        mm_id = (level.get('mm') or '').strip() or level.get('exchange', 'UNKNOWN')
-                        if not mm_id:
-                            continue
-                        
-                        if mm_id not in profiles:
-                            profiles[mm_id] = {
-                                'frequency': 0,
-                                'total_size': 0,
-                                'orders': [],
-                                'symbols': set()
-                            }
-                        
-                        profiles[mm_id]['frequency'] += 1
-                        profiles[mm_id]['orders'].append(level.get('size', 0))
-                        profiles[mm_id]['symbols'].add(symbol)
-                        
-                except Exception as e:
-                    self.logger.error(f"Error parsing order book for {symbol}:{exchange}: {e}")
-                    continue
+                # 2. Analyze venue distribution from trades
+                trades_json = await self.redis.lrange(f'market:{symbol}:trades', 0, 999)
+                trades = []
+                venue_counts = Counter()
+                
+                for trade_str in trades_json:
+                    try:
+                        trade = json.loads(trade_str)
+                        trades.append(trade)
+                        # Extract venue from trade or book
+                        venue = trade.get('venue', 'UNKNOWN')
+                        venue_counts[venue] += 1
+                    except:
+                        continue
+                
+                # If no venue info in trades, try to get from order book
+                if not venue_counts:
+                    book_json = await self.redis.get(f'market:{symbol}:book')
+                    if book_json:
+                        book = json.loads(book_json)
+                        # Extract venues from venue field (or mm for backward compat)
+                        for side in ['bids', 'asks']:
+                            for level in book.get(side, [])[:10]:  # Sample top 10 levels
+                                venue = level.get('venue') or level.get('mm', '')
+                                venue = str(venue).strip()
+                                if venue and venue != 'UNKNOWN':
+                                    size = level.get('size', 1)
+                                    venue_counts[venue] += size  # Weight by size
+                
+                # 3. Calculate venue toxicity
+                venue_tox = self._venue_toxicity_from_config(dict(venue_counts))
+                
+                # 4. Calculate trade pattern toxicity
+                pattern_tox = self._trade_pattern_toxicity(trades)
+                
+                # 5. Calculate book imbalance volatility (if we have book history)
+                book_tox = 0.5  # Default neutral
+                # TODO: Store book snapshots for volatility calculation
+                
+                # 6. Blend toxicity scores (weights can be configured)
+                overall_toxicity = (
+                    0.50 * vpin +           # VPIN is primary signal
+                    0.25 * venue_tox +      # Venue mix
+                    0.20 * pattern_tox +    # Trade patterns
+                    0.05 * book_tox         # Book volatility
+                )
+                
+                # 7. Classify based on VPIN thresholds
+                if vpin >= vpin_thresholds['toxic']:
+                    label = 'toxic'
+                elif vpin <= vpin_thresholds['informed']:
+                    label = 'informed'
+                else:
+                    label = 'neutral'
+                
+                # Store result
+                toxicity_results[symbol] = {
+                    'toxicity': round(overall_toxicity, 3),
+                    'vpin': round(vpin, 3),
+                    'venue_tox': round(venue_tox, 3),
+                    'pattern_tox': round(pattern_tox, 3),
+                    'book_tox': round(book_tox, 3),
+                    'venue_mix': dict(venue_counts),
+                    'label': label
+                }
+                
+                # Log the result
+                self.logger.info(f"  {symbol}: tox={overall_toxicity:.3f} (vpin={vpin:.3f}, "
+                               f"venue={venue_tox:.3f}, pattern={pattern_tox:.3f}) "
+                               f"mix={dict(list(venue_counts.most_common(3)))}")
+                
+            except Exception as e:
+                self.logger.error(f"Error analyzing toxicity for {symbol}: {e}")
+                continue
         
-        # Calculate average size and toxicity score for each MM
-        for mm_id, profile in profiles.items():
-            avg_size = np.mean(profile['orders']) if profile['orders'] else 0
-            profile['avg_size'] = round(avg_size, 2)
-            
-            # Categorize and score
-            if mm_id in toxic_list:
-                profile['category'] = 'toxic'
-                profile['toxicity'] = scores.get('toxic', 1.0)
-            elif avg_size < hft_threshold:
-                profile['category'] = 'hft'
-                profile['toxicity'] = scores.get('hft', 0.7)
-            elif avg_size > inst_threshold:
-                profile['category'] = 'institutional'
-                profile['toxicity'] = scores.get('institutional', 0.2)
-            else:
-                profile['category'] = 'other'
-                profile['toxicity'] = scores.get('other', 0.3)
-            
-            # Convert symbols set to list for JSON serialization
-            profile['symbols'] = list(profile['symbols'])
-            
-            # Clean up orders list before storing
-            del profile['orders']
+        self.logger.info(f"Analyzed flow toxicity for {len(toxicity_results)} symbols")
         
-        self.logger.info(f"Profiled {len(profiles)} market makers")
-        if profiles:
-            # Log sample profiles
-            for mm_id in list(profiles.keys())[:3]:
-                p = profiles[mm_id]
-                self.logger.info(f"  {mm_id}: {p['category']}, avg_size={p['avg_size']}, toxicity={p['toxicity']}")
-        
-        return profiles
+        return toxicity_results
     
     async def discover_volatility_regimes(self) -> dict:
         """
@@ -632,11 +774,11 @@ class ParameterDiscovery:
                            self.discovered_params['lookback_bars'])
             self.logger.info(f"Stored discovered:lookback_bars with {ttl}s TTL")
         
-        # Store MM profiles
-        if 'mm_profiles' in self.discovered_params:
-            await self.redis.setex('discovered:mm_profiles', ttl,
-                           json.dumps(self.discovered_params['mm_profiles']))
-            self.logger.info(f"Stored discovered:mm_profiles with {ttl}s TTL")
+        # Store flow toxicity analysis
+        if 'flow_toxicity' in self.discovered_params:
+            await self.redis.setex('discovered:flow_toxicity', ttl,
+                           json.dumps(self.discovered_params['flow_toxicity']))
+            self.logger.info(f"Stored discovered:flow_toxicity with {ttl}s TTL")
         
         # Store volatility regimes
         if 'vol_regimes' in self.discovered_params:
@@ -677,11 +819,11 @@ class ParameterDiscovery:
                 'description': 'Optimal lookback period for time series analysis'
             }
         
-        # Add market maker profiles
-        if 'mm_profiles' in self.discovered_params:
-            output['parameters']['market_makers'] = {
-                'profiles': self.discovered_params['mm_profiles'],
-                'description': 'Market maker toxicity profiles'
+        # Add flow toxicity results
+        if 'flow_toxicity' in self.discovered_params:
+            output['parameters']['flow_toxicity'] = {
+                'analysis': self.discovered_params['flow_toxicity'],
+                'description': 'Venue and pattern-based flow toxicity analysis'
             }
         
         # Add volatility regime
