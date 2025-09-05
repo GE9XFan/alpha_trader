@@ -15,9 +15,12 @@ from collections import defaultdict
 import json
 import yaml
 import redis
+import redis.asyncio as aioredis
 import time
 import asyncio
-from datetime import datetime
+import pytz
+import math
+from datetime import datetime, time as datetime_time
 from typing import Dict, List, Any, Optional, Tuple
 import logging
 import traceback
@@ -29,10 +32,11 @@ class ParameterDiscovery:
     Runs on startup and periodically to adapt to market conditions.
     """
     
-    def __init__(self, config: Dict[str, Any], redis_conn: redis.Redis):
+    def __init__(self, config: Dict[str, Any], redis_conn):
         """
         Initialize parameter discovery with configuration.
         All parameters come from config.yaml - NO HARDCODING.
+        Note: redis_conn can be either sync or async Redis depending on context.
         """
         self.config = config
         self.redis = redis_conn
@@ -239,8 +243,17 @@ class ParameterDiscovery:
         from statsmodels.tsa.stattools import acf
         
         # Calculate ACF with confidence intervals
-        acf_values, confint = acf(log_returns, nlags=min(50, len(log_returns)//4), 
-                                   alpha=significance_threshold)
+        # ACF can return 2-4 values depending on parameters
+        acf_result = acf(log_returns, nlags=min(50, len(log_returns)//4), 
+                        alpha=significance_threshold)
+        
+        # Safely unpack only what we need
+        if isinstance(acf_result, tuple) and len(acf_result) >= 2:
+            acf_values = acf_result[0]
+            confint = acf_result[1] if len(acf_result) > 1 else None
+        else:
+            acf_values = acf_result
+            confint = None
         
         # Find significant lags (outside confidence interval)
         significance_bound = 2 / np.sqrt(len(log_returns))
@@ -540,11 +553,40 @@ class ParameterDiscovery:
         corr_matrix = df.corr()
         
         # Convert to nested dictionary with rounding
+        # Handle potential complex values from correlation calculation
+        import math
+        
         correlations = {}
         for symbol1 in corr_matrix.index:
             correlations[symbol1] = {}
             for symbol2 in corr_matrix.columns:
-                correlations[symbol1][symbol2] = round(float(corr_matrix.loc[symbol1, symbol2]), 3)
+                val = corr_matrix.loc[symbol1, symbol2]
+                # Handle complex numbers or NaN
+                try:
+                    # Handle pandas/numpy scalar types
+                    if isinstance(val, (complex, np.complexfloating)):
+                        # Complex number - take real part
+                        numeric_val = float(val.real)
+                    elif isinstance(val, (int, float, np.integer, np.floating)):
+                        numeric_val = float(val)
+                    elif hasattr(val, 'item'):
+                        # Handle numpy scalars
+                        item_val = val.item()
+                        if isinstance(item_val, complex):
+                            numeric_val = float(item_val.real)
+                        else:
+                            numeric_val = float(item_val)
+                    else:
+                        # Try direct conversion as last resort
+                        numeric_val = float(val)
+                    
+                    # Check for finite values
+                    if math.isfinite(numeric_val):
+                        correlations[symbol1][symbol2] = round(numeric_val, 3)
+                    else:
+                        correlations[symbol1][symbol2] = 0.0
+                except (TypeError, ValueError):
+                    correlations[symbol1][symbol2] = 0.0
         
         self.logger.info(f"Calculated correlations for {len(correlations)} symbols")
         if correlations:
@@ -657,226 +699,6 @@ class ParameterDiscovery:
         
         self.logger.info(f"Generated config file: {discovered_file}")
 
-
-class AnalyticsEngine:
-    """
-    Real-time analytics engine calculating all trading metrics.
-    Processes market data at 10Hz and updates metrics in Redis.
-    """
-    
-    def __init__(self, config: Dict[str, Any], redis_conn: redis.Redis):
-        """
-        Initialize analytics engine with configuration.
-        
-        TODO: Load configuration from config.yaml
-        TODO: Set up Redis connection
-        TODO: Load symbols list from config
-        TODO: Initialize metric calculators
-        """
-        self.config = config  # Loaded from config.yaml
-        self.redis = redis_conn
-        self.symbols = config.get('symbols', ['SPY', 'QQQ', 'IWM', 'AAPL', 'TSLA', 'NVDA', 'PLTR', 'VXX'])
-        self.logger = logging.getLogger(__name__)
-    
-    async def start(self):
-        """
-        Main analytics processing loop running at 10Hz.
-        
-        TODO: Process each symbol continuously
-        TODO: Check for new data (compare timestamps)
-        TODO: Calculate all metrics when new data arrives
-        TODO: Write metrics to Redis with 5-second TTL
-        TODO: Handle calculation errors gracefully
-        TODO: Monitor calculation latency
-        
-        Processing frequency: 10Hz (every 100ms)
-        """
-        self.logger.info("Starting analytics engine...")
-        
-        while True:
-            # Process all symbols
-            # TODO: Check timestamps and process if new data
-            
-            await asyncio.sleep(0.1)  # 10Hz processing
-    
-    def process_symbol(self, symbol: str):
-        """
-        Calculate all metrics for one symbol.
-        
-        TODO: Load discovered parameters from Redis
-        TODO: Get market data (book, trades, last price)
-        TODO: Get options data (greeks, chain)
-        TODO: Calculate enhanced VPIN with MM toxicity
-        TODO: Calculate multi-factor order book imbalance
-        TODO: Detect hidden/iceberg orders
-        TODO: Calculate gamma exposure (GEX)
-        TODO: Calculate delta exposure (DEX)
-        TODO: Detect sweep orders
-        TODO: Determine market regime
-        TODO: Store all metrics in Redis
-        
-        Redis keys to update:
-        - metrics:{symbol}:vpin (5 sec TTL)
-        - metrics:{symbol}:obi (5 sec TTL)
-        - metrics:{symbol}:hidden (5 sec TTL)
-        - metrics:{symbol}:gex (5 sec TTL)
-        - metrics:{symbol}:dex (5 sec TTL)
-        - metrics:{symbol}:sweep (5 sec TTL)
-        - metrics:{symbol}:regime (5 sec TTL)
-        """
-        pass
-    
-    def calculate_enhanced_vpin(self, trades: list, bucket_size: int, mm_profiles: dict) -> float:
-        """
-        Calculate VPIN with market maker toxicity adjustment.
-        
-        TODO: Implement volume bucketing algorithm
-        TODO: Classify trades as buy/sell using tick test
-        TODO: Use bid/ask prices when available for classification
-        TODO: Apply toxicity weight based on market maker
-        TODO: Calculate volume imbalance per bucket
-        TODO: Average VPIN across buckets
-        
-        Reference: Easley, López de Prado, O'Hara (2012) VPIN paper
-        Formula: VPIN = |Buy Volume - Sell Volume| / Total Volume
-        Enhancement: Weight by MM toxicity score
-        
-        Returns:
-            Enhanced VPIN score (0-1, higher = more toxic)
-        """
-        pass
-    
-    def calculate_order_book_imbalance(self, book: dict) -> dict:
-        """
-        Calculate multi-factor order book imbalance.
-        
-        TODO: Extract top 10 bid/ask levels
-        TODO: Calculate volume imbalance: (bid_vol - ask_vol)/(bid_vol + ask_vol)
-        TODO: Calculate weighted price pressure using size-weighted prices
-        TODO: Calculate book slope (depth decay) using linear regression
-        TODO: Compute slope ratio (bid_slope / ask_slope)
-        
-        Reference: Cartea, Jaimungal, Penalva - Algorithmic Trading
-        Returns:
-            Dict with volume imbalance, pressure, and slope metrics
-        """
-        pass
-    
-    def detect_hidden_orders(self, book: dict, trades: list) -> bool:
-        """
-        Detect iceberg orders and hidden liquidity.
-        
-        TODO: Compare trade sizes with displayed book sizes
-        TODO: Check last 20 trades
-        TODO: Flag if trade size > 1.5x displayed size at price
-        TODO: Look for repeated trades at same price level
-        TODO: Check for rapid replenishment of exhausted levels
-        
-        Reference: Hidden liquidity detection algorithms
-        Returns:
-            True if hidden orders detected
-        """
-        pass
-    
-    def calculate_gamma_exposure(self, greeks: dict, chain: list, spot_price: float) -> dict:
-        """
-        Calculate net gamma exposure (GEX) from options chain.
-        
-        TODO: Sum gamma exposure by strike
-        TODO: For calls: GEX = gamma * OI * 100 * spot^2 * 0.01
-        TODO: For puts: GEX = -gamma * OI * 100 * spot^2 * 0.01
-        TODO: Find pin strike (maximum absolute gamma)
-        TODO: Find flip point (zero gamma crossing)
-        TODO: Create gamma profile by strike
-        
-        Reference: SqueezeMetrics GEX calculation methodology
-        Note: Greeks are PROVIDED by Alpha Vantage, not calculated
-        
-        Returns:
-            Dict with total GEX, pin strike, flip point, profile
-        """
-        pass
-    
-    def calculate_delta_exposure(self, greeks: dict, chain: list, spot_price: float) -> dict:
-        """
-        Calculate net delta exposure (DEX) from options chain.
-        
-        TODO: Sum delta exposure by strike
-        TODO: For calls: DEX = delta * OI * 100 * spot
-        TODO: For puts: DEX = delta * OI * 100 * spot (delta is negative)
-        TODO: Calculate total DEX across all strikes
-        TODO: Create delta profile by strike
-        
-        Reference: Options market maker hedging flows
-        Note: Greeks are PROVIDED by Alpha Vantage, not calculated
-        
-        Returns:
-            Dict with total DEX and by-strike breakdown
-        """
-        pass
-    
-    def detect_sweeps(self, trades: list) -> dict:
-        """
-        Detect sweep orders based on trade clustering.
-        
-        TODO: Group trades by 1-second time windows
-        TODO: Look for 3+ trades in same second
-        TODO: Check if total size > 5000 shares
-        TODO: Calculate volume-weighted average price
-        TODO: Flag as sweep if criteria met
-        
-        Sweep = Large order split across multiple venues
-        Returns:
-            Dict with detected flag, timestamp, size, avg_price
-        """
-        pass
-    
-    def calculate_book_slope(self, levels: list) -> float:
-        """
-        Calculate order book depth decay (slope).
-        
-        TODO: Extract sizes from each level
-        TODO: Create position array (0, 1, 2, ...)
-        TODO: Fit linear regression to (position, size)
-        TODO: Return absolute value of slope coefficient
-        
-        Steeper slope = Less depth at further levels
-        Returns:
-            Book slope value
-        """
-        pass
-    
-    def calculate_trade_flow_toxicity(self, trades: list, mm_profiles: dict) -> float:
-        """
-        Calculate trade flow toxicity using MM profiles.
-        
-        TODO: Identify market maker for each trade
-        TODO: Apply toxicity score from MM profile
-        TODO: Calculate volume-weighted average toxicity
-        TODO: Adjust for trade size (smaller = more likely HFT)
-        
-        Used to enhance VPIN calculation
-        Returns:
-            Toxicity score (0-1)
-        """
-        pass
-    
-    def calculate_price_impact(self, trades: list, book: dict) -> float:
-        """
-        Estimate price impact of recent trades.
-        
-        TODO: Calculate average trade size
-        TODO: Estimate market depth at different levels
-        TODO: Calculate theoretical price move for average trade
-        TODO: Compare with actual price movements
-        
-        High impact = Low liquidity or aggressive trading
-        Returns:
-            Price impact in basis points
-        """
-        pass
-
-
 class MetricsAggregator:
     """
     Aggregate metrics across symbols for portfolio-level analytics.
@@ -911,7 +733,8 @@ class MetricsAggregator:
         Returns:
             Portfolio-level metrics dictionary
         """
-        pass
+        # TODO: Implement portfolio metrics calculation
+        return {}
     
     def calculate_sector_flows(self) -> dict:
         """
@@ -925,4 +748,150 @@ class MetricsAggregator:
         Returns:
             Sector flow analysis
         """
-        pass
+        # TODO: Implement sector flow analysis
+        return {}
+class AnalyticsEngine:
+    """
+    Real-time analytics calculation engine.
+    Day 4: Basic TOB metrics only.
+    Day 5: Full VPIN, OBI, and advanced analytics.
+    """
+    
+    def __init__(self, config: Dict[str, Any], redis_conn: aioredis.Redis):
+        """Initialize analytics engine with async Redis."""
+        self.config = config
+        self.redis = redis_conn  # Async Redis client
+        self.logger = logging.getLogger(__name__)
+        
+        # Build symbol list from config
+        level2 = config.get('symbols', {}).get('level2', [])
+        standard = config.get('symbols', {}).get('standard', [])
+        self.symbols = level2 + standard
+        
+        # Configuration
+        self.cadence_hz = config['modules']['analytics'].get('cadence_hz', 2)
+        self.sleep_interval = 1.0 / self.cadence_hz
+        
+        # Use same TTLs as data_ingestion
+        self.ttls = config['modules']['data_ingestion']['store_ttls']
+        self.output_ttl = self.ttls.get('metrics', 10)
+        
+        # Market hours
+        self.market_tz = pytz.timezone('US/Eastern')
+        self.analytics_rth_only = config['modules']['analytics'].get('analytics_rth_only', False)
+        
+        # Metrics tracking
+        self.last_calculation_time = {}
+        self.calculation_count = 0
+        
+    async def start(self):
+        """Start the analytics calculation loop."""
+        self.logger.info(f"Starting Analytics Engine (cadence: {self.cadence_hz} Hz)")
+        
+        while await self._should_run():
+            try:
+                cycle_start = time.time()
+                
+                # Calculate metrics for all symbols in parallel
+                tasks = []
+                for symbol in self.symbols:
+                    tasks.append(self._calculate_tob_metrics(symbol))
+                
+                await asyncio.gather(*tasks, return_exceptions=True)
+                
+                # Update heartbeat
+                await self._update_heartbeat()
+                
+                # Update calculation counter
+                self.calculation_count += 1
+                
+                # Sleep to maintain cadence
+                elapsed = time.time() - cycle_start
+                sleep_time = max(0, self.sleep_interval - elapsed)
+                if sleep_time > 0:
+                    await asyncio.sleep(sleep_time)
+                else:
+                    # Log if we're falling behind
+                    if self.calculation_count % 100 == 0:
+                        self.logger.warning(f"Analytics falling behind: {elapsed:.3f}s > {self.sleep_interval:.3f}s")
+                
+            except Exception as e:
+                self.logger.error(f"Analytics engine error: {e}")
+                await asyncio.sleep(1)
+    
+    async def _should_run(self):
+        """Check if analytics should be running."""
+        # Check system halt flag
+        halt = await self.redis.get('system:halt')
+        if halt == '1':
+            return False
+        
+        # Check market hours if configured
+        if self.analytics_rth_only:
+            now = datetime.now(self.market_tz)
+            if now.weekday() >= 5:  # Weekend
+                return False
+            current_time = now.time()
+            if not (datetime_time(9, 30) <= current_time <= datetime_time(16, 0)):
+                return False
+        
+        return True
+    
+    async def _calculate_tob_metrics(self, symbol: str):
+        """Calculate top-of-book metrics with exchange info."""
+        try:
+            # Get ticker data
+            ticker_json = await self.redis.get(f'market:{symbol}:ticker')
+            
+            if not ticker_json:
+                return
+            
+            ticker = json.loads(ticker_json)
+            
+            # Build metrics
+            metrics = {
+                'symbol': symbol,
+                'bid': ticker.get('bid'),
+                'ask': ticker.get('ask'),
+                'last': ticker.get('last'),
+                'mid': ticker.get('mid'),
+                'spread': ticker.get('spread'),
+                'spread_bps': ticker.get('spread_bps'),
+                'volume': ticker.get('volume'),
+                # Include exchange info for venue verification
+                'bid_exchange': ticker.get('bid_exchange', 'UNKNOWN'),
+                'ask_exchange': ticker.get('ask_exchange', 'UNKNOWN'),
+                'timestamp': int(datetime.now().timestamp() * 1000)
+            }
+            
+            # Store metrics
+            await self.redis.setex(
+                f'metrics:{symbol}:tob',
+                self.output_ttl,
+                json.dumps(metrics)
+            )
+            
+            # Track last calculation
+            self.last_calculation_time[symbol] = time.time()
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating TOB metrics for {symbol}: {e}")
+    
+    async def _update_heartbeat(self):
+        """Update analytics heartbeat."""
+        try:
+            heartbeat = {
+                'ts': int(datetime.now().timestamp() * 1000),
+                'count': self.calculation_count,
+                'symbols': len(self.symbols)
+            }
+            
+            ttl = self.ttls.get('heartbeat', 15)
+            await self.redis.setex('hb:analytics', ttl, json.dumps(heartbeat))
+                
+        except Exception as e:
+            self.logger.error(f"Error updating heartbeat: {e}")
+    
+    async def stop(self):
+        """Stop the analytics engine."""
+        self.logger.info("Stopping Analytics Engine")

@@ -1,9 +1,15 @@
-# AlphaTrader Pro Configuration
+# System configuration
 system:
   name: "AlphaTrader Pro"
   version: "1.0.0"
-  environment: "development"  # development, staging, production
-  
+  environment: "development"
+
+# Market configuration
+market:
+  check_staleness_after_hours: false
+  extended_hours: false
+
+# Redis configuration
 redis:
   host: "127.0.0.1"
   port: 6379
@@ -12,120 +18,110 @@ redis:
   decode_responses: true
   max_connections: 50
   socket_keepalive: true
-  socket_keepalive_options:
-    TCP_KEEPIDLE: 120
-    TCP_KEEPINTVL: 30
-    TCP_KEEPCNT: 3
 
+# IBKR configuration
 ibkr:
   host: "127.0.0.1"
   port: 7497  # 7497 for paper, 7496 for live
   client_id: 1
-  account: "paper"  # Will be set from IB connection
   timeout: 10
   readonly: false
-  # Level 2 market depth configuration
-  level2_symbols: ["SPY", "QQQ", "IWM"]  # Only these get Level 2 data (0DTE/1DTE/MOC strategies)
-  market_depth_rows: 20  # Number of price levels for order book
-  max_reconnect_attempts: 10
-  reconnect_delay_base: 2  # Exponential backoff base in seconds
   
+  # Exchange-specific L2 configuration
+  level2_exchanges:
+    SPY: ["ARCA", "BATS", "IEX"]
+    QQQ: ["ISLAND", "ARCA", "BATS"]
+    IWM: ["ARCA", "BATS"]
+  
+  smart_depth: false  # Never use SMART aggregation
+  l2_num_rows: 10
+  max_reconnect_attempts: 10
+  reconnect_delay_base: 2
+
+# Alpha Vantage configuration
 alpha_vantage:
-  # API key loaded from .env file
   api_key: "${ALPHA_VANTAGE_API_KEY}"
   base_url: "https://www.alphavantage.co/query"
   calls_per_minute: 600
-  safety_buffer: 10  # Stay 10 calls under limit
+  safety_buffer: 10
   retry_attempts: 3
-  retry_delay: 2  # Base delay for exponential backoff
-  # Update intervals for different data types
-  options_update_interval: 10  # 10 seconds for options chains
-  sentiment_update_interval: 300  # 5 minutes for sentiment
-  technicals_update_interval: 60  # 1 minute for technical indicators
+  retry_delay: 2
+  options_update_interval: 10
+  sentiment_update_interval: 300
+  technicals_update_interval: 60
 
+# Symbols configuration
 symbols:
-  - SPY
-  - QQQ
-  - IWM
-  - AAPL
-  - TSLA
-  - NVDA
-  - AMD
-  - GOOGL
-  - META
-  - AMZN
-  - MSFT
-  - VXX
+  level2: ["SPY", "QQQ", "IWM"]
+  standard: ["AAPL", "TSLA", "NVDA", "AMD", "GOOGL", "META", "AMZN", "MSFT", "VXX"]
 
-logging:
-  level: "INFO"
-  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-  file_path: "logs/alphatrader.log"
-  max_bytes: 10485760  # 10MB
-  backup_count: 5
-  console: true
-  colorize: true
-
+# Modules configuration
 modules:
   data_ingestion:
     enabled: true
-    ibkr_update_interval: 0.1  # 100ms
-    av_update_interval: 10  # 10 seconds
-    data_freshness_threshold: 10  # seconds before data is considered stale
-    use_delayed_data: false  # Use real-time data (true for delayed quotes)
+    data_freshness_threshold: 5
     
+    # Single TTL source
+    store_ttls:
+      market_data: 5
+      order_book: 2
+      bars: 10
+      options_chain: 15
+      greeks: 15
+      sentiment: 300
+      technicals: 60
+      metrics: 10
+      monitoring: 60
+      heartbeat: 15
+  
   analytics:
     enabled: true
-    calculation_interval: 1  # 1 second
-    
-  signals:
-    enabled: true
-    check_interval: 1  # 1 second
-    
-  execution:
-    enabled: true
-    max_position_size: 10000  # $10,000 per position
-    max_daily_loss: 5000  # $5,000 daily loss limit
-    
-  dashboard:
-    enabled: true
-    host: "0.0.0.0"
-    port: 8000
-    
-monitoring:
-  health_check_interval: 1  # seconds
-  heartbeat_timeout: 10  # seconds
-  alert_email: null  # Set in production
+    cadence_hz: 2
+    analytics_rth_only: false
   
+  signals:
+    enabled: false  # Day 5+
+  
+  execution:
+    enabled: false  # Day 6+
+  
+  dashboard:
+    enabled: false  # Day 7+
+  
+  social_media:
+    enabled: false  # Day 7+
+
+# Risk configuration (Day 6+)
 risk:
   circuit_breakers:
-    enabled: true
+    enabled: false
     max_daily_loss: 5000
     max_position_loss: 1000
     max_correlation: 0.7
     halt_on_disconnect: true
 
+# Parameter discovery configuration (kept for reference)
 parameter_discovery:
   enabled: true
   run_on_startup: true
-  startup_delay: 60  # Wait 60 seconds after startup to allow data collection
-  interval_seconds: 900  # Run every 15 minutes (900 seconds)
-  schedule: "0 9 * * *"  # Run daily at 9 AM (for cron-based scheduling if needed)
-  ttl_seconds: 86400  # 24 hours
-  data_staleness_threshold: 3600  # 1 hour - data older than this is stale
+  startup_delay: 60  
+  interval_seconds: 900  
+  schedule: "0 9 * * *"  
+  ttl_seconds: 86400  
+  data_staleness_threshold: 3600  
   
   vpin:
     min_bucket_size: 50
     max_bucket_size: 500
     num_clusters: 5
     min_trades_required: 1000
-    default_bucket_size: 100  # Fallback when insufficient data
+    default_bucket_size: 100
   
   temporal:
     max_lookback: 30
     min_bars_required: 100
     significance_threshold: 0.05
-    default_lookback: 10  # Fallback value
+    default_lookback: 10
   
   market_makers:
     toxic_list: ["CDRG", "JANE", "VIRTU", "SUSG"]
@@ -142,14 +138,29 @@ parameter_discovery:
     window_bars: 20
     low_percentile: 33
     high_percentile: 67
-    # CORRECTED: 6.5 hours × 60 minutes × 60 seconds / 5 seconds per bar = 4,680 bars per day
     bars_per_day: 4680
     trading_days_per_year: 252
     min_bars_for_regime: 500
-    default_regime: "NORMAL"  # Fallback
+    default_regime: "NORMAL"
   
   correlation:
     min_bars: 100
     calculation_window: 500
-    forward_fill_limit: 5  # Limit for forward fill
-    min_correlation_symbols: 3  # Minimum symbols needed for matrix
+    forward_fill_limit: 5
+    min_correlation_symbols: 3
+
+# Logging configuration
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file_path: "logs/alphatrader.log"
+  max_bytes: 10485760  # 10MB
+  backup_count: 5
+  console: true
+  colorize: true
+
+# Monitoring configuration
+monitoring:
+  health_check_interval: 1
+  heartbeat_timeout: 10
+  alert_email: null
