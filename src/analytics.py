@@ -64,25 +64,25 @@ class ParameterDiscovery:
         
         try:
             # 1. Discover VPIN bucket size
-            self.discovered_params['vpin_bucket_size'] = self.discover_vpin_bucket_size()
+            self.discovered_params['vpin_bucket_size'] = await self.discover_vpin_bucket_size()
             
             # 2. Discover temporal structure
-            self.discovered_params['lookback_bars'] = self.discover_temporal_structure()
+            self.discovered_params['lookback_bars'] = await self.discover_temporal_structure()
             
             # 3. Analyze market makers
-            self.discovered_params['mm_profiles'] = self.analyze_market_makers()
+            self.discovered_params['mm_profiles'] = await self.analyze_market_makers()
             
             # 4. Discover volatility regimes
-            self.discovered_params['vol_regimes'] = self.discover_volatility_regimes()
+            self.discovered_params['vol_regimes'] = await self.discover_volatility_regimes()
             
             # 5. Calculate correlations
-            self.discovered_params['correlation_matrix'] = self.calculate_correlations()
+            self.discovered_params['correlation_matrix'] = await self.calculate_correlations()
             
             # Store all parameters in Redis
-            self.store_to_redis()
+            await self.store_to_redis()
             
             # Generate config file
-            self.generate_config_file()
+            await self.generate_config_file()
             
             elapsed = time.time() - start_time
             self.logger.info(f"Parameter discovery completed in {elapsed:.2f} seconds")
@@ -91,7 +91,7 @@ class ParameterDiscovery:
             self.logger.error(f"Error in parameter discovery: {e}")
             self.logger.error(traceback.format_exc())
     
-    def _check_data_freshness(self, symbol: str) -> bool:
+    async def _check_data_freshness(self, symbol: str) -> bool:
         """
         Check if market data is fresh (not stale weekend/holiday data).
         Returns True if data is fresh, False if stale.
@@ -100,7 +100,7 @@ class ParameterDiscovery:
         last_timestamp = None
         
         # Check trades timestamp
-        trades = self.redis.lrange(f'market:{symbol}:trades', -1, -1)
+        trades = await self.redis.lrange(f'market:{symbol}:trades', -1, -1)
         if trades:
             try:
                 trade = json.loads(trades[0])
@@ -111,7 +111,7 @@ class ParameterDiscovery:
         
         # Check bars timestamp (bars are stored as a list)
         if not last_timestamp:
-            bars_list = self.redis.lrange(f'market:{symbol}:bars', -1, -1)  # Get last bar
+            bars_list = await self.redis.lrange(f'market:{symbol}:bars', -1, -1)  # Get last bar
             if bars_list:
                 try:
                     last_bar = json.loads(bars_list[0])
@@ -139,7 +139,7 @@ class ParameterDiscovery:
         
         return True
     
-    def discover_vpin_bucket_size(self) -> int:
+    async def discover_vpin_bucket_size(self) -> int:
         """
         Discover optimal VPIN bucket size from trade clustering.
         Uses K-means clustering to find natural trade size groups.
@@ -154,12 +154,12 @@ class ParameterDiscovery:
         self.logger.info("Discovering VPIN bucket size...")
         
         # Check data freshness
-        if not self._check_data_freshness('SPY'):
+        if not await self._check_data_freshness('SPY'):
             self.logger.warning("Using default VPIN bucket size due to stale data")
             return default_size
         
         # Fetch trades from Redis
-        trades_json = self.redis.lrange('market:SPY:trades', 0, 9999)
+        trades_json = await self.redis.lrange('market:SPY:trades', 0, 9999)
         
         # Check minimum trades requirement
         if len(trades_json) < min_trades:
@@ -200,7 +200,7 @@ class ParameterDiscovery:
         
         return bucket_size
     
-    def discover_temporal_structure(self) -> int:
+    async def discover_temporal_structure(self) -> int:
         """
         Find optimal lookback period using autocorrelation analysis.
         Uses Box-Jenkins methodology for time series analysis.
@@ -214,12 +214,12 @@ class ParameterDiscovery:
         self.logger.info("Discovering temporal structure...")
         
         # Check data freshness
-        if not self._check_data_freshness('SPY'):
+        if not await self._check_data_freshness('SPY'):
             self.logger.warning("Using default lookback due to stale data")
             return default_lookback
         
         # Fetch bars from Redis (stored as list)
-        bars_list = self.redis.lrange('market:SPY:bars', 0, -1)
+        bars_list = await self.redis.lrange('market:SPY:bars', 0, -1)
         if not bars_list:
             self.logger.warning("No bar data available")
             return default_lookback
@@ -275,7 +275,7 @@ class ParameterDiscovery:
         
         return lookback
     
-    def analyze_market_makers(self) -> dict:
+    async def analyze_market_makers(self) -> dict:
         """
         Profile market makers from Level 2 order book data.
         Only analyzes SPY/QQQ/IWM which have Level 2 data.
@@ -292,7 +292,7 @@ class ParameterDiscovery:
         
         # Only analyze Level 2 symbols (have market depth)
         for symbol in self.level2_symbols:
-            book_json = self.redis.get(f'market:{symbol}:book')
+            book_json = await self.redis.get(f'market:{symbol}:book')
             if not book_json:
                 self.logger.warning(f"No order book data for {symbol}")
                 continue
@@ -375,7 +375,7 @@ class ParameterDiscovery:
         
         return profiles
     
-    def discover_volatility_regimes(self) -> dict:
+    async def discover_volatility_regimes(self) -> dict:
         """
         Identify current market volatility regime.
         CRITICAL: Uses CORRECTED annualization factor (4,680 bars per day).
@@ -393,7 +393,7 @@ class ParameterDiscovery:
         self.logger.info(f"  Using annualization factor: sqrt({bars_per_day} * {trading_days}) = {np.sqrt(bars_per_day * trading_days):.1f}")
         
         # Check data freshness
-        if not self._check_data_freshness('SPY'):
+        if not await self._check_data_freshness('SPY'):
             self.logger.warning("Using default regime due to stale data")
             return {
                 'current': default_regime,
@@ -404,7 +404,7 @@ class ParameterDiscovery:
             }
         
         # Fetch SPY bars (stored as list)
-        bars_list = self.redis.lrange('market:SPY:bars', 0, -1)
+        bars_list = await self.redis.lrange('market:SPY:bars', 0, -1)
         if not bars_list:
             self.logger.warning("No bar data for SPY")
             return {
@@ -478,7 +478,7 @@ class ParameterDiscovery:
             }
         }
     
-    def calculate_correlations(self) -> dict:
+    async def calculate_correlations(self) -> dict:
         """
         Calculate correlation matrix between symbols.
         Uses inner join for alignment and forward fill for missing data.
@@ -495,7 +495,7 @@ class ParameterDiscovery:
         
         # Collect returns for each symbol
         for symbol in self.symbols:
-            bars_list = self.redis.lrange(f'market:{symbol}:bars', 0, -1)
+            bars_list = await self.redis.lrange(f'market:{symbol}:bars', 0, -1)
             if not bars_list:
                 self.logger.debug(f"No bar data for {symbol}")
                 continue
@@ -598,7 +598,7 @@ class ParameterDiscovery:
         
         return correlations
     
-    def store_to_redis(self):
+    async def store_to_redis(self):
         """
         Store all discovered parameters in Redis with configured TTL.
         """
@@ -606,35 +606,35 @@ class ParameterDiscovery:
         
         # Store VPIN bucket size
         if 'vpin_bucket_size' in self.discovered_params:
-            self.redis.setex('discovered:vpin_bucket_size', ttl, 
+            await self.redis.setex('discovered:vpin_bucket_size', ttl, 
                            self.discovered_params['vpin_bucket_size'])
             self.logger.info(f"Stored discovered:vpin_bucket_size with {ttl}s TTL")
         
         # Store lookback bars
         if 'lookback_bars' in self.discovered_params:
-            self.redis.setex('discovered:lookback_bars', ttl,
+            await self.redis.setex('discovered:lookback_bars', ttl,
                            self.discovered_params['lookback_bars'])
             self.logger.info(f"Stored discovered:lookback_bars with {ttl}s TTL")
         
         # Store MM profiles
         if 'mm_profiles' in self.discovered_params:
-            self.redis.setex('discovered:mm_profiles', ttl,
+            await self.redis.setex('discovered:mm_profiles', ttl,
                            json.dumps(self.discovered_params['mm_profiles']))
             self.logger.info(f"Stored discovered:mm_profiles with {ttl}s TTL")
         
         # Store volatility regimes
         if 'vol_regimes' in self.discovered_params:
-            self.redis.setex('discovered:vol_regimes', ttl,
+            await self.redis.setex('discovered:vol_regimes', ttl,
                            json.dumps(self.discovered_params['vol_regimes']))
             self.logger.info(f"Stored discovered:vol_regimes with {ttl}s TTL")
         
         # Store correlation matrix
         if 'correlation_matrix' in self.discovered_params:
-            self.redis.setex('discovered:correlation_matrix', ttl,
+            await self.redis.setex('discovered:correlation_matrix', ttl,
                            json.dumps(self.discovered_params['correlation_matrix']))
             self.logger.info(f"Stored discovered:correlation_matrix with {ttl}s TTL")
     
-    def generate_config_file(self):
+    async def generate_config_file(self):
         """
         Generate discovered parameters config file.
         Saves to config/discovered.yaml with timestamp and documentation.

@@ -223,13 +223,24 @@ class IBKRIngestion:
                 self.logger.error(f"Failed to subscribe {symbol}: {result}")
     
     async def _subscribe_level2_symbol(self, symbol: str):
-        """Subscribe to Level 2 market depth per exchange, never SMART."""
+        """Subscribe to Level 2 market depth using exchanges as ordered fallbacks."""
         # Get exchange list from config, DEFAULT TO ARCA if not mapped
         exchanges = self.config['ibkr'].get('level2_exchanges', {}).get(
             symbol, 
             ['ARCA']  # CRITICAL: Default to ARCA, never SMART
         )
         
+        # Track how many active L2 depth subscriptions we have (max 3 allowed by IBKR)
+        active_depth_count = len([k for k in self.depth_tickers.keys() 
+                                 if k not in self.l2_fallback_exchanges])
+        
+        if active_depth_count >= 3:
+            self.logger.warning(f"Already at max L2 depth limit (3), using TOB for {symbol}")
+            # Just subscribe to standard market data
+            await self._subscribe_standard_symbol(symbol)
+            return
+        
+        # Try exchanges in order until one succeeds
         for exchange in exchanges:
             try:
                 # Create exchange-specific contract
@@ -244,16 +255,21 @@ class IBKRIngestion:
                     key = f"{symbol}:{exchange}"
                     self.depth_tickers[key] = depth_ticker
                     
-                    # Note: Depth ticker updates are handled by pendingTickersEvent globally
-                    # No need for per-ticker handlers
-                    
                     # Track subscription
-                    self.subscriptions[symbol] = {'type': 'LEVEL2', 'ticker': depth_ticker}
+                    self.subscriptions[symbol] = {'type': 'LEVEL2', 'ticker': depth_ticker, 'exchange': exchange}
                     
                     self.logger.info(f"L2 subscription successful: {symbol} on {exchange}")
+                    
+                    # SUCCESS - stop trying other exchanges
+                    return
                 
             except Exception as e:
-                self.logger.warning(f"L2 subscription failed for {symbol} on {exchange}: {e}")
+                self.logger.warning(f"L2 subscription failed for {symbol} on {exchange}: {e}, trying next exchange...")
+                continue
+        
+        # If all exchanges failed, fall back to standard market data
+        self.logger.warning(f"All L2 exchanges failed for {symbol}, falling back to TOB")
+        await self._subscribe_standard_symbol(symbol)
     
     async def _request_exchange_depth(self, symbol: str, exchange: str, contract):
         """Request depth with automatic fallback to TOB on failure."""
@@ -280,7 +296,14 @@ class IBKRIngestion:
             
         except Exception as e:
             error_code = getattr(e, 'errorCode', None)
-            if error_code == 2152 or '2152' in str(e):
+            error_msg = str(e)
+            
+            if error_code == 309 or '309' in error_msg:
+                # Max depth requests reached
+                self.logger.warning(f"Max L2 depth limit reached for {symbol} on {exchange}")
+                return None  # Signal to try next exchange or fall back to TOB
+                
+            elif error_code == 2152 or '2152' in error_msg:
                 # No L2 permission - fallback to TOB
                 self.logger.info(f"No L2 entitlement for {symbol} on {exchange}, using TOB only")
                 self.l2_fallback_exchanges.add(f"{symbol}:{exchange}")
@@ -297,6 +320,8 @@ class IBKRIngestion:
                 # No need for per-ticker handlers
                 
                 return ticker
+            
+            # Other errors - let them propagate
             raise
     
     async def _subscribe_standard_symbol(self, symbol: str):
@@ -563,8 +588,9 @@ class IBKRIngestion:
                     await self._on_depth_update_async(ticker, exchange)
                     return
             
-            # Process trades
-            if ticker.last and ticker.lastSize:
+            # Process trades - check for valid values (not NaN)
+            if (ticker.last and not math.isnan(ticker.last) and 
+                ticker.lastSize and not math.isnan(ticker.lastSize)):
                 trade = {
                     'symbol': symbol,
                     'price': float(ticker.last),
@@ -595,18 +621,32 @@ class IBKRIngestion:
             await pipe.set(f'market:{symbol}:last', trade['price'])
             
             # CRITICAL: Write to :ticker key for analytics to read
-            # Round values properly
+            # Round values properly - check for NaN
             last_price = round(float(trade['price']), 6)
-            bid = round(float(ticker.bid), 6) if ticker.bid else None
-            ask = round(float(ticker.ask), 6) if ticker.ask else None
+            bid = None
+            if ticker.bid and not math.isnan(ticker.bid):
+                bid = round(float(ticker.bid), 6)
+            ask = None
+            if ticker.ask and not math.isnan(ticker.ask):
+                ask = round(float(ticker.ask), 6)
+            
+            # Handle volume - check for NaN
+            volume = 0
+            if ticker.volume and not math.isnan(ticker.volume):
+                volume = int(ticker.volume)
+            
+            # Handle vwap - check for NaN
+            vwap = None
+            if ticker.vwap and not math.isnan(ticker.vwap):
+                vwap = round(float(ticker.vwap), 6)
             
             ticker_data = {
                 'symbol': symbol,
                 'bid': bid,
                 'ask': ask,
                 'last': last_price,
-                'volume': int(ticker.volume) if ticker.volume else 0,
-                'vwap': round(float(ticker.vwap), 6) if ticker.vwap else None,
+                'volume': volume,
+                'vwap': vwap,
                 'timestamp': trade['time']
             }
             
@@ -782,7 +822,11 @@ class IBKRIngestion:
     
     def _on_error(self, reqId, errorCode, errorString, contract=None):
         """Handle IBKR errors."""
-        if errorCode == 2152:
+        if errorCode == 309:
+            # Max market depth requests reached (limit is 3)
+            self.logger.warning(f"IBKR error 309: Max number (3) of market depth requests has been reached")
+            # This is handled in subscription logic - we check depth count before subscribing
+        elif errorCode == 2152:
             # Market data farm connection broken
             self.logger.warning(f"Market data farm connection issue: {errorString}")
         elif errorCode == 504:
@@ -798,10 +842,14 @@ class IBKRIngestion:
     def _on_disconnect(self):
         """Handle disconnection."""
         self.connected = False
-        self.logger.warning("Disconnected from IBKR Gateway")
         
-        # Try to reconnect
-        asyncio.create_task(self._reconnect())
+        # Only log and reconnect if we're still running (not shutting down)
+        if self.running:
+            self.logger.warning("Disconnected from IBKR Gateway")
+            asyncio.create_task(self._reconnect())
+        else:
+            # Intentional disconnection during shutdown
+            self.logger.info("IBKR disconnected (shutdown)")
     
     async def _reconnect(self):
         """Attempt to reconnect after disconnection."""
@@ -820,37 +868,48 @@ class IBKRIngestion:
         self.logger.info("Cleaning up IBKR connections...")
         
         try:
-            # Cancel all depth subscriptions safely
-            for key, depth_ticker in self.depth_tickers.items():
-                try:
-                    self.ib.cancelMktDepth(depth_ticker)
-                except Exception as e:
-                    try:
-                        if hasattr(depth_ticker, 'contract'):
-                            self.ib.cancelMktDepth(depth_ticker.contract)
-                    except Exception as e2:
-                        self.logger.debug(f"Depth cancellation failed for {key}: {e2}")
-            
-            # Clear references
-            self.depth_tickers.clear()
-            
-            # Cancel other subscriptions
-            for symbol, sub in self.subscriptions.items():
-                try:
-                    if 'ticker' in sub and sub['ticker']:
-                        self.ib.cancelMktData(sub['ticker'])
-                except:
-                    pass
-                
-                try:
-                    if 'bars' in sub and sub['bars']:
-                        self.ib.cancelRealTimeBars(sub['bars'])
-                except:
-                    pass
-            
-            # Disconnect from IBKR
+            # Only try to cancel if we're connected
             if self.ib.isConnected():
+                # Cancel all depth subscriptions safely
+                for key, depth_ticker in list(self.depth_tickers.items()):
+                    try:
+                        # Check if this is actually a depth ticker (not fallen back to TOB)
+                        if key not in self.l2_fallback_exchanges:
+                            self.ib.cancelMktDepth(depth_ticker)
+                        else:
+                            # This is a TOB ticker, not depth
+                            self.ib.cancelMktData(depth_ticker)
+                    except Exception as e:
+                        # Silently ignore - subscription may already be cancelled
+                        self.logger.debug(f"Depth/TOB cancellation skipped for {key}: {e}")
+                
+                # Cancel other subscriptions
+                for symbol, sub in list(self.subscriptions.items()):
+                    try:
+                        if 'ticker' in sub and sub['ticker']:
+                            # Skip if already cancelled above
+                            if sub.get('type') != 'LEVEL2':
+                                self.ib.cancelMktData(sub['ticker'])
+                    except Exception:
+                        pass  # Silently ignore
+                    
+                    try:
+                        if 'bars' in sub and sub['bars']:
+                            self.ib.cancelRealTimeBars(sub['bars'])
+                    except Exception:
+                        pass  # Silently ignore
+                
+                # Disconnect from IBKR
                 self.ib.disconnect()
+            
+            # Clear all data structures
+            self.depth_tickers.clear()
+            self.subscriptions.clear()
+            self.order_books.clear()
+            self.trades_buffer.clear()
+            self.aggregated_tob.clear()
+            self.last_tob_ts.clear()
+            self.last_trade.clear()
             
             # Update Redis
             await self.redis.set('ibkr:connected', '0')
@@ -941,7 +1000,15 @@ class AlphaVantageIngestion:
     
     async def start(self):
         """Start Alpha Vantage data ingestion."""
-        self.logger.info("Starting Alpha Vantage data ingestion...")
+        # Log startup with API key status (masked)
+        api_key_status = "configured" if self.api_key and not self.api_key.startswith("${") else "NOT SET"
+        masked_key = f"{self.api_key[:4]}...{self.api_key[-4:]}" if self.api_key and len(self.api_key) > 8 else "INVALID"
+        
+        self.logger.info(f"Starting Alpha Vantage data ingestion...")
+        self.logger.info(f"  API Key: {api_key_status} ({masked_key})")
+        self.logger.info(f"  Symbols: {self.symbols}")
+        self.logger.info(f"  Update intervals: options={self.options_interval}s, sentiment={self.sentiment_interval}s, technicals={self.technicals_interval}s")
+        
         self.running = True
         
         try:
@@ -968,27 +1035,28 @@ class AlphaVantageIngestion:
                     
                     for symbol in self.symbols:
                         # Check if options need update
-                        if current_time - self.last_options_update.get(symbol, 0) > self.options_interval:
+                        if current_time - self.last_options_update.get(symbol, 0) >= self.options_interval:
                             tasks.append(self._fetch_with_retry(
                                 self.fetch_options_chain, session, symbol
                             ))
                             self.last_options_update[symbol] = current_time
                         
                         # Check if sentiment needs update
-                        if current_time - self.last_sentiment_update.get(symbol, 0) > self.sentiment_interval:
+                        if current_time - self.last_sentiment_update.get(symbol, 0) >= self.sentiment_interval:
                             tasks.append(self._fetch_with_retry(
                                 self.fetch_sentiment, session, symbol
                             ))
                             self.last_sentiment_update[symbol] = current_time
                         
                         # Check if technicals need update
-                        if current_time - self.last_technicals_update.get(symbol, 0) > self.technicals_interval:
+                        if current_time - self.last_technicals_update.get(symbol, 0) >= self.technicals_interval:
                             tasks.append(self._fetch_with_retry(
                                 self.fetch_technicals, session, symbol
                             ))
                             self.last_technicals_update[symbol] = current_time
                     
                     if tasks:
+                        self.logger.info(f"Fetching {len(tasks)} updates from Alpha Vantage...")
                         results = await asyncio.gather(*tasks, return_exceptions=True)
                         
                         # Log errors
@@ -1060,6 +1128,11 @@ class AlphaVantageIngestion:
                     
                     data = await response.json()
                     
+                    # Check for API errors FIRST
+                    if 'Error Message' in data:
+                        self.logger.error(f"AV error for {symbol}: {data['Error Message']}")
+                        return None
+                    
                     # Check for soft rate limits
                     if 'Note' in data:
                         self.logger.warning(f"AV soft limit: {data['Note']}")
@@ -1071,10 +1144,14 @@ class AlphaVantageIngestion:
                         await asyncio.sleep(60)
                         return None
                     
-                    # Process options chain
-                    if 'contracts' in data:
+                    # Process options chain - Alpha Vantage uses 'data' not 'contracts'
+                    if 'data' in data and isinstance(data['data'], list):
                         # Store to Redis
                         await self._store_options_data(symbol, data)
+                        self.logger.info(f"✓ Fetched options for {symbol}: {len(data['data'])} contracts")
+                    else:
+                        self.logger.warning(f"AV options missing 'data' for {symbol}; keys={list(data.keys())[:6]}")
+                        return None
                     
                     return data
                     
@@ -1088,21 +1165,47 @@ class AlphaVantageIngestion:
     
     async def fetch_sentiment(self, session: aiohttp.ClientSession, symbol: str):
         """Fetch sentiment data."""
+        # Skip sentiment for ETFs as Alpha Vantage doesn't support them
+        if symbol in ['SPY', 'QQQ', 'IWM','VXX']:
+            self.logger.info(f"Skipping sentiment for ETF {symbol} (not supported by Alpha Vantage)")
+            return None
+        
         try:
             async with self.request_semaphore:
                 params = {
                     'function': 'NEWS_SENTIMENT',
                     'tickers': symbol,
                     'apikey': self.api_key,
-                    'limit': 20
+                    'sort': 'LATEST',
+                    'limit': 50
                 }
                 
                 async with session.get(self.base_url, params=params) as response:
                     response.raise_for_status()
                     data = await response.json()
                     
+                    # Check for API errors
+                    if 'Error Message' in data:
+                        self.logger.error(f"AV sentiment error for {symbol}: {data['Error Message']}")
+                        return None
+                    
+                    # Check for rate limits
+                    if 'Note' in data:
+                        self.logger.warning(f"AV sentiment soft limit: {data['Note']}")
+                        await asyncio.sleep(30)
+                        return None
+                    
+                    if 'Information' in data:
+                        self.logger.warning(f"AV sentiment info: {data['Information']}")
+                        await asyncio.sleep(60)
+                        return None
+                    
                     if 'feed' in data:
                         await self._store_sentiment_data(symbol, data)
+                        self.logger.info(f"✓ Fetched sentiment for {symbol}: {len(data.get('feed', []))} articles")
+                    else:
+                        self.logger.warning(f"AV sentiment missing 'feed' for {symbol}; keys={list(data.keys())[:6]}")
+                        return None
                     
                     return data
                     
@@ -1111,41 +1214,130 @@ class AlphaVantageIngestion:
             return None
     
     async def fetch_technicals(self, session: aiohttp.ClientSession, symbol: str):
-        """Fetch technical indicators."""
+        """Fetch all technical indicators: RSI, MACD, BBANDS, ATR."""
         try:
-            async with self.request_semaphore:
-                # Fetch RSI
-                params = {
+            # Define all indicators to fetch
+            indicators = [
+                {
                     'function': 'RSI',
-                    'symbol': symbol,
-                    'interval': '5min',
-                    'time_period': 14,
-                    'series_type': 'close',
-                    'apikey': self.api_key
+                    'params': {
+                        'function': 'RSI',
+                        'symbol': symbol,
+                        'interval': '5min',
+                        'time_period': 14,
+                        'series_type': 'close',
+                        'apikey': self.api_key
+                    },
+                    'key': 'Technical Analysis: RSI',
+                    'value_key': 'RSI'
+                },
+                {
+                    'function': 'MACD',
+                    'params': {
+                        'function': 'MACD',
+                        'symbol': symbol,
+                        'interval': '5min',
+                        'series_type': 'close',
+                        'apikey': self.api_key
+                    },
+                    'key': 'Technical Analysis: MACD',
+                    'value_keys': ['MACD', 'MACD_Signal', 'MACD_Hist']
+                },
+                {
+                    'function': 'BBANDS',
+                    'params': {
+                        'function': 'BBANDS',
+                        'symbol': symbol,
+                        'interval': '5min',
+                        'time_period': 20,
+                        'series_type': 'close',
+                        'nbdevup': 2,
+                        'nbdevdn': 2,
+                        'apikey': self.api_key
+                    },
+                    'key': 'Technical Analysis: BBANDS',
+                    'value_keys': ['Real Upper Band', 'Real Middle Band', 'Real Lower Band']
+                },
+                {
+                    'function': 'ATR',
+                    'params': {
+                        'function': 'ATR',
+                        'symbol': symbol,
+                        'interval': '5min',
+                        'time_period': 14,
+                        'apikey': self.api_key
+                    },
+                    'key': 'Technical Analysis: ATR',
+                    'value_key': 'ATR'
                 }
-                
-                async with session.get(self.base_url, params=params) as response:
-                    response.raise_for_status()
-                    data = await response.json()
-                    
-                    if 'Technical Analysis: RSI' in data:
-                        await self._store_technical_data(symbol, 'RSI', data)
-                    
-                    return data
+            ]
+            
+            # Fetch all indicators in parallel
+            tasks = []
+            for indicator in indicators:
+                tasks.append(self._fetch_single_indicator(session, symbol, indicator))
+            
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Count successful fetches
+            success_count = sum(1 for r in results if r and not isinstance(r, Exception))
+            
+            if success_count > 0:
+                self.logger.info(f"✓ Fetched {success_count}/{len(indicators)} technicals for {symbol}")
+                return {'success': success_count, 'total': len(indicators)}
+            else:
+                self.logger.warning(f"Failed to fetch any technicals for {symbol}")
+                return None
                     
         except Exception as e:
             self.logger.error(f"Technicals fetch error for {symbol}: {e}")
             return None
     
+    async def _fetch_single_indicator(self, session: aiohttp.ClientSession, symbol: str, indicator: Dict):
+        """Fetch a single technical indicator."""
+        try:
+            async with self.request_semaphore:
+                async with session.get(self.base_url, params=indicator['params']) as response:
+                    response.raise_for_status()
+                    data = await response.json()
+                    
+                    # Check for API errors
+                    if 'Error Message' in data:
+                        self.logger.error(f"AV {indicator['function']} error for {symbol}: {data['Error Message']}")
+                        return None
+                    
+                    # Check for rate limits
+                    if 'Note' in data:
+                        self.logger.warning(f"AV {indicator['function']} soft limit: {data['Note']}")
+                        await asyncio.sleep(30)
+                        return None
+                    
+                    if 'Information' in data:
+                        self.logger.warning(f"AV {indicator['function']} info: {data['Information']}")
+                        await asyncio.sleep(60)
+                        return None
+                    
+                    # Process and store the indicator data
+                    if indicator['key'] in data:
+                        await self._store_technical_data(symbol, indicator['function'], data, indicator)
+                        return data
+                    else:
+                        self.logger.warning(f"AV {indicator['function']} missing '{indicator['key']}' for {symbol}")
+                        return None
+                        
+        except Exception as e:
+            self.logger.error(f"Error fetching {indicator['function']} for {symbol}: {e}")
+            return None
+    
     async def _store_options_data(self, symbol: str, data: Dict):
         """Store options chain data to Redis."""
         try:
-            # Process and store options
-            contracts = data.get('contracts', [])
+            # Process and store options - Alpha Vantage uses 'data' array
+            contracts = data.get('data', [])
             
-            # Separate calls and puts
-            calls = [c for c in contracts if c.get('option_type') == 'call']
-            puts = [c for c in contracts if c.get('option_type') == 'put']
+            # Separate calls and puts - AV uses 'type' not 'option_type'
+            calls = [c for c in contracts if c.get('type') == 'call']
+            puts = [c for c in contracts if c.get('type') == 'put']
             
             # Store to Redis
             async with self.redis.pipeline() as pipe:
@@ -1163,43 +1355,146 @@ class AlphaVantageIngestion:
                         json.dumps(puts)
                     )
                 
-                # Store Greeks separately
+                # Store Greeks separately - AV has inline greeks, not nested
                 for contract in contracts:
-                    if 'greeks' in contract:
-                        key = f"options:{symbol}:{contract['contract_id']}:greeks"
+                    # Extract greeks from contract (they're inline in AV response)
+                    greeks = {
+                        'delta': contract.get('delta'),
+                        'gamma': contract.get('gamma'),
+                        'theta': contract.get('theta'),
+                        'vega': contract.get('vega'),
+                        'rho': contract.get('rho'),
+                        'implied_volatility': contract.get('implied_volatility')
+                    }
+                    
+                    # AV uses 'contractID' not 'contract_id'
+                    contract_id = contract.get('contractID')
+                    if contract_id and any(greeks.values()):
+                        key = f"options:{symbol}:{contract_id}:greeks"
                         await pipe.setex(
                             key,
                             self.ttls['greeks'],
-                            json.dumps(contract['greeks'])
+                            json.dumps(greeks)
                         )
                 
                 await pipe.execute()
+                
+                # Log success with sample contract details
+                log_msg = f"Stored options for {symbol}: calls={len(calls)}, puts={len(puts)}"
+                
+                # Sample contract details commented out for cleaner logs
+                # try:
+                #     # Add sample call contract with Greeks
+                #     if calls:
+                #         sample_call = calls[0]  # Get first call as sample
+                #         log_msg += f"\n  Sample CALL: {sample_call.get('contractID', 'N/A')}"
+                #         log_msg += f" Strike=${float(sample_call.get('strike', 0) or 0):.2f}"
+                #         log_msg += f" Exp={sample_call.get('expiration', 'N/A')}"
+                #         log_msg += f" Bid=${float(sample_call.get('bid', 0) or 0):.2f}"
+                #         log_msg += f" Ask=${float(sample_call.get('ask', 0) or 0):.2f}"
+                #         log_msg += f" Vol={int(float(sample_call.get('volume', 0) or 0))}"
+                #         log_msg += f" OI={int(float(sample_call.get('open_interest', 0) or 0))}"
+                #         log_msg += f"\n    Greeks: Δ={float(sample_call.get('delta', 0) or 0):.4f}"
+                #         log_msg += f" Γ={float(sample_call.get('gamma', 0) or 0):.4f}"
+                #         log_msg += f" Θ={float(sample_call.get('theta', 0) or 0):.4f}"
+                #         log_msg += f" Vega={float(sample_call.get('vega', 0) or 0):.4f}"
+                #         log_msg += f" IV={float(sample_call.get('implied_volatility', 0) or 0):.2%}"
+                #     
+                #     # Add sample put contract with Greeks
+                #     if puts:
+                #         sample_put = puts[0]  # Get first put as sample
+                #         log_msg += f"\n  Sample PUT: {sample_put.get('contractID', 'N/A')}"
+                #         log_msg += f" Strike=${float(sample_put.get('strike', 0) or 0):.2f}"
+                #         log_msg += f" Exp={sample_put.get('expiration', 'N/A')}"
+                #         log_msg += f" Bid=${float(sample_put.get('bid', 0) or 0):.2f}"
+                #         log_msg += f" Ask=${float(sample_put.get('ask', 0) or 0):.2f}"
+                #         log_msg += f" Vol={int(float(sample_put.get('volume', 0) or 0))}"
+                #         log_msg += f" OI={int(float(sample_put.get('open_interest', 0) or 0))}"
+                #         log_msg += f"\n    Greeks: Δ={float(sample_put.get('delta', 0) or 0):.4f}"
+                #         log_msg += f" Γ={float(sample_put.get('gamma', 0) or 0):.4f}"
+                #         log_msg += f" Θ={float(sample_put.get('theta', 0) or 0):.4f}"
+                #         log_msg += f" Vega={float(sample_put.get('vega', 0) or 0):.4f}"
+                #         log_msg += f" IV={float(sample_put.get('implied_volatility', 0) or 0):.2%}"
+                # except Exception as e:
+                #     # If detailed logging fails, just log the basic message
+                #     pass
+                
+                self.logger.info(log_msg)
                 
         except Exception as e:
             self.logger.error(f"Error storing options for {symbol}: {e}")
     
     async def _store_sentiment_data(self, symbol: str, data: Dict):
-        """Store sentiment data to Redis."""
+        """Store complete sentiment data to Redis including all article details."""
         try:
             feed = data.get('feed', [])
             
             if feed:
-                # Calculate aggregate sentiment
-                sentiments = []
+                # Process and store complete feed data
+                articles = []
+                ticker_sentiments = []
+                
                 for article in feed:
+                    # Store complete article data
+                    article_data = {
+                        'title': article.get('title', ''),
+                        'url': article.get('url', ''),
+                        'time_published': article.get('time_published', ''),
+                        'authors': article.get('authors', []),
+                        'summary': article.get('summary', ''),
+                        'source': article.get('source', ''),
+                        'topics': article.get('topics', []),  # Includes topic and relevance_score
+                        'overall_sentiment_score': article.get('overall_sentiment_score', 0),
+                        'overall_sentiment_label': article.get('overall_sentiment_label', 'Neutral'),
+                        'ticker_sentiment': []
+                    }
+                    
+                    # Process ticker-specific sentiment for this article
                     if 'ticker_sentiment' in article:
                         for ticker_data in article['ticker_sentiment']:
                             if ticker_data.get('ticker') == symbol:
-                                score = float(ticker_data.get('relevance_score', 0))
-                                sentiments.append(score)
+                                ticker_sent = {
+                                    'ticker': ticker_data.get('ticker'),
+                                    'relevance_score': float(ticker_data.get('relevance_score', 0)),
+                                    'ticker_sentiment_score': float(ticker_data.get('ticker_sentiment_score', 0)),
+                                    'ticker_sentiment_label': ticker_data.get('ticker_sentiment_label', 'Neutral')
+                                }
+                                article_data['ticker_sentiment'].append(ticker_sent)
+                                ticker_sentiments.append(ticker_sent)
+                    
+                    articles.append(article_data)
                 
-                avg_sentiment = sum(sentiments) / len(sentiments) if sentiments else 0
+                # Calculate aggregate metrics
+                avg_sentiment = 0
+                avg_relevance = 0
+                sentiment_distribution = {'Bullish': 0, 'Somewhat-Bullish': 0, 'Neutral': 0, 'Somewhat-Bearish': 0, 'Bearish': 0}
                 
+                if ticker_sentiments:
+                    sentiment_scores = [ts['ticker_sentiment_score'] for ts in ticker_sentiments]
+                    relevance_scores = [ts['relevance_score'] for ts in ticker_sentiments]
+                    avg_sentiment = sum(sentiment_scores) / len(sentiment_scores)
+                    avg_relevance = sum(relevance_scores) / len(relevance_scores)
+                    
+                    # Count sentiment distribution
+                    for ts in ticker_sentiments:
+                        label = ts.get('ticker_sentiment_label', 'Neutral')
+                        if label in sentiment_distribution:
+                            sentiment_distribution[label] += 1
+                
+                # Store complete sentiment data
                 sentiment_data = {
                     'symbol': symbol,
-                    'average_score': avg_sentiment,
+                    'timestamp': int(datetime.now().timestamp() * 1000),
                     'article_count': len(feed),
-                    'timestamp': int(datetime.now().timestamp() * 1000)
+                    'articles': articles,  # Complete article data
+                    'aggregate': {
+                        'avg_sentiment_score': avg_sentiment,
+                        'avg_relevance_score': avg_relevance,
+                        'sentiment_distribution': sentiment_distribution,
+                        'total_mentions': len(ticker_sentiments)
+                    },
+                    'sentiment_definitions': data.get('sentiment_score_definition', ''),
+                    'relevance_definition': data.get('relevance_score_definition', '')
                 }
                 
                 await self.redis.setex(
@@ -1208,35 +1503,88 @@ class AlphaVantageIngestion:
                     json.dumps(sentiment_data)
                 )
                 
-        except Exception as e:
-            self.logger.error(f"Error storing sentiment for {symbol}: {e}")
-    
-    async def _store_technical_data(self, symbol: str, indicator: str, data: Dict):
-        """Store technical indicator data to Redis."""
-        try:
-            tech_key = f'Technical Analysis: {indicator}'
-            if tech_key in data:
-                values = data[tech_key]
+                # Determine overall label based on average sentiment
+                overall_label = 'Neutral'
+                if avg_sentiment <= -0.35:
+                    overall_label = 'Bearish'
+                elif -0.35 < avg_sentiment <= -0.15:
+                    overall_label = 'Somewhat-Bearish'
+                elif 0.15 <= avg_sentiment < 0.35:
+                    overall_label = 'Somewhat-Bullish'
+                elif avg_sentiment >= 0.35:
+                    overall_label = 'Bullish'
                 
-                # Get latest value
-                latest_date = sorted(values.keys())[0]
-                latest_value = float(values[latest_date][indicator])
-                
-                tech_data = {
-                    'symbol': symbol,
-                    'indicator': indicator,
-                    'value': latest_value,
-                    'timestamp': int(datetime.now().timestamp() * 1000)
-                }
-                
-                await self.redis.setex(
-                    f'technicals:{symbol}:{indicator.lower()}',
-                    self.ttls['technicals'],
-                    json.dumps(tech_data)
+                self.logger.info(
+                    f"Stored sentiment for {symbol}: score={avg_sentiment:.3f} ({overall_label}), "
+                    f"relevance={avg_relevance:.3f}, articles={len(feed)}, mentions={len(ticker_sentiments)}"
                 )
                 
         except Exception as e:
-            self.logger.error(f"Error storing {indicator} for {symbol}: {e}")
+            self.logger.error(f"Error storing sentiment for {symbol}: {e}")
+    
+    async def _store_technical_data(self, symbol: str, indicator_name: str, data: Dict, indicator_config: Dict):
+        """Store technical indicator data to Redis."""
+        try:
+            tech_key = f'Technical Analysis: {indicator_name}'
+            if tech_key in data:
+                values = data[tech_key]
+                
+                # Get latest date
+                latest_date = sorted(values.keys())[0]
+                latest_values = values[latest_date]
+                
+                # Handle multi-value indicators (MACD, BBANDS)
+                if 'value_keys' in indicator_config:
+                    # Multi-value indicator like MACD or BBANDS
+                    tech_data = {
+                        'symbol': symbol,
+                        'indicator': indicator_name,
+                        'timestamp': int(datetime.now().timestamp() * 1000)
+                    }
+                    
+                    # Add each value component
+                    for value_key in indicator_config['value_keys']:
+                        if value_key in latest_values:
+                            # Store with cleaner keys
+                            clean_key = value_key.replace(' ', '_').replace('Real_', '').lower()
+                            tech_data[clean_key] = float(latest_values[value_key])
+                    
+                    await self.redis.setex(
+                        f'technicals:{symbol}:{indicator_name.lower()}',
+                        self.ttls['technicals'],
+                        json.dumps(tech_data)
+                    )
+                    
+                    # Log based on indicator type
+                    if indicator_name == 'MACD':
+                        self.logger.info(f"Stored MACD for {symbol}: MACD={tech_data.get('macd', 0):.4f}, Signal={tech_data.get('macd_signal', 0):.4f}, Hist={tech_data.get('macd_hist', 0):.4f}")
+                    elif indicator_name == 'BBANDS':
+                        self.logger.info(f"Stored BBANDS for {symbol}: Upper={tech_data.get('upper_band', 0):.2f}, Middle={tech_data.get('middle_band', 0):.2f}, Lower={tech_data.get('lower_band', 0):.2f}")
+                    else:
+                        self.logger.info(f"Stored {indicator_name} for {symbol}: {tech_data}")
+                
+                else:
+                    # Single-value indicator like RSI or ATR
+                    value_key = indicator_config.get('value_key', indicator_name)
+                    latest_value = float(latest_values[value_key])
+                    
+                    tech_data = {
+                        'symbol': symbol,
+                        'indicator': indicator_name,
+                        'value': latest_value,
+                        'timestamp': int(datetime.now().timestamp() * 1000)
+                    }
+                    
+                    await self.redis.setex(
+                        f'technicals:{symbol}:{indicator_name.lower()}',
+                        self.ttls['technicals'],
+                        json.dumps(tech_data)
+                    )
+                    
+                    self.logger.info(f"Stored {indicator_name} for {symbol}: {latest_value:.2f}")
+                
+        except Exception as e:
+            self.logger.error(f"Error storing {indicator_name} for {symbol}: {e}")
     
     async def _metrics_loop(self):
         """Publish metrics to Redis."""

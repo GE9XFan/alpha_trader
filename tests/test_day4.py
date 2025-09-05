@@ -2,7 +2,6 @@
 """
 Day 4: Parameter Discovery - PRODUCTION SYSTEM TEST
 This test runs the ACTUAL PRODUCTION SYSTEM and shows results.
-NO MOCKS, NO CUSTOM CODE - JUST RUN THE FUCKING PRODUCTION SYSTEM
 """
 
 import asyncio

@@ -42,6 +42,9 @@ class AlphaTrader:
         # Module instances (will be initialized in setup())
         self.modules = {}
         
+        # Shutdown flag
+        self.shutdown_requested = False
+        
     def _setup_logging(self):
         """Set up logging configuration for the application."""
         # Create logs directory if it doesn't exist
@@ -263,15 +266,36 @@ class AlphaTrader:
         
         self.logger.info(f"Started {len(tasks)} async tasks")
         
-        # Run all tasks concurrently
+        # Run all tasks concurrently until shutdown requested
         try:
-            await asyncio.gather(*tasks)
+            # Store tasks for cancellation if needed
+            self.running_tasks = tasks
+            
+            # Wait for shutdown request
+            while not self.shutdown_requested:
+                await asyncio.sleep(1)
+            
+            # Shutdown was requested - cancel all tasks
+            self.logger.info("Cancelling all running tasks...")
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            
+            # Wait for all tasks to complete with a timeout
+            await asyncio.gather(*tasks, return_exceptions=True)
+            
         except Exception as e:
             self.logger.error(f"Error in async tasks: {e}")
-            await self.shutdown()
+            if not self.shutdown_requested:
+                await self.shutdown()
     
     async def shutdown(self):
         """Gracefully shutdown all modules."""
+        # Prevent multiple shutdown calls
+        if self.shutdown_requested:
+            return
+        self.shutdown_requested = True
+        
         self.logger.info("Initiating graceful shutdown...")
         
         try:
@@ -307,7 +331,7 @@ class AlphaTrader:
                 await self.redis.set('system:last_shutdown', datetime.now().isoformat())
                 
                 # Close Redis connection
-                await self.redis.close()
+                await self.redis.aclose()
                 self.logger.info("Redis connection closed")
             
             self.logger.info("Shutdown complete")
@@ -317,14 +341,13 @@ class AlphaTrader:
     
     def setup_signal_handlers(self):
         """Set up signal handlers for graceful shutdown."""
-        loop = asyncio.get_event_loop()
-        
         def handle_signal(sig_name):
             self.logger.info(f"Received {sig_name} signal")
-            # Create shutdown task
-            asyncio.create_task(self.shutdown())
-            # Stop the event loop
-            loop.stop()
+            # Set a flag to trigger shutdown
+            if not self.shutdown_requested:
+                self.shutdown_requested = True
+                # Create shutdown task
+                asyncio.create_task(self.shutdown())
         
         # Register signal handlers
         signal.signal(signal.SIGINT, lambda s, f: handle_signal('SIGINT'))
@@ -415,7 +438,7 @@ class AlphaTrader:
             )
             if not await test_redis.ping():
                 raise ConnectionError("Redis ping failed")
-            await test_redis.close()
+            await test_redis.aclose()
             self.logger.info("✓ Redis is running")
         except Exception as e:
             raise ConnectionError(
