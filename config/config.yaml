@@ -16,7 +16,7 @@ redis:
   db: 0
   password: null
   decode_responses: true
-  max_connections: 50
+  max_connections: 100  # Increased for high throughput
   socket_keepalive: true
 
 # IBKR configuration

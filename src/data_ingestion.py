@@ -462,7 +462,7 @@ class IBKRIngestion:
                 book['timestamp'] = int(datetime.now().timestamp() * 1000)
                 
                 # Update Redis with async pipeline
-                async with self.redis.pipeline() as pipe:
+                async with self.redis.pipeline(transaction=False) as pipe:
                     # Store exchange-specific book
                     book_ttl = self.ttls['order_book']
                     await pipe.setex(f'market:{symbol}:{exchange}:book', book_ttl, json.dumps(book))
@@ -618,7 +618,7 @@ class IBKRIngestion:
                 self.logger.warning(f"Non-finite value detected for {symbol} in TOB update, skipping")
                 return
             
-            async with self.redis.pipeline() as pipe:
+            async with self.redis.pipeline(transaction=False) as pipe:
                 await pipe.setex(
                     f'market:{symbol}:ticker', 
                     self.ttls['market_data'], 
@@ -677,7 +677,7 @@ class IBKRIngestion:
     
     async def _update_trade_data_redis(self, symbol: str, trade: Dict, ticker):
         """Update Redis with trade data using :ticker key consistently."""
-        async with self.redis.pipeline() as pipe:
+        async with self.redis.pipeline(transaction=False) as pipe:
             # Get TTLs from config
             ttls = self.ttls
             
@@ -774,7 +774,7 @@ class IBKRIngestion:
             self.bars_buffer[symbol].append(bar_data)
             
             # Update Redis - APPEND without deleting!
-            async with self.redis.pipeline() as pipe:
+            async with self.redis.pipeline(transaction=False) as pipe:
                 bars_key = f'market:{symbol}:bars'
                 
                 # Push new bar without deleting existing ones
@@ -1471,7 +1471,7 @@ class AlphaVantageIngestion:
             puts = [c for c in contracts if c.get('type') == 'put']
             
             # Store to Redis
-            async with self.redis.pipeline() as pipe:
+            async with self.redis.pipeline(transaction=False) as pipe:
                 if calls:
                     await pipe.setex(
                         f'options:{symbol}:calls',
@@ -1495,7 +1495,8 @@ class AlphaVantageIngestion:
                         'theta': contract.get('theta'),
                         'vega': contract.get('vega'),
                         'rho': contract.get('rho'),
-                        'implied_volatility': contract.get('implied_volatility')
+                        'implied_volatility': contract.get('implied_volatility'),
+                        'open_interest': contract.get('open_interest')
                     }
                     
                     # AV uses 'contractID' not 'contract_id'

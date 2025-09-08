@@ -109,19 +109,22 @@ class AlphaTrader:
         return config
     
     async def setup_redis(self) -> None:
-        """Initialize async Redis connection - no sync fallback."""
+        """Initialize async Redis connection with bounded pool."""
         redis_config = self.config['redis']
         
-        # Create async Redis client
-        self.redis = aioredis.Redis(
-            host=redis_config.get('host', '127.0.0.1'),
-            port=redis_config.get('port', 6379),
-            db=redis_config.get('db', 0),
-            password=redis_config.get('password'),
+        # Create connection pool with proper bounds
+        pool = aioredis.ConnectionPool.from_url(
+            f"redis://{redis_config.get('host', '127.0.0.1')}:{redis_config.get('port', 6379)}/{redis_config.get('db', 0)}",
+            max_connections=redis_config.get('max_connections', 100),  # Increased for high throughput
+            health_check_interval=30,
+            socket_keepalive=redis_config.get('socket_keepalive', True),
+            socket_connect_timeout=2,
             decode_responses=redis_config.get('decode_responses', True),
-            max_connections=redis_config.get('max_connections', 50),
-            socket_keepalive=redis_config.get('socket_keepalive', True)
+            password=redis_config.get('password')
         )
+        
+        # Create Redis client with the pool
+        self.redis = aioredis.Redis(connection_pool=pool)
         
         # Test connection
         if not await self.redis.ping():
