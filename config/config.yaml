@@ -81,7 +81,97 @@ modules:
     analytics_rth_only: false
   
   signals:
-    enabled: false  # Day 5+
+    enabled: true
+    dry_run: true
+    publish_channel: "signals:out"
+
+    # Guardrails (apply before any strategy logic)
+    max_staleness_s: 5        # upstream inputs must be this fresh
+    min_confidence: 0.60      # global floor; per-strategy may override
+    min_refresh_s: 2          # min spacing between recalcs per symbol
+    cooldown_s: 30            # block re-emitting same side within window
+    ttl_seconds: 300          # TTL for emitted keys
+    version: "D6.0.1"
+
+    # Optional global blend (for future hybrid scorers)
+    weights:
+      vpin: 0.25
+      toxicity: 0.20
+      gex: 0.20
+      dex: 0.10
+      trend: 0.20
+      vol: 0.05
+
+    strategies:
+      0dte:
+        enabled: true
+        symbols: ["SPY","QQQ","IWM"]
+        time_window: { start: "09:45", end: "15:00" }
+        confidence_weights:
+          vpin: 30
+          obi: 25
+          gamma_proximity: 30
+          sweep: 15
+        thresholds:
+          min_confidence: 60
+          vpin_min: 0.40
+          obi_min: 0.30
+          gamma_pin_distance: 0.005   # 0.5%
+
+      1dte:
+        enabled: true
+        symbols: ["SPY","QQQ","IWM","VXX"]
+        time_window: { start: "14:00", end: "15:30" }
+        confidence_weights:
+          volatility_regime: 20
+          obi: 30
+          gex: 25
+          vpin: 25
+        thresholds:
+          min_confidence: 65
+
+      14dte:
+        enabled: true
+        symbols: ["AAPL","TSLA","NVDA","AMD","GOOGL","META","AMZN","MSFT","PLTR"]
+        time_window: { start: "09:30", end: "16:00" }
+        confidence_weights:
+          unusual_options: 40
+          sweep: 30
+          hidden_orders: 20
+          dex: 10
+        thresholds:
+          min_confidence: 70
+
+      moc:
+        enabled: true
+        symbols: ["SPY","QQQ"]
+        time_window: { start: "15:30", end: "15:50" }     # signal formation window
+        # Confidence components (sum to 100 possible)
+        confidence_weights:
+          imbalance_strength: 45     # size & ratio
+          gamma_pull: 25             # towards nearest pin
+          obi: 20                    # intraday book skew
+          friday_factor: 10          # optional uplift (weekly flows)
+        thresholds:
+          min_confidence: 75
+          min_imbalance_notional: 2.0e9      # $2B combined or symbol-appropriate
+          min_imbalance_ratio: 0.60          # |Imbalance| / (Paired + |Imbalance|)
+          max_spread_bps: 8                  # option NBBO spread ≤ 8 bps of spot
+          min_option_oi: 2000                # open interest floor per leg
+          max_contract_gamma_risk: 0.020     # approximate ΔGamma vs 0.5% move
+        options:
+          expiry: "0DTE"                     # same-day
+          side: "trend"                      # with the imbalance direction
+          target_delta: 0.25                 # ~25d
+          alt_delta_if_pin: 0.15             # farther OTM if pin risk is high
+          max_mid_slippage_bps: 4            # quoted vs mid control
+          exit: "close"                      # conceptual; Day-6 = signals only
+
+    distribution:
+      tiers:
+        premium: { delay_seconds: 0,   include_all_details: true }
+        basic:   { delay_seconds: 60,  include_all_details: false }
+        free:    { delay_seconds: 300, include_all_details: false }
   
   execution:
     enabled: false  # Day 6+

@@ -681,8 +681,12 @@ class IBKRIngestion:
             # Get TTLs from config
             ttls = self.ttls
             
-            # Update last price
-            await pipe.set(f'market:{symbol}:last', trade['price'])
+            # Update last price as JSON with timestamp
+            last_price_data = {
+                'price': trade['price'],
+                'ts': trade['timestamp']
+            }
+            await pipe.set(f'market:{symbol}:last', json.dumps(last_price_data))
             
             # CRITICAL: Write to :ticker key for analytics to read
             # Round values properly - check for NaN

@@ -979,7 +979,10 @@ class MetricsAggregator:
             if vol_regime_json:
                 vol_data = json.loads(vol_regime_json)
                 vol_regime = vol_data.get('current', 'NORMAL')
-                realized_vol = vol_data.get('realized_vol', 0)
+                # Ensure realized_vol is never None
+                realized_vol = vol_data.get('realized_vol')
+                if realized_vol is None:
+                    realized_vol = 0
             
             # 5. Calculate market regime consensus
             # Based on VPIN, GEX, and volatility
@@ -1005,16 +1008,16 @@ class MetricsAggregator:
             
             # 6. Prepare result
             result = {
-                'weighted_vpin': round(weighted_vpin, 4),
+                'weighted_vpin': round(weighted_vpin, 4) if weighted_vpin is not None else 0,
                 'vpin_symbols_count': len(vpin_symbols),
-                'total_gex': round(total_gex, 0),
-                'total_dex': round(total_dex, 0),
+                'total_gex': round(total_gex, 0) if total_gex is not None else 0,
+                'total_dex': round(total_dex, 0) if total_dex is not None else 0,
                 'gex_regime': 'stabilizing' if total_gex > 0 else 'destabilizing',
                 'dex_bias': 'bullish' if total_dex > 0 else 'bearish',
-                'max_correlation': round(max_correlation, 3),
-                'avg_correlation': round(avg_correlation, 3),
+                'max_correlation': round(max_correlation, 3) if max_correlation is not None else 0,
+                'avg_correlation': round(avg_correlation, 3) if avg_correlation is not None else 0,
                 'vol_regime': vol_regime,
-                'realized_vol': round(realized_vol, 4),
+                'realized_vol': round(realized_vol, 4) if realized_vol is not None else 0,
                 'toxicity': toxicity,
                 'stability': stability,
                 'market_regime': market_regime,
@@ -1300,12 +1303,13 @@ class AnalyticsEngine:
                         batch = obi_tasks[i:i + MAX_CONCURRENT_TASKS]
                         await asyncio.gather(*batch, return_exceptions=True)
                 
-                # 3. VPIN and hidden order detection (every 5 seconds)
+                # 3. VPIN, hidden orders, sweep detection (every 5 seconds)
                 if self.calculation_count % 10 == 0:
                     analysis_tasks = []
                     for symbol in self.symbols:
                         analysis_tasks.append(self.calculate_vpin(symbol))
                         analysis_tasks.append(self.detect_hidden_orders(symbol))
+                        analysis_tasks.append(self.calculate_sweep_detection(symbol))
                     
                     # Execute in batches
                     for i in range(0, len(analysis_tasks), MAX_CONCURRENT_TASKS):
@@ -1317,15 +1321,17 @@ class AnalyticsEngine:
                             if isinstance(result, Exception):
                                 self.logger.error(f"Analysis task error: {result}")
                 
-                # 4. GEX/DEX and multi-timeframe (every 10 seconds)
+                # 4. GEX/DEX, unusual options, imbalance, and multi-timeframe (every 10 seconds)
                 if self.calculation_count % 20 == 0:
                     advanced_tasks = []
                     
-                    # Calculate GEX/DEX for all Level 2 symbols (they have options)
+                    # Calculate GEX/DEX and unusual options for all Level 2 symbols (they have options)
                     level2_symbols = self.config.get('symbols', {}).get('level2', [])
                     for symbol in level2_symbols:
                         advanced_tasks.append(self.calculate_gex(symbol))
                         advanced_tasks.append(self.calculate_dex(symbol))
+                        advanced_tasks.append(self.calculate_unusual_options_activity(symbol))
+                        advanced_tasks.append(self.calculate_imbalance_metrics(symbol))
                     
                     # Multi-timeframe for all tracked symbols
                     for symbol in self.symbols:
@@ -2562,6 +2568,224 @@ class AnalyticsEngine:
             self.logger.error(f"Error detecting hidden orders for {symbol}: {e}")
             self.logger.error(traceback.format_exc())
             return {'error': str(e)}
+    
+    async def calculate_sweep_detection(self, symbol: str) -> float:
+        """
+        Detect sweep orders - rapid executions across multiple price levels.
+        Returns 0 or 1 (binary detection).
+        """
+        try:
+            # Get recent trades (last 1 second worth)
+            trades_json = await self.redis.lrange(f'market:{symbol}:trades', -50, -1)
+            
+            if len(trades_json) < 3:
+                return 0
+            
+            # Parse trades
+            trades = []
+            current_time = time.time() * 1000
+            
+            for trade_str in trades_json:
+                try:
+                    trade = json.loads(trade_str)
+                    # Only consider trades from last 1 second
+                    if current_time - trade.get('timestamp', 0) <= 1000:
+                        trades.append(trade)
+                except (json.JSONDecodeError, KeyError):
+                    continue
+            
+            if len(trades) < 3:
+                return 0
+            
+            # Check for sweep characteristics
+            prices = [t.get('price', 0) for t in trades]
+            sizes = [t.get('size', 0) for t in trades]
+            
+            # Sweep detection criteria:
+            # 1. At least 3 trades in 1 second
+            # 2. Prices walk at least 3 levels
+            # 3. Cumulative size > threshold
+            unique_prices = len(set(prices))
+            total_size = sum(sizes)
+            
+            # Price direction consistency
+            if len(prices) >= 3:
+                price_moves = [prices[i+1] - prices[i] for i in range(len(prices)-1)]
+                same_direction = all(m >= 0 for m in price_moves) or all(m <= 0 for m in price_moves)
+            else:
+                same_direction = False
+            
+            # Detect sweep
+            is_sweep = (
+                unique_prices >= 3 and
+                total_size > 1000 and
+                same_direction
+            )
+            
+            # Store result
+            sweep_value = 1.0 if is_sweep else 0.0
+            await self.redis.setex(f'options:{symbol}:sweep', 5, str(sweep_value))
+            
+            if is_sweep:
+                self.logger.info(f"SWEEP detected for {symbol}: {unique_prices} levels, {total_size} shares")
+            
+            return sweep_value
+            
+        except Exception as e:
+            self.logger.error(f"Error detecting sweep for {symbol}: {e}")
+            return 0
+    
+    async def calculate_unusual_options_activity(self, symbol: str) -> float:
+        """
+        Calculate unusual options activity score (0-1).
+        Based on volume/OI ratio and z-score of volume.
+        """
+        try:
+            # Get options chain data
+            chain_json = await self.redis.get(f'options:{symbol}:chain')
+            if not chain_json:
+                return 0
+            
+            chain = json.loads(chain_json)
+            
+            # Calculate total volume and OI
+            total_volume = 0
+            total_oi = 0
+            
+            for strike_data in chain:
+                total_volume += strike_data.get('volume', 0)
+                total_oi += strike_data.get('openInterest', 0)
+            
+            if total_oi == 0:
+                return 0
+            
+            # Volume/OI ratio
+            vol_oi_ratio = total_volume / total_oi
+            
+            # Get historical volume for z-score (use 10-minute window)
+            hist_volumes = []
+            for i in range(10):
+                hist_key = f'options:{symbol}:volume:{i}'
+                hist_vol = await self.redis.get(hist_key)
+                if hist_vol:
+                    hist_volumes.append(float(hist_vol))
+            
+            # Store current volume for future z-score calculations
+            await self.redis.setex(f'options:{symbol}:volume:0', 600, str(total_volume))
+            
+            # Calculate z-score if we have history
+            if len(hist_volumes) >= 5:
+                mean_vol = np.mean(hist_volumes)
+                std_vol = np.std(hist_volumes)
+                if std_vol > 0:
+                    z_score = (total_volume - mean_vol) / std_vol
+                else:
+                    z_score = 0
+            else:
+                z_score = 0
+            
+            # Calculate unusual activity score
+            # High score if: z_score >= 2.5 or vol/OI >= 0.15
+            unusual_score = 0
+            
+            if z_score >= 2.5:
+                unusual_score = min(1.0, 0.6 + (z_score - 2.5) * 0.1)
+            elif vol_oi_ratio >= 0.15:
+                unusual_score = min(1.0, 0.6 + (vol_oi_ratio - 0.15) * 2)
+            else:
+                unusual_score = max(0, min(z_score / 2.5, vol_oi_ratio / 0.15)) * 0.6
+            
+            # Store result
+            await self.redis.setex(f'options:{symbol}:unusual_activity', 60, str(unusual_score))
+            
+            if unusual_score >= 0.6:
+                self.logger.info(f"UNUSUAL options activity for {symbol}: score={unusual_score:.2f}, z={z_score:.1f}, vol/oi={vol_oi_ratio:.3f}")
+            
+            return unusual_score
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating unusual options for {symbol}: {e}")
+            return 0
+    
+    async def calculate_imbalance_metrics(self, symbol: str):
+        """
+        Calculate MOC imbalance metrics (placeholder for actual imbalance feed).
+        This would normally come from exchange imbalance messages.
+        """
+        try:
+            # For now, create synthetic imbalance data based on order flow
+            # In production, this would come from exchange MOC imbalance messages
+            
+            # Get recent order book
+            book_json = await self.redis.get(f'market:{symbol}:l2')
+            if not book_json:
+                return
+            
+            book = json.loads(book_json)
+            
+            # Calculate order book imbalance as proxy
+            bid_liquidity = sum(level['size'] for level in book.get('bids', [])[:5])
+            ask_liquidity = sum(level['size'] for level in book.get('asks', [])[:5])
+            
+            total_liquidity = bid_liquidity + ask_liquidity
+            if total_liquidity == 0:
+                return
+            
+            # Determine imbalance side
+            if bid_liquidity > ask_liquidity * 1.2:
+                side = 'BUY'
+                imbalance = bid_liquidity - ask_liquidity
+            elif ask_liquidity > bid_liquidity * 1.2:
+                side = 'SELL'
+                imbalance = ask_liquidity - bid_liquidity
+            else:
+                side = 'NEUTRAL'
+                imbalance = abs(bid_liquidity - ask_liquidity)
+            
+            # Calculate notional (using last price)
+            last_price = await self.redis.get(f'market:{symbol}:last')
+            price = 0  # Initialize price
+            if last_price:
+                try:
+                    # Try parsing as JSON first
+                    if isinstance(last_price, str) and last_price.startswith('{'):
+                        price_data = json.loads(last_price)
+                        price = price_data.get('price', 0)
+                    else:
+                        # Direct float value (backward compatibility)
+                        price = float(last_price)
+                    notional = imbalance * price * 100  # Convert shares to dollars
+                except (json.JSONDecodeError, ValueError):
+                    notional = 0
+            else:
+                notional = 0
+            
+            # Calculate ratio
+            paired = min(bid_liquidity, ask_liquidity)
+            ratio = imbalance / (paired + imbalance) if (paired + imbalance) > 0 else 0
+            
+            # Store imbalance data
+            imbalance_data = {
+                'side': side,
+                'total': notional,
+                'paired': paired * price * 100 if price else 0,
+                'ratio': ratio,
+                'ts': int(time.time() * 1000)
+            }
+            
+            await self.redis.setex(f'imbalance:{symbol}:raw', 60, json.dumps(imbalance_data))
+            
+            # Store indicative close (simplified)
+            indicative_data = {
+                'price': price if price else 0,
+                'near_close_offset_bps': 0,  # Would be calculated from indicative close price
+                'ts': int(time.time() * 1000)
+            }
+            
+            await self.redis.setex(f'imbalance:{symbol}:indicative', 60, json.dumps(indicative_data))
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating imbalance for {symbol}: {e}")
     
     async def calculate_multi_timeframe_metrics(self, symbol: str) -> dict:
         """
