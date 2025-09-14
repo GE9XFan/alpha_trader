@@ -111,8 +111,8 @@ class ParameterDiscovery:
                 trade = json.loads(trades[0])
                 if 'timestamp' in trade:
                     last_timestamp = trade['timestamp']
-            except:
-                pass
+            except (json.JSONDecodeError, KeyError) as e:
+                self.logger.warning(f"Trade parse error for {symbol}: {e}", exc_info=True)
         
         # Check bars timestamp (bars are stored as a list)
         if not last_timestamp:
@@ -125,8 +125,8 @@ class ParameterDiscovery:
                         last_timestamp = last_bar['time']
                     elif 'timestamp' in last_bar:
                         last_timestamp = last_bar['timestamp']
-                except:
-                    pass
+                except (json.JSONDecodeError, KeyError) as e:
+                    self.logger.warning(f"Bar parse error for {symbol}: {e}", exc_info=True)
         
         if not last_timestamp:
             return False
@@ -189,7 +189,8 @@ class ParameterDiscovery:
                 trade = json.loads(trade_str)
                 if 'size' in trade:
                     trade_sizes.append(trade['size'])
-            except:
+            except (json.JSONDecodeError, KeyError) as e:
+                self.logger.warning(f"Trade size parse error: {e}")
                 continue
         
         if len(trade_sizes) < min_trades:
@@ -470,7 +471,8 @@ class ParameterDiscovery:
                         # Extract venue from trade or book
                         venue = trade.get('venue', 'UNKNOWN')
                         venue_counts[venue] += 1
-                    except:
+                    except (json.JSONDecodeError, KeyError) as e:
+                        self.logger.warning(f"Venue parse error: {e}")
                         continue
                 
                 # If no venue info in trades, try to get from order book
@@ -1406,8 +1408,8 @@ class AnalyticsEngine:
                                     'timestamp': time.time()
                                 })
                             )
-                        except:
-                            pass  # Don't fail if we can't log to Redis
+                        except Exception as e:
+                            self.logger.warning(f"Failed to log performance warning to Redis: {e}")  # Don't fail if we can't log to Redis
                 
             except Exception as e:
                 self.logger.error(f"Analytics engine error: {e}")

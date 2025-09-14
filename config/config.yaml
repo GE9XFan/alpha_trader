@@ -7,7 +7,7 @@ system:
 # Market configuration
 market:
   check_staleness_after_hours: false
-  extended_hours: false
+  extended_hours: true
 
 # Redis configuration
 redis:

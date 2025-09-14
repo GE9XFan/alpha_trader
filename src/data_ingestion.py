@@ -1158,29 +1158,38 @@ class AlphaVantageIngestion:
     
     async def _update_loop(self):
         """Main update loop for fetching data."""
-        async with aiohttp.ClientSession() as session:
+        # Configure timeout and connection limits for robustness
+        timeout = aiohttp.ClientTimeout(total=10, connect=3, sock_read=7)
+        connector = aiohttp.TCPConnector(limit=200, ttl_dns_cache=300)
+        
+        async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
             while self.running:
                 try:
                     current_time = time.time()
                     tasks = []
                     
                     for symbol in self.symbols:
-                        # Check if options need update
-                        if current_time - self.last_options_update.get(symbol, 0) >= self.options_interval:
+                        # Add jitter to prevent all symbols from aligning at minute boundaries
+                        options_jitter = random.uniform(-0.25, 0.25) * self.options_interval
+                        sentiment_jitter = random.uniform(-0.25, 0.25) * self.sentiment_interval
+                        technicals_jitter = random.uniform(-0.25, 0.25) * self.technicals_interval
+                        
+                        # Check if options need update (with jitter)
+                        if current_time - self.last_options_update.get(symbol, 0) >= (self.options_interval + options_jitter):
                             tasks.append(self._fetch_with_retry(
                                 self.fetch_options_chain, session, symbol
                             ))
                             self.last_options_update[symbol] = current_time
                         
-                        # Check if sentiment needs update
-                        if current_time - self.last_sentiment_update.get(symbol, 0) >= self.sentiment_interval:
+                        # Check if sentiment needs update (with jitter)
+                        if current_time - self.last_sentiment_update.get(symbol, 0) >= (self.sentiment_interval + sentiment_jitter):
                             tasks.append(self._fetch_with_retry(
                                 self.fetch_sentiment, session, symbol
                             ))
                             self.last_sentiment_update[symbol] = current_time
                         
-                        # Check if technicals need update
-                        if current_time - self.last_technicals_update.get(symbol, 0) >= self.technicals_interval:
+                        # Check if technicals need update (with jitter)
+                        if current_time - self.last_technicals_update.get(symbol, 0) >= (self.technicals_interval + technicals_jitter):
                             tasks.append(self._fetch_with_retry(
                                 self.fetch_technicals, session, symbol
                             ))
@@ -1202,7 +1211,7 @@ class AlphaVantageIngestion:
                     await asyncio.sleep(1)
     
     async def _fetch_with_retry(self, func, *args, **kwargs):
-        """Retry wrapper with exponential backoff and jitter."""
+        """Retry wrapper with exponential backoff and jitter for robust network handling."""
         last_error = None
         
         for attempt in range(self.retry_attempts):
@@ -1232,11 +1241,25 @@ class AlphaVantageIngestion:
                     self.logger.debug(f"Timeout, retry in {actual_delay:.1f}s")
                     await asyncio.sleep(actual_delay)
                     
+            except (aiohttp.ClientError, aiohttp.ClientConnectionError, 
+                    aiohttp.ServerDisconnectedError, aiohttp.ClientPayloadError) as e:
+                # Handle specific network errors (DNS, connection reset, TLS issues)
+                last_error = e
+                if attempt < self.retry_attempts - 1:
+                    delay = self.retry_delay_base ** (attempt + 1)
+                    jitter = delay * 0.2 * (2 * random.random() - 1)
+                    actual_delay = max(0.1, delay + jitter)
+                    self.logger.warning(f"Network error ({type(e).__name__}), retry {attempt+1}/{self.retry_attempts} in {actual_delay:.1f}s")
+                    await asyncio.sleep(actual_delay)
+                    
             except Exception as e:
                 last_error = e
                 if attempt < self.retry_attempts - 1:
                     delay = self.retry_delay_base ** (attempt + 1)
-                    await asyncio.sleep(delay)
+                    jitter = delay * 0.2 * (2 * random.random() - 1)
+                    actual_delay = max(0.1, delay + jitter)
+                    self.logger.warning(f"Unexpected error ({type(e).__name__}), retry in {actual_delay:.1f}s")
+                    await asyncio.sleep(actual_delay)
         
         raise last_error or Exception(f"All {self.retry_attempts} retry attempts failed")
     
