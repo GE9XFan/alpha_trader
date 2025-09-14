@@ -182,7 +182,33 @@ modules:
   social_media:
     enabled: false  # Day 7+
 
-# Risk configuration (Day 6+)
+# Risk Management configuration (Day 7)
+risk_management:
+  enabled: true
+  max_daily_loss_pct: 2.0          # 2% of account value
+  max_position_loss_pct: 1.0        # 1% max loss per position
+  consecutive_loss_limit: 3         # Halt after 3 consecutive losses
+  correlation_limit: 0.7            # Max portfolio correlation
+  margin_buffer: 1.25               # 25% margin buffer required
+  max_drawdown_pct: 10.0           # 10% max drawdown from HWM
+  
+  # Circuit breakers
+  circuit_breakers:
+    daily_loss: true
+    consecutive_losses: true
+    volatility_spike: true
+    system_errors: true
+    max_drawdown: true
+  
+  # VaR parameters
+  var_confidence: 0.95              # 95% confidence level
+  var_lookback_days: 30             # Days of history for VaR
+  
+  # Position limits
+  max_positions: 5                  # Max concurrent positions
+  max_per_symbol: 2                 # Max positions per symbol
+
+# Legacy risk configuration (kept for backward compatibility)
 risk:
   circuit_breakers:
     enabled: false
