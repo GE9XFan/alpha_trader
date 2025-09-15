@@ -109,7 +109,10 @@ class ParameterDiscovery:
         if trades:
             try:
                 trade = json.loads(trades[0])
-                if 'timestamp' in trade:
+                # Trades can have either 'time' or 'timestamp' field
+                if 'time' in trade:
+                    last_timestamp = trade['time']
+                elif 'timestamp' in trade:
                     last_timestamp = trade['timestamp']
             except (json.JSONDecodeError, KeyError) as e:
                 self.logger.warning(f"Trade parse error for {symbol}: {e}", exc_info=True)
