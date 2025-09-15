@@ -684,7 +684,7 @@ class IBKRIngestion:
             # Update last price as JSON with timestamp
             last_price_data = {
                 'price': trade['price'],
-                'ts': trade['timestamp']
+                'ts': trade['time']  # Fixed: use 'time' key, not 'timestamp'
             }
             await pipe.set(f'market:{symbol}:last', json.dumps(last_price_data))
             
