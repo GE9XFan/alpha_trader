@@ -58,3 +58,6 @@ build/
 *.bak
 *.swp
 *~
+
+# Local analysis artifacts
+REFACTORING_ANALYSIS.md

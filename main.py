@@ -147,18 +147,20 @@ class AlphaTrader:
         # REQUIRED: Data ingestion modules
         if self.config.get('modules', {}).get('data_ingestion', {}).get('enabled', True):
             try:
-                from src.data_ingestion import IBKRIngestion, AlphaVantageIngestion
+                from src.ibkr_ingestion import IBKRIngestion
+                from src.av_ingestion import AlphaVantageIngestion
                 self.modules['ibkr_ingestion'] = IBKRIngestion(self.config, self.redis)
                 self.modules['av_ingestion'] = AlphaVantageIngestion(self.config, self.redis)
                 self.logger.info("✓ Data ingestion modules initialized")
             except Exception as e:
                 self.logger.error(f"FATAL: Cannot initialize data ingestion: {e}")
                 raise
-        
+
         # REQUIRED: Analytics (for Day 4)
         if self.config.get('modules', {}).get('analytics', {}).get('enabled', True):
             try:
-                from src.analytics import AnalyticsEngine, ParameterDiscovery
+                from src.analytics_engine import AnalyticsEngine
+                from src.parameter_discovery import ParameterDiscovery
                 self.modules['analytics'] = AnalyticsEngine(self.config, self.redis)
                 self.modules['param_discovery'] = ParameterDiscovery(self.config, self.redis)
                 self.logger.info("✓ Analytics modules initialized")
@@ -175,30 +177,92 @@ class AlphaTrader:
         except ImportError:
             self.logger.warning("System monitor not available")
         
-        # OPTIONAL: Future modules (Day 5+)
-        optional_modules = [
-            ('signals', ['SignalGenerator', 'SignalDistributor']),
-            ('execution', ['ExecutionManager', 'PositionManager', 'RiskManager']),
-            ('social_media', ['TwitterBot', 'TelegramBot']),
-            ('dashboard', ['Dashboard'])
-        ]
-        
-        for module_name, class_names in optional_modules:
-            if not self.config.get('modules', {}).get(module_name, {}).get('enabled', False):
-                continue
-                
+        # OPTIONAL: Signal generation modules
+        if self.config.get('modules', {}).get('signals', {}).get('enabled', False):
             try:
-                module = __import__(f'src.{module_name}', fromlist=class_names)
-                for class_name in class_names:
-                    if hasattr(module, class_name):
-                        cls = getattr(module, class_name)
-                        instance_name = f"{module_name}_{class_name.lower()}"
-                        self.modules[instance_name] = cls(self.config, self.redis)
-                self.logger.info(f"✓ {module_name} module initialized")
+                from src.signal_generator import SignalGenerator
+                from src.signal_distributor import SignalDistributor
+                from src.signal_deduplication import SignalDeduplication
+                from src.dte_strategies import DTEStrategies
+                from src.moc_strategy import MOCStrategy
+
+                self.modules['signal_generator'] = SignalGenerator(self.config, self.redis)
+                self.modules['signal_distributor'] = SignalDistributor(self.config, self.redis)
+                self.modules['signal_deduplication'] = SignalDeduplication(self.config, self.redis)
+                self.modules['dte_strategies'] = DTEStrategies(self.config, self.redis)
+                self.modules['moc_strategy'] = MOCStrategy(self.config, self.redis)
+                self.logger.info("✓ Signal generation modules initialized")
             except ImportError:
-                self.logger.info(f"⚠ {module_name} module not available (expected for Day 4)")
+                self.logger.info("⚠ Signal modules not available (expected for Day 4)")
             except Exception as e:
-                self.logger.warning(f"⚠ Error loading {module_name}: {e}")
+                self.logger.warning(f"⚠ Error loading signal modules: {e}")
+
+        # OPTIONAL: Execution and risk management modules
+        if self.config.get('modules', {}).get('execution', {}).get('enabled', False):
+            try:
+                from src.execution_manager import ExecutionManager
+                from src.position_manager import PositionManager
+                from src.risk_manager import RiskManager
+                from src.emergency_manager import EmergencyManager
+
+                self.modules['execution_manager'] = ExecutionManager(self.config, self.redis)
+                self.modules['position_manager'] = PositionManager(self.config, self.redis)
+                self.modules['risk_manager'] = RiskManager(self.config, self.redis)
+                self.modules['emergency_manager'] = EmergencyManager(self.config, self.redis)
+                self.logger.info("✓ Execution and risk modules initialized")
+            except ImportError:
+                self.logger.info("⚠ Execution modules not available (expected for Day 4)")
+            except Exception as e:
+                self.logger.warning(f"⚠ Error loading execution modules: {e}")
+
+        # OPTIONAL: Social media modules
+        if self.config.get('modules', {}).get('social_media', {}).get('enabled', False):
+            try:
+                from src.twitter_bot import TwitterBot
+                from src.telegram_bot import TelegramBot
+                from src.discord_bot import DiscordBot
+
+                self.modules['twitter_bot'] = TwitterBot(self.config, self.redis)
+                self.modules['telegram_bot'] = TelegramBot(self.config, self.redis)
+                self.modules['discord_bot'] = DiscordBot(self.config, self.redis)
+                self.logger.info("✓ Social media modules initialized")
+            except ImportError:
+                self.logger.info("⚠ Social media modules not available (expected for Day 4)")
+            except Exception as e:
+                self.logger.warning(f"⚠ Error loading social media modules: {e}")
+
+        # OPTIONAL: Dashboard modules
+        if self.config.get('modules', {}).get('dashboard', {}).get('enabled', False):
+            try:
+                from src.dashboard_server import Dashboard
+                from src.dashboard_routes import LogAggregator, AlertManager, PerformanceDashboard
+                from src.dashboard_websocket import WebSocketManager
+
+                self.modules['dashboard'] = Dashboard(self.config, self.redis)
+                self.modules['log_aggregator'] = LogAggregator(self.config, self.redis)
+                self.modules['alert_manager'] = AlertManager(self.config, self.redis)
+                self.modules['performance_dashboard'] = PerformanceDashboard(self.config, self.redis)
+                self.logger.info("✓ Dashboard modules initialized")
+            except ImportError:
+                self.logger.info("⚠ Dashboard modules not available (expected for Day 4)")
+            except Exception as e:
+                self.logger.warning(f"⚠ Error loading dashboard modules: {e}")
+
+        # OPTIONAL: Morning analysis modules
+        if self.config.get('modules', {}).get('morning_analysis', {}).get('enabled', False):
+            try:
+                from src.morning_scanner import MarketAnalysisGenerator
+                from src.news_analyzer import ScheduledTasks
+                from src.report_generator import DataArchiver
+
+                self.modules['market_analysis'] = MarketAnalysisGenerator(self.config, self.redis)
+                self.modules['scheduled_tasks'] = ScheduledTasks(self.config, self.redis)
+                self.modules['data_archiver'] = DataArchiver(self.config, self.redis)
+                self.logger.info("✓ Morning analysis modules initialized")
+            except ImportError:
+                self.logger.info("⚠ Morning analysis modules not available (expected for Day 4)")
+            except Exception as e:
+                self.logger.warning(f"⚠ Error loading morning analysis modules: {e}")
         
         self.logger.info(f"Module initialization complete: {len(self.modules)} modules loaded")
     
@@ -252,11 +316,54 @@ class AlphaTrader:
             task.set_name("module_monitor")
             tasks.append(task)
         
-        # Start other modules
+        # Start signal modules if present
+        signal_modules = ['signal_generator', 'signal_distributor']
+        for module_name in signal_modules:
+            if module_name in self.modules:
+                self.logger.info(f"Starting {module_name}...")
+                task = asyncio.create_task(self.modules[module_name].start())
+                task.set_name(f"module_{module_name}")
+                tasks.append(task)
+
+        # Start execution modules if present
+        execution_modules = ['execution_manager', 'position_manager', 'risk_manager']
+        for module_name in execution_modules:
+            if module_name in self.modules:
+                self.logger.info(f"Starting {module_name}...")
+                task = asyncio.create_task(self.modules[module_name].start())
+                task.set_name(f"module_{module_name}")
+                tasks.append(task)
+
+        # Start social media modules if present
+        social_modules = ['twitter_bot', 'telegram_bot', 'discord_bot']
+        for module_name in social_modules:
+            if module_name in self.modules and hasattr(self.modules[module_name], 'start'):
+                self.logger.info(f"Starting {module_name}...")
+                task = asyncio.create_task(self.modules[module_name].start())
+                task.set_name(f"module_{module_name}")
+                tasks.append(task)
+
+        # Start dashboard if present
+        if 'dashboard' in self.modules:
+            self.logger.info("Starting Dashboard...")
+            task = asyncio.create_task(self.modules['dashboard'].start())
+            task.set_name("module_dashboard")
+            tasks.append(task)
+
+        # Start scheduled tasks if present
+        if 'scheduled_tasks' in self.modules:
+            self.logger.info("Starting Scheduled Tasks...")
+            task = asyncio.create_task(self.modules['scheduled_tasks'].start())
+            task.set_name("module_scheduled_tasks")
+            tasks.append(task)
+
+        # Start any remaining modules with start methods
+        started_modules = set(['ibkr_ingestion', 'av_ingestion', 'analytics', 'monitor'] +
+                              signal_modules + execution_modules + social_modules +
+                              ['dashboard', 'scheduled_tasks'])
+
         for name, module in self.modules.items():
-            if name in ['ibkr_ingestion', 'av_ingestion', 'analytics', 'monitor']:
-                continue  # Already started
-            if hasattr(module, 'start'):
+            if name not in started_modules and hasattr(module, 'start'):
                 self.logger.info(f"Starting module: {name}")
                 task = asyncio.create_task(module.start())
                 task.set_name(f"module_{name}")
