@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from collections import deque, defaultdict
 from ib_insync import IB, Stock, MarketOrder, LimitOrder, util, Ticker
 import logging
+from redis_keys import Keys
 import traceback
 from decimal import Decimal, ROUND_HALF_UP
 
@@ -465,11 +466,11 @@ class IBKRIngestion:
                 async with self.redis.pipeline(transaction=False) as pipe:
                     # Store exchange-specific book
                     book_ttl = self.ttls['order_book']
-                    await pipe.setex(f'market:{symbol}:{exchange}:book', book_ttl, json.dumps(book))
+                    await pipe.setex(Keys.market_book(symbol, exchange), book_ttl, json.dumps(book))
                     
                     # CRITICAL: Also store at the aggregated location for analytics
                     # Analytics and status logger expect market:{symbol}:book
-                    await pipe.setex(f'market:{symbol}:book', book_ttl, json.dumps(book))
+                    await pipe.setex(Keys.market_book(symbol), book_ttl, json.dumps(book))
                     
                     # CRITICAL: Always update aggregated TOB and :ticker
                     await self._update_aggregated_tob(symbol, book, pipe)
@@ -560,7 +561,7 @@ class IBKRIngestion:
             
             # Atomic write with TTL from config
             ttl = self.ttls['market_data']
-            await pipe.setex(f'market:{symbol}:ticker', ttl, json.dumps(ticker_data))
+            await pipe.setex(Keys.market_ticker(symbol), ttl, json.dumps(ticker_data))
             
             # Update last timestamp after successful write
             self.last_tob_ts[symbol] = current_ts
@@ -580,7 +581,7 @@ class IBKRIngestion:
                 for key in self.depth_tickers.keys()
             )
             if has_working_l2:
-                return  # L2 aggregation will maintain market:{symbol}:ticker
+                return  # L2 aggregation will maintain ticker data
         
         # Update :ticker with TOB data
         if ticker.bid and ticker.ask:
@@ -620,7 +621,7 @@ class IBKRIngestion:
             
             async with self.redis.pipeline(transaction=False) as pipe:
                 await pipe.setex(
-                    f'market:{symbol}:ticker', 
+                    Keys.market_ticker(symbol), 
                     self.ttls['market_data'], 
                     json.dumps(ticker_data)
                 )
@@ -686,7 +687,7 @@ class IBKRIngestion:
                 'price': trade['price'],
                 'ts': trade['time']  # Fixed: use 'time' key, not 'timestamp'
             }
-            await pipe.set(f'market:{symbol}:last', json.dumps(last_price_data))
+            await pipe.set(f'market:{symbol}:last', json.dumps(last_price_data))  # TODO: Normalize this key
             
             # CRITICAL: Write to :ticker key for analytics to read
             # Round values properly - check for NaN
@@ -728,10 +729,10 @@ class IBKRIngestion:
                 else:
                     ticker_data['spread_bps'] = None
             
-            await pipe.setex(f'market:{symbol}:ticker', ttls['market_data'], json.dumps(ticker_data))
+            await pipe.setex(Keys.market_ticker(symbol), ttls['market_data'], json.dumps(ticker_data))
             
             # Store trades list - APPEND without deleting!
-            trades_key = f'market:{symbol}:trades'
+            trades_key = Keys.market_trades(symbol)
             
             # Only push new trades from buffer
             if self.trades_buffer[symbol]:
@@ -779,7 +780,7 @@ class IBKRIngestion:
             
             # Update Redis - APPEND without deleting!
             async with self.redis.pipeline(transaction=False) as pipe:
-                bars_key = f'market:{symbol}:bars'
+                bars_key = Keys.market_bars(symbol, '1min')
                 
                 # Push new bar without deleting existing ones
                 pipe.rpush(bars_key, json.dumps(bar_data))
@@ -866,7 +867,7 @@ class IBKRIngestion:
                 
                 for symbol, sub in self.subscriptions.items():
                     # Get current data from Redis (stored as JSON string, not hash)
-                    ticker_json = await self.redis.get(f'market:{symbol}:ticker')
+                    ticker_json = await self.redis.get(Keys.market_ticker(symbol))
                     
                     if ticker_json:
                         try:
@@ -883,7 +884,7 @@ class IBKRIngestion:
                         
                         if sub.get('type') == 'LEVEL2':
                             # Check order book depth
-                            book_data = await self.redis.get(f'market:{symbol}:book')
+                            book_data = await self.redis.get(Keys.market_book(symbol))
                             depth_count = 0
                             if book_data:
                                 book = json.loads(book_data)
@@ -944,7 +945,7 @@ class IBKRIngestion:
                 }
                 
                 ttl = self.ttls.get('heartbeat', 15)
-                await self.redis.setex('hb:ibkr', ttl, json.dumps(heartbeat))
+                await self.redis.setex(Keys.heartbeat('ibkr_ingestion'), ttl, json.dumps(heartbeat))
                 
                 # Reset counters
                 self.update_counts = {'depth': 0, 'trades': 0, 'bars': 0}
@@ -1060,6 +1061,84 @@ class IBKRIngestion:
         await self._cleanup()
 
 
+class RollingRateLimiter:
+    """
+    True rolling window rate limiter using token bucket algorithm.
+    Ensures API calls don't exceed rate limits over any rolling time window.
+    """
+    
+    def __init__(self, rate_per_minute: int, safety_buffer: int = 10):
+        """
+        Initialize rate limiter.
+        
+        Args:
+            rate_per_minute: Maximum calls allowed per minute
+            safety_buffer: Safety margin to stay below limit
+        """
+        self.capacity = max(1, rate_per_minute - safety_buffer)
+        self.tokens = self.capacity
+        self.updated = asyncio.get_event_loop().time()
+        self.lock = asyncio.Lock()
+        self.logger = logging.getLogger(__name__)
+        
+        # Track request statistics
+        self.total_requests = 0
+        self.total_wait_time = 0
+        self.max_wait_time = 0
+    
+    async def acquire(self, n: int = 1):
+        """
+        Acquire n tokens, waiting if necessary.
+        
+        Args:
+            n: Number of tokens to acquire (default 1)
+        """
+        wait_start = asyncio.get_event_loop().time()
+        
+        async with self.lock:
+            while True:
+                now = asyncio.get_event_loop().time()
+                
+                # Refill tokens based on time elapsed
+                elapsed = now - self.updated
+                refill = elapsed * (self.capacity / 60.0)  # Tokens per second
+                self.tokens = min(self.capacity, self.tokens + refill)
+                self.updated = now
+                
+                # Check if we have enough tokens
+                if self.tokens >= n:
+                    self.tokens -= n
+                    wait_time = now - wait_start
+                    self.total_wait_time += wait_time
+                    self.max_wait_time = max(self.max_wait_time, wait_time)
+                    self.total_requests += n
+                    
+                    if wait_time > 0.1:  # Log if we had to wait
+                        self.logger.debug(
+                            f"Rate limiter: waited {wait_time:.2f}s, "
+                            f"tokens remaining: {self.tokens:.1f}/{self.capacity}"
+                        )
+                    
+                    return
+                
+                # Calculate how long to wait for tokens
+                tokens_needed = n - self.tokens
+                wait_seconds = (tokens_needed / self.capacity) * 60.0
+                wait_seconds = min(wait_seconds, 1.0)  # Cap at 1 second per iteration
+                
+                await asyncio.sleep(wait_seconds)
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get rate limiter statistics."""
+        return {
+            'capacity': self.capacity,
+            'current_tokens': self.tokens,
+            'total_requests': self.total_requests,
+            'avg_wait_time': self.total_wait_time / max(1, self.total_requests),
+            'max_wait_time': self.max_wait_time
+        }
+
+
 class AlphaVantageIngestion:
     """
     Alpha Vantage REST API ingestion with semaphore-based rate limiting.
@@ -1093,9 +1172,11 @@ class AlphaVantageIngestion:
         self.calls_per_minute = self.av_config.get('calls_per_minute', 600)
         self.safety_buffer = self.av_config.get('safety_buffer', 10)
         
-        # Single rate limiting via semaphore
-        max_concurrent = self.calls_per_minute - self.safety_buffer
-        self.request_semaphore = asyncio.Semaphore(max_concurrent)
+        # Use rolling rate limiter for true rate control
+        self.rate_limiter = RollingRateLimiter(
+            rate_per_minute=self.calls_per_minute,
+            safety_buffer=self.safety_buffer
+        )
         
         # Retry configuration
         self.retry_attempts = self.av_config.get('retry_attempts', 3)
@@ -1270,17 +1351,18 @@ class AlphaVantageIngestion:
     async def fetch_options_chain(self, session: aiohttp.ClientSession, symbol: str):
         """Fetch options chain with semaphore rate limiting."""
         try:
-            # Single rate control via semaphore
-            async with self.request_semaphore:
-                params = {
-                    'function': 'REALTIME_OPTIONS',
-                    'symbol': symbol,
-                    'apikey': self.api_key,
-                    'datatype': 'json',
-                    'require_greeks': 'true'
-                }
-                
-                async with session.get(self.base_url, params=params) as response:
+            # Acquire rate limit token
+            await self.rate_limiter.acquire()
+            
+            params = {
+                'function': 'REALTIME_OPTIONS',
+                'symbol': symbol,
+                'apikey': self.api_key,
+                'datatype': 'json',
+                'require_greeks': 'true'
+            }
+            
+            async with session.get(self.base_url, params=params) as response:
                     # CRITICAL: Raise for HTTP errors
                     response.raise_for_status()
                     
@@ -1329,16 +1411,17 @@ class AlphaVantageIngestion:
             return None
         
         try:
-            async with self.request_semaphore:
-                params = {
-                    'function': 'NEWS_SENTIMENT',
-                    'tickers': symbol,
-                    'apikey': self.api_key,
-                    'sort': 'LATEST',
-                    'limit': 50
-                }
-                
-                async with session.get(self.base_url, params=params) as response:
+            await self.rate_limiter.acquire()
+            
+            params = {
+                'function': 'NEWS_SENTIMENT',
+                'tickers': symbol,
+                'apikey': self.api_key,
+                'sort': 'LATEST',
+                'limit': 50
+            }
+            
+            async with session.get(self.base_url, params=params) as response:
                     response.raise_for_status()
                     data = await response.json()
                     
@@ -1454,34 +1537,35 @@ class AlphaVantageIngestion:
     async def _fetch_single_indicator(self, session: aiohttp.ClientSession, symbol: str, indicator: Dict):
         """Fetch a single technical indicator."""
         try:
-            async with self.request_semaphore:
-                async with session.get(self.base_url, params=indicator['params']) as response:
-                    response.raise_for_status()
-                    data = await response.json()
-                    
-                    # Check for API errors
-                    if 'Error Message' in data:
-                        self.logger.error(f"AV {indicator['function']} error for {symbol}: {data['Error Message']}")
-                        return None
-                    
-                    # Check for rate limits
-                    if 'Note' in data:
-                        self.logger.warning(f"AV {indicator['function']} soft limit: {data['Note']}")
-                        await asyncio.sleep(30)
-                        return None
-                    
-                    if 'Information' in data:
-                        self.logger.warning(f"AV {indicator['function']} info: {data['Information']}")
-                        await asyncio.sleep(60)
-                        return None
-                    
-                    # Process and store the indicator data
-                    if indicator['key'] in data:
-                        await self._store_technical_data(symbol, indicator['function'], data, indicator)
-                        return data
-                    else:
-                        self.logger.warning(f"AV {indicator['function']} missing '{indicator['key']}' for {symbol}")
-                        return None
+            await self.rate_limiter.acquire()
+            
+            async with session.get(self.base_url, params=indicator['params']) as response:
+                response.raise_for_status()
+                data = await response.json()
+                
+                # Check for API errors
+                if 'Error Message' in data:
+                    self.logger.error(f"AV {indicator['function']} error for {symbol}: {data['Error Message']}")
+                    return None
+                
+                # Check for rate limits
+                if 'Note' in data:
+                    self.logger.warning(f"AV {indicator['function']} soft limit: {data['Note']}")
+                    await asyncio.sleep(30)
+                    return None
+                
+                if 'Information' in data:
+                    self.logger.warning(f"AV {indicator['function']} info: {data['Information']}")
+                    await asyncio.sleep(60)
+                    return None
+                
+                # Process and store the indicator data
+                if indicator['key'] in data:
+                    await self._store_technical_data(symbol, indicator['function'], data, indicator)
+                    return data
+                else:
+                    self.logger.warning(f"AV {indicator['function']} missing '{indicator['key']}' for {symbol}")
+                    return None
                         
         except Exception as e:
             self.logger.error(f"Error fetching {indicator['function']} for {symbol}: {e}")
@@ -1501,14 +1585,14 @@ class AlphaVantageIngestion:
             async with self.redis.pipeline(transaction=False) as pipe:
                 if calls:
                     await pipe.setex(
-                        f'options:{symbol}:calls',
+                        Keys.options_calls(symbol),
                         self.ttls['options_chain'],
                         json.dumps(calls)
                     )
                 
                 if puts:
                     await pipe.setex(
-                        f'options:{symbol}:puts',
+                        Keys.options_puts(symbol),
                         self.ttls['options_chain'],
                         json.dumps(puts)
                     )
@@ -1529,7 +1613,8 @@ class AlphaVantageIngestion:
                     # AV uses 'contractID' not 'contract_id'
                     contract_id = contract.get('contractID')
                     if contract_id and any(greeks.values()):
-                        key = f"options:{symbol}:{contract_id}:greeks"
+                        # Store individual contract greeks (legacy format)
+                        key = f"options:{symbol}:{contract_id}:greeks"  # TODO: Migrate to normalized greeks hash
                         await pipe.setex(
                             key,
                             self.ttls['greeks'],
@@ -1756,7 +1841,7 @@ class AlphaVantageIngestion:
                 }
                 
                 ttl = self.ttls.get('heartbeat', 15)
-                await self.redis.setex('hb:av', ttl, json.dumps(heartbeat))
+                await self.redis.setex(Keys.heartbeat('alpha_vantage'), ttl, json.dumps(heartbeat))
                 
                 await asyncio.sleep(10)
                 

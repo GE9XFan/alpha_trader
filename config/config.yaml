@@ -61,19 +61,19 @@ modules:
     enabled: true
     data_freshness_threshold: 5
     
-    # Single TTL source
+    # Single TTL source (balanced for analytics requirements)
     store_ttls:
       market_data: 60      # Keep quotes for 1 minute
       order_book: 60       # Keep order books for 1 minute  
       bars: 3600           # Keep bars for 1 hour (need 100+ for analytics)
       trades: 3600         # Keep trades for 1 hour (need 1000+ for VPIN)
       options_chain: 60    # Keep options for 1 minute
-      greeks: 60          # Keep greeks for 1 minute
-      sentiment: 300      # Keep sentiment for 5 minutes
-      technicals: 300     # Keep technicals for 5 minutes
-      metrics: 60         # Keep metrics for 1 minute
-      monitoring: 60
-      heartbeat: 15
+      greeks: 60           # Keep greeks for 1 minute
+      sentiment: 300       # Keep sentiment for 5 minutes
+      technicals: 300      # Keep technicals for 5 minutes
+      metrics: 60          # Keep metrics for 1 minute
+      monitoring: 60       # Keep monitoring for 1 minute
+      heartbeat: 15        # Keep heartbeat for 15 seconds
   
   analytics:
     enabled: true
@@ -86,7 +86,7 @@ modules:
     publish_channel: "signals:out"
 
     # Guardrails (apply before any strategy logic)
-    max_staleness_s: 5        # upstream inputs must be this fresh
+    max_staleness_s: 60        # upstream inputs must be this fresh
     min_confidence: 0.60      # global floor; per-strategy may override
     min_refresh_s: 2          # min spacing between recalcs per symbol
     cooldown_s: 30            # block re-emitting same side within window
@@ -106,7 +106,7 @@ modules:
       0dte:
         enabled: true
         symbols: ["SPY","QQQ","IWM"]
-        time_window: { start: "09:45", end: "15:00" }
+        time_window: { start: "09:45", end: "23:59" }  # Extended for testing
         confidence_weights:
           vpin: 30
           obi: 25
@@ -121,7 +121,7 @@ modules:
       1dte:
         enabled: true
         symbols: ["SPY","QQQ","IWM","VXX"]
-        time_window: { start: "14:00", end: "15:30" }
+        time_window: { start: "14:00", end: "23:59" }  # Extended for testing
         confidence_weights:
           volatility_regime: 20
           obi: 30
@@ -133,7 +133,7 @@ modules:
       14dte:
         enabled: true
         symbols: ["AAPL","TSLA","NVDA","AMD","GOOGL","META","AMZN","MSFT","PLTR"]
-        time_window: { start: "09:30", end: "16:00" }
+        time_window: { start: "09:30", end: "23:59" }  # Extended for testing
         confidence_weights:
           unusual_options: 40
           sweep: 30
@@ -145,7 +145,7 @@ modules:
       moc:
         enabled: true
         symbols: ["SPY","QQQ"]
-        time_window: { start: "15:30", end: "15:50" }     # signal formation window
+        time_window: { start: "15:30", end: "23:59" }     # Extended for testing
         # Confidence components (sum to 100 possible)
         confidence_weights:
           imbalance_strength: 45     # size & ratio

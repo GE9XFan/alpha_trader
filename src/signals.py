@@ -117,6 +117,28 @@ class SignalGenerator:
                             # Check if signal meets threshold
                             min_conf = strategy_config.get('thresholds', {}).get('min_confidence', self.min_confidence * 100)
                             if side == "FLAT" or confidence < min_conf:
+                                # Debug: log why signal was rejected
+                                await self.redis.setex(
+                                    f'signals:debug:{symbol}:{strategy_name}', 
+                                    60, 
+                                    json.dumps({
+                                        'rejected': True,
+                                        'confidence': confidence,
+                                        'min_conf': min_conf,
+                                        'side': side,
+                                        'reasons': reasons,
+                                        'features': {
+                                            'vpin': features.get('vpin', 0),
+                                            'obi': features.get('obi', 0),
+                                            'price': features.get('price', 0),
+                                            'age_s': features.get('age_s', 999),
+                                            'gamma_pin_proximity': features.get('gamma_pin_proximity', 0),
+                                            'gex_strikes': len(features.get('gex_by_strike', [])),
+                                            'gex_total': features.get('gex', 0)
+                                        },
+                                        'timestamp': time.time()
+                                    })
+                                )
                                 continue
                             
                             # Check cooldown
@@ -238,7 +260,19 @@ class SignalGenerator:
                 results = await pipe.execute()
             
             # Parse basic metrics
-            features['vpin'] = float(results[0] or 0)
+            # VPIN might be JSON or float
+            if results[0]:
+                try:
+                    # Try parsing as JSON first
+                    if isinstance(results[0], str) and results[0].startswith('{'):
+                        vpin_data = json.loads(results[0])
+                        features['vpin'] = vpin_data.get('value', 0)
+                    else:
+                        features['vpin'] = float(results[0])
+                except (json.JSONDecodeError, ValueError):
+                    features['vpin'] = 0
+            else:
+                features['vpin'] = 0
             
             # OBI might be JSON or float
             if results[1]:
@@ -254,8 +288,43 @@ class SignalGenerator:
             else:
                 features['obi'] = 0
             
-            features['gex'] = float(results[2] or 0)
-            features['dex'] = float(results[3] or 0)
+            # GEX might be JSON or float
+            if results[2]:
+                try:
+                    # Try parsing as JSON first
+                    if isinstance(results[2], str) and results[2].startswith('{'):
+                        gex_data = json.loads(results[2])
+                        features['gex'] = gex_data.get('total_gex', 0)
+                        # Extract gex_by_strike from the GEX data
+                        gex_strikes = gex_data.get('gex_by_strike', {})
+                        # Convert to list format expected by strategies
+                        features['gex_by_strike'] = [
+                            {'strike': float(k), 'gex': v} 
+                            for k, v in gex_strikes.items()
+                        ]
+                    else:
+                        features['gex'] = float(results[2])
+                        features['gex_by_strike'] = []
+                except (json.JSONDecodeError, ValueError):
+                    features['gex'] = 0
+                    features['gex_by_strike'] = []
+            else:
+                features['gex'] = 0
+                features['gex_by_strike'] = []
+            
+            # DEX might be JSON or float
+            if results[3]:
+                try:
+                    # Try parsing as JSON first
+                    if isinstance(results[3], str) and results[3].startswith('{'):
+                        dex_data = json.loads(results[3])
+                        features['dex'] = dex_data.get('total_dex', 0)
+                    else:
+                        features['dex'] = float(results[3])
+                except (json.JSONDecodeError, ValueError):
+                    features['dex'] = 0
+            else:
+                features['dex'] = 0
             features['gex_z'] = float(results[4] or 0)
             features['dex_z'] = float(results[5] or 0)
             features['toxicity'] = float(results[6] or 0)
@@ -306,14 +375,8 @@ class SignalGenerator:
             else:
                 features['hidden_orders'] = 0
             
-            # Parse GEX strike data
-            if results[13]:
-                try:
-                    features['gex_by_strike'] = json.loads(results[13])
-                except (json.JSONDecodeError, TypeError):
-                    features['gex_by_strike'] = []
-            else:
-                features['gex_by_strike'] = []
+            # Parse GEX strike data (already extracted from GEX JSON above)
+            # results[13] was for the non-existent gex:by_strike key, now handled above
             
             # Parse imbalance data for MOC
             if results[14]:
@@ -369,6 +432,10 @@ class SignalGenerator:
             features['gamma_pin_proximity'] = self.calculate_gamma_pin_proximity(features)
             features['gamma_pull_dir'] = self.calculate_gamma_pull_direction(features)
             
+            # Debug log GEX data
+            if symbol == 'SPY' and features.get('gex_by_strike'):
+                self.logger.debug(f"SPY GEX strikes: {len(features['gex_by_strike'])} strikes, gamma_proximity={features['gamma_pin_proximity']:.3f}")
+            
         except Exception as e:
             self.logger.error(f"Error reading features for {symbol}: {e}")
             features['age_s'] = 999  # Mark as stale on error
@@ -404,7 +471,7 @@ class SignalGenerator:
         
         # 1. VPIN pressure analysis (30 points max)
         vpin = features.get('vpin', 0)
-        vpin_min = thresholds.get('vpin_min', 0.40)
+        vpin_min = float(thresholds.get('vpin_min', 0.40))
         if vpin >= vpin_min:
             # Scale points based on VPIN intensity
             intensity = min((vpin - vpin_min) / (0.8 - vpin_min), 1.0)  # 0.4->0.8 maps to 0->1
@@ -417,7 +484,7 @@ class SignalGenerator:
         
         # 2. Order Book Imbalance with depth analysis (25 points max)
         obi = features.get('obi', 0.5)
-        obi_min = thresholds.get('obi_min', 0.30)
+        obi_min = float(thresholds.get('obi_min', 0.30))
         obi_deviation = abs(obi - 0.5)  # Distance from neutral
         if obi_deviation >= obi_min:
             # Scale based on imbalance strength
@@ -434,7 +501,7 @@ class SignalGenerator:
         gamma_proximity = features.get('gamma_pin_proximity', 0)
         gex_by_strike = features.get('gex_by_strike', [])
         price = features.get('price', 0)
-        gamma_pin_distance = thresholds.get('gamma_pin_distance', 0.005)
+        gamma_pin_distance = float(thresholds.get('gamma_pin_distance', 0.005))
         
         if gamma_proximity > 0 and gex_by_strike and price > 0:
             # Find nearest major gamma strike
@@ -451,7 +518,7 @@ class SignalGenerator:
                 squeeze_detected = gamma_concentration > 0.7 and abs(price - pin_strike) / price < 0.003
                 
                 if squeeze_detected:
-                    points = weights.get('gamma_proximity', 30)
+                    points = int(float(weights.get('gamma_proximity', 30)))
                     confidence += points
                     reasons.append(f"Gamma squeeze at {pin_strike:.0f}")
                 elif gamma_proximity > 0.5:
@@ -478,7 +545,7 @@ class SignalGenerator:
                 
                 if avg_move > 0 and current_move > 2 * avg_move:
                     # Large aggressive sweep
-                    points = weights.get('sweep', 15)
+                    points = int(float(weights.get('sweep', 15)))
                     reasons.append("Aggressive sweep detected")
                 else:
                     # Normal sweep
@@ -600,7 +667,7 @@ class SignalGenerator:
         regime = features.get('regime', 'NORMAL')
         if regime == 'HIGH':
             # High volatility favors overnight moves
-            points = weights.get('volatility_regime', 20)
+            points = int(float(weights.get('volatility_regime', 20)))
             confidence += points
             reasons.append("HIGH vol regime (gap likely)")
             
@@ -866,7 +933,7 @@ class SignalGenerator:
                     
                     if volume_spike > 3:
                         # Aggressive institutional sweep
-                        points = weights.get('sweep', 30)
+                        points = int(float(weights.get('sweep', 30)))
                         institutional_signals += 2
                         reasons.append(f"Aggressive sweep ({volume_spike:.1f}x vol)")
                     elif volume_spike > 2:
@@ -895,7 +962,7 @@ class SignalGenerator:
             
             if hidden > 0.75:
                 # Strong hidden order presence
-                points = weights.get('hidden_orders', 20)
+                points = int(float(weights.get('hidden_orders', 20)))
                 institutional_signals += 2
                 reasons.append(f"Strong hidden orders ({hidden:.2f})")
             elif hidden > 0.65:
@@ -920,7 +987,7 @@ class SignalGenerator:
             
             if abs(dex) > 10e9:  # >$10B delta
                 # Massive positioning
-                points = weights.get('dex', 10)
+                points = int(float(weights.get('dex', 10)))
                 institutional_signals += 1
                 if dex > 0:
                     reasons.append(f"Massive call delta (${dex/1e9:.1f}B)")
@@ -1098,8 +1165,9 @@ class SignalGenerator:
         indicative_price = features.get('indicative_price', 0)
         near_close_offset_bps = features.get('near_close_offset_bps', 0)
         
-        min_notional = thresholds.get('min_imbalance_notional', 2e9)
-        min_ratio = thresholds.get('min_imbalance_ratio', 0.60)
+        # Convert to float to handle string values from config
+        min_notional = float(thresholds.get('min_imbalance_notional', 2e9))
+        min_ratio = float(thresholds.get('min_imbalance_ratio', 0.60))
         
         # Hard gate: insufficient imbalance
         if imbalance_total < min_notional or imbalance_ratio < min_ratio:
@@ -1150,7 +1218,7 @@ class SignalGenerator:
                 if pin_distance_pct <= 0.005:  # Within 0.5%
                     # Strong gamma magnet effect
                     if gamma_concentration > 0.5:  # >50% of gamma within 1% of pin
-                        gamma_points = weights.get('gamma_pull', 25)
+                        gamma_points = int(float(weights.get('gamma_pull', 25)))
                         reasons.append(f"Strong gamma magnet at {pin_strike:.0f}")
                         
                         # Check if we're fighting or following gamma
@@ -1211,7 +1279,7 @@ class SignalGenerator:
         weekday = current_time.weekday()
         if weekday == 4:  # Friday
             # Friday: index rebalancing, weekly options expiry
-            friday_points = weights.get('friday_factor', 10)
+            friday_points = int(float(weights.get('friday_factor', 10)))
             confidence += friday_points
             reasons.append("Friday dynamics")
             
@@ -1442,8 +1510,8 @@ class SignalGenerator:
                         delta_diff = abs(opt_delta - target_delta)
                         
                         # Check liquidity requirements
-                        if opt.get('open_interest', 0) >= thresholds.get('min_option_oi', 2000) and \
-                           opt.get('spread_bps', 100) <= thresholds.get('max_spread_bps', 8):
+                        if opt.get('open_interest', 0) >= float(thresholds.get('min_option_oi', 2000)) and \
+                           opt.get('spread_bps', 100) <= float(thresholds.get('max_spread_bps', 8)):
                             if delta_diff < min_delta_diff:
                                 min_delta_diff = delta_diff
                                 selected_strike = opt.get('strike')
@@ -1557,21 +1625,21 @@ class SignalGenerator:
     
     def find_gamma_pin(self, features: Dict[str, Any]) -> float:
         """
-        Find the gamma pin strike.
+        Find the gamma pin strike (strike with maximum absolute GEX).
         """
         gex_by_strike = features.get('gex_by_strike', [])
         if not gex_by_strike:
             return 0
         
-        # Find strike with minimum absolute GEX
-        min_gex = float('inf')
+        # Find strike with MAXIMUM absolute GEX (the pin)
+        max_gex = 0
         pin_strike = 0
         
         for strike_data in gex_by_strike:
             strike = strike_data.get('strike', 0)
-            gex = abs(strike_data.get('gex', float('inf')))
-            if gex < min_gex:
-                min_gex = gex
+            gex = abs(strike_data.get('gex', 0))
+            if gex > max_gex:
+                max_gex = gex
                 pin_strike = strike
         
         return pin_strike

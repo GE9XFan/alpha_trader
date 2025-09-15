@@ -343,7 +343,7 @@ class AlphaTrader:
             self.logger.error(f"Error during shutdown: {e}")
     
     def setup_signal_handlers(self):
-        """Set up signal handlers for graceful shutdown."""
+        """Set up signal handlers for graceful shutdown using asyncio."""
         def handle_signal(sig_name):
             self.logger.info(f"Received {sig_name} signal")
             # Set a flag to trigger shutdown
@@ -352,11 +352,26 @@ class AlphaTrader:
                 # Create shutdown task
                 asyncio.create_task(self.shutdown())
         
-        # Register signal handlers
-        signal.signal(signal.SIGINT, lambda s, f: handle_signal('SIGINT'))
-        signal.signal(signal.SIGTERM, lambda s, f: handle_signal('SIGTERM'))
-        
-        self.logger.info("Signal handlers configured (SIGINT, SIGTERM)")
+        # Use asyncio's signal handler for better integration
+        # This avoids potential issues on some platforms
+        try:
+            loop = asyncio.get_running_loop()
+            
+            # Add signal handlers to the event loop
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(
+                    sig,
+                    lambda s=sig: handle_signal(s.name)
+                )
+            
+            self.logger.info("Asyncio signal handlers configured (SIGINT, SIGTERM)")
+            
+        except NotImplementedError:
+            # Fallback for Windows which doesn't support add_signal_handler
+            self.logger.warning("Platform doesn't support asyncio signal handlers, using standard signal module")
+            signal.signal(signal.SIGINT, lambda s, f: handle_signal('SIGINT'))
+            signal.signal(signal.SIGTERM, lambda s, f: handle_signal('SIGTERM'))
+            self.logger.info("Standard signal handlers configured (SIGINT, SIGTERM)")
     
     async def _delayed_parameter_discovery(self, delay_seconds: int):
         """Run parameter discovery after a delay to allow data collection."""

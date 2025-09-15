@@ -62,6 +62,25 @@ async def verify_signals():
                 print(f"    Strategy: {signal.get('strategy')}")
                 print(f"    Side: {signal.get('side')}")
                 print(f"    Confidence: {signal.get('confidence')}%")
+                
+                # Display option contract details
+                contract = signal.get('contract', {})
+                if contract:
+                    # Construct option symbol (e.g., "QQQ 0DTE 587C" or "SPY 1DTE 590P")
+                    option_type = 'CALL' if contract.get('right') == 'C' else 'PUT' if contract.get('right') == 'P' else 'N/A'
+                    option_symbol = f"{symbol} {contract.get('expiry', 'N/A')} {contract.get('strike', 'N/A')}{contract.get('right', '')}"
+                    print(f"    >>> OPTION CONTRACT: {option_symbol} <<<")
+                    print(f"    Contract Type: {contract.get('type', 'N/A')}")
+                    print(f"    Option Type: {option_type}")
+                    print(f"    Strike: ${contract.get('strike', 'N/A')}")
+                    print(f"    Expiry: {contract.get('expiry', 'N/A')}")
+                    if contract.get('liquidity'):
+                        liq = contract.get('liquidity')
+                        print(f"    Open Interest: {liq.get('oi', 0):,}")
+                        print(f"    Spread (bps): {liq.get('spread_bps', 0)}")
+                    if contract.get('target_delta'):
+                        print(f"    Target Delta: {contract.get('target_delta')}")
+                
                 print(f"    Entry: ${signal.get('entry')}")
                 print(f"    Stop: ${signal.get('stop')}")
                 print(f"    Targets: {signal.get('targets')}")
@@ -89,10 +108,24 @@ async def verify_signals():
             vpin = await redis.get(f'metrics:{symbol}:vpin')
             obi = await redis.get(f'metrics:{symbol}:obi')
             gex = await redis.get(f'metrics:{symbol}:gex')
+            dex = await redis.get(f'metrics:{symbol}:dex')
             
             print(f"\n  {symbol}:")
             if vpin:
-                print(f"    VPIN: {float(vpin):.3f}")
+                try:
+                    # VPIN might be stored as JSON
+                    if vpin.startswith('{'):
+                        vpin_data = json.loads(vpin)
+                        vpin_val = vpin_data.get('value', 0)
+                        print(f"    VPIN: {vpin_val:.3f}")
+                        # Show additional info if available
+                        trades = vpin_data.get('trades_analyzed', 0)
+                        if trades:
+                            print(f"    VPIN Trades: {trades}")
+                    else:
+                        print(f"    VPIN: {float(vpin):.3f}")
+                except (json.JSONDecodeError, ValueError, AttributeError):
+                    print(f"    VPIN: {float(vpin):.3f}")
             if obi:
                 # OBI might be JSON or float
                 try:
@@ -107,7 +140,32 @@ async def verify_signals():
                 except (json.JSONDecodeError, ValueError, AttributeError):
                     print(f"    OBI: {float(obi):.3f}")
             if gex:
-                print(f"    GEX: ${float(gex)/1e9:.2f}B")
+                try:
+                    # GEX might be stored as JSON
+                    if gex.startswith('{'):
+                        gex_data = json.loads(gex)
+                        gex_val = gex_data.get('total_gex', 0)
+                        print(f"    GEX: ${gex_val/1e9:.2f}B")
+                        # Also show regime if available
+                        regime = gex_data.get('regime', '')
+                        if regime:
+                            print(f"    GEX Regime: {regime}")
+                    else:
+                        print(f"    GEX: ${float(gex)/1e9:.2f}B")
+                except (json.JSONDecodeError, ValueError, AttributeError):
+                    print(f"    GEX: ${float(gex)/1e9:.2f}B")
+            
+            if dex:
+                try:
+                    # DEX might be stored as JSON
+                    if dex.startswith('{'):
+                        dex_data = json.loads(dex)
+                        dex_val = dex_data.get('total_dex', 0)
+                        print(f"    DEX: ${dex_val/1e9:.2f}B")
+                    else:
+                        print(f"    DEX: ${float(dex)/1e9:.2f}B")
+                except (json.JSONDecodeError, ValueError, AttributeError):
+                    print(f"    DEX: ${float(dex)/1e9:.2f}B")
             
             # Check sweep detection
             sweep = await redis.get(f'options:{symbol}:sweep')
