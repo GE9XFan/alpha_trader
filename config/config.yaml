@@ -121,7 +121,7 @@ modules:
 
     # Guardrails (apply before any strategy logic)
     max_staleness_s: 60        # upstream inputs must be this fresh
-    min_confidence: 0.60      # global floor; per-strategy may override
+    min_confidence: 0.90      # global floor; per-strategy may override
     min_refresh_s: 5          # min spacing between recalcs per symbol (increased from 2 to reduce churn)
     cooldown_s: 30            # block re-emitting same contract within window (now contract-scoped)
     ttl_seconds: 300          # TTL for emitted keys
@@ -147,7 +147,7 @@ modules:
           gamma_proximity: 30
           sweep: 15
         thresholds:
-          min_confidence: 60
+          min_confidence: 90
           vpin_min: 0.40
           obi_min: 0.30
           gamma_pin_distance: 0.005   # 0.5%
@@ -162,7 +162,7 @@ modules:
           gex: 25
           vpin: 25
         thresholds:
-          min_confidence: 65
+          min_confidence: 90
 
       14dte:
         enabled: true
@@ -174,7 +174,7 @@ modules:
           hidden_orders: 20
           dex: 10
         thresholds:
-          min_confidence: 70
+          min_confidence: 90
 
       moc:
         enabled: true
@@ -187,7 +187,7 @@ modules:
           obi: 20                    # intraday book skew
           friday_factor: 10          # optional uplift (weekly flows)
         thresholds:
-          min_confidence: 60
+          min_confidence: 90
           min_imbalance_notional: 2.0e9      # $2B combined or symbol-appropriate
           min_imbalance_ratio: 0.60          # |Imbalance| / (Paired + |Imbalance|)
           max_spread_bps: 8                  # option NBBO spread ≤ 8 bps of spot
@@ -239,8 +239,8 @@ risk_management:
   var_lookback_days: 30             # Days of history for VaR
   
   # Position limits
-  max_positions: 5                  # Max concurrent positions
-  max_per_symbol: 2                 # Max positions per symbol
+  max_positions: 10                 # Max concurrent positions (updated from 5)
+  max_per_symbol: 5                 # Max positions per symbol (updated from 2)
 
 # Legacy risk configuration (kept for backward compatibility)
 risk:

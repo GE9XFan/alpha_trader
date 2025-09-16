@@ -84,11 +84,12 @@ class ExecutionManager:
         self.port = self.ibkr_config.get('port', 7497)  # Paper trading port
         self.client_id = self.ibkr_config.get('client_id', 1) + 100  # Different client ID for execution
 
-        # Position limits from config
-        self.max_positions = config.get('trading', {}).get('max_positions', 5)
-        self.max_per_symbol = config.get('trading', {}).get('max_per_symbol', 2)
-        self.max_0dte_contracts = config.get('trading', {}).get('max_0dte_contracts', 50)
-        self.max_other_contracts = config.get('trading', {}).get('max_other_contracts', 100)
+        # Position limits from config (read from risk_management section)
+        risk_config = config.get('risk_management', {})
+        self.max_positions = risk_config.get('max_positions', 10)
+        self.max_per_symbol = risk_config.get('max_per_symbol', 5)
+        self.max_0dte_contracts = risk_config.get('max_0dte_contracts', 50)
+        self.max_other_contracts = risk_config.get('max_other_contracts', 100)
 
         # Order management
         self.pending_orders: Dict[int, Dict[str, Any]] = {}  # order_id -> order details
@@ -375,8 +376,9 @@ class ExecutionManager:
 
             self.logger.info(f"Executing signal: {symbol} {side} {strategy} (confidence={confidence}%)")
 
-            # Create IB contract
+            # Create IB contract (add symbol to contract info)
             contract_info = signal.get('contract', {})
+            contract_info['symbol'] = symbol  # Add symbol to contract dict
             ib_contract = await self.create_ib_contract(contract_info)
             if not ib_contract:
                 self.logger.error(f"Failed to create contract for {symbol}")
@@ -919,8 +921,9 @@ class ExecutionManager:
         Place stop loss order for new position.
         """
         try:
-            # Create IB contract
+            # Create IB contract (add symbol to contract info)
             contract_info = position.get('contract', {})
+            contract_info['symbol'] = position.get('symbol')  # Add symbol to contract dict
             ib_contract = await self.create_ib_contract(contract_info)
             if not ib_contract:
                 self.logger.error(f"Failed to create contract for stop loss")
