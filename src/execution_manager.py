@@ -44,7 +44,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 import redis.asyncio as aioredis
 from ib_insync import IB, Stock, Option, MarketOrder, LimitOrder, StopOrder
 
-from option_utils import normalize_expiry
+from src.option_utils import normalize_expiry
 
 
 class RiskManager:
@@ -104,6 +104,305 @@ class ExecutionManager:
 
         self.logger = logging.getLogger(__name__)
 
+    @staticmethod
+    def _normalize_strategy(strategy: Optional[str]) -> str:
+        """Return a normalized uppercase strategy code for consistent checks."""
+        if strategy is None:
+            return ''
+        return str(strategy).strip().upper()
+
+    # ------------------------------------------------------------------
+    # Internal helpers for position reconciliation
+    # ------------------------------------------------------------------
+    def _canonical_contract_key(
+        self,
+        symbol: Optional[str],
+        contract: Any,
+        side: Optional[str] = None,
+    ) -> tuple:
+        """Return a normalized key so we can match IB and Redis positions."""
+
+        contract_type: Optional[str]
+        expiry: Optional[str]
+        strike: Optional[float]
+        right: Optional[str]
+
+        if isinstance(contract, dict):
+            contract_type = contract.get('type') or contract.get('secType')
+            expiry = contract.get('expiry') or contract.get('lastTradeDateOrContractMonth')
+            strike = contract.get('strike')
+            right = contract.get('right')
+        else:
+            contract_type = getattr(contract, 'secType', None)
+            expiry = getattr(contract, 'lastTradeDateOrContractMonth', None)
+            strike = getattr(contract, 'strike', None)
+            right = getattr(contract, 'right', None)
+
+        normalized_symbol = (symbol or '').upper()
+        normalized_type = (str(contract_type).lower() if contract_type else '')
+        normalized_expiry = str(expiry) if expiry else ''
+        normalized_right = str(right).upper() if right else ''
+
+        normalized_strike: Optional[float]
+        try:
+            normalized_strike = float(strike) if strike not in (None, '') else None
+        except (TypeError, ValueError):
+            normalized_strike = None
+
+        normalized_side = (side or '').upper()
+
+        return (
+            normalized_symbol,
+            normalized_type,
+            normalized_expiry,
+            normalized_strike,
+            normalized_right,
+            normalized_side,
+        )
+
+    def _contract_payload_from_ib(self, contract: Any) -> Dict[str, Any]:
+        """Convert an IB contract object to the Redis-friendly payload."""
+
+        payload = {
+            'symbol': getattr(contract, 'symbol', None),
+            'secType': getattr(contract, 'secType', None),
+            'exchange': getattr(contract, 'exchange', None),
+            'currency': getattr(contract, 'currency', None),
+        }
+
+        sec_type = getattr(contract, 'secType', None)
+        if sec_type == 'OPT':
+            payload.update(
+                {
+                    'type': 'option',
+                    'expiry': getattr(contract, 'lastTradeDateOrContractMonth', None),
+                    'strike': getattr(contract, 'strike', None),
+                    'right': getattr(contract, 'right', None),
+                }
+            )
+        else:
+            payload['type'] = str(sec_type or 'STK').lower()
+
+        return payload
+
+    def _normalize_avg_cost(self, contract: Any, avg_cost: float) -> float:
+        """Normalize IB average cost (options are reported in cents)."""
+
+        sec_type = getattr(contract, 'secType', None)
+        if sec_type == 'OPT':
+            return avg_cost / 100.0
+        return avg_cost
+
+    def _create_position_snapshot_from_ib(
+        self,
+        position_id: str,
+        contract: Any,
+        size: float,
+        avg_cost: float,
+        account: str,
+        existing: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Build or update a Redis position snapshot from live IB data."""
+
+        symbol = getattr(contract, 'symbol', None)
+        side = 'LONG' if size >= 0 else 'SHORT'
+        entry_price = self._normalize_avg_cost(contract, avg_cost)
+
+        if existing is not None:
+            snapshot = existing
+        else:
+            snapshot = {
+                'id': position_id,
+                'symbol': symbol,
+                'commission': 0.0,
+                'stop_loss': None,
+                'targets': [],
+                'current_price': entry_price,
+                'unrealized_pnl': 0.0,
+                'realized_pnl': 0.0,
+                'status': 'OPEN',
+                'strategy': 'SYNCED',
+            }
+
+        snapshot['id'] = position_id
+        snapshot['symbol'] = symbol
+        snapshot['contract'] = self._contract_payload_from_ib(contract)
+        snapshot['side'] = side
+        snapshot['quantity'] = abs(size)
+        snapshot['entry_price'] = entry_price
+        snapshot.setdefault('entry_time', datetime.utcnow().isoformat())
+        snapshot.setdefault('current_price', entry_price)
+        snapshot.setdefault('unrealized_pnl', 0.0)
+        snapshot.setdefault('realized_pnl', 0.0)
+        snapshot['reconciled'] = True
+        snapshot['ib_account'] = account
+        snapshot['ib_con_id'] = getattr(contract, 'conId', None)
+
+        return snapshot
+
+    def _merge_position_metadata(
+        self,
+        source: Dict[str, Any],
+        destination: Dict[str, Any],
+    ) -> None:
+        """Preserve stop/target metadata when consolidating duplicate entries."""
+
+        fields_to_merge = [
+            'stop_order_id',
+            'target_order_ids',
+            'oca_group',
+            'targets',
+            'stop_loss',
+            'strategy',
+            'order_id',
+            'signal_id',
+            'commission',
+            'entry_time',
+            'current_price',
+            'unrealized_pnl',
+            'realized_pnl',
+            'status',
+        ]
+
+        for field in fields_to_merge:
+            if field not in source:
+                continue
+
+            if field == 'target_order_ids':
+                existing = destination.get('target_order_ids') or []
+                merged = existing + [oid for oid in source.get('target_order_ids') or [] if oid not in existing]
+                if merged:
+                    destination['target_order_ids'] = merged
+                continue
+
+            if field == 'targets':
+                existing_targets = destination.get('targets') or []
+                if not existing_targets and source.get('targets'):
+                    destination['targets'] = source['targets']
+                continue
+
+            if destination.get(field) in (None, '', [], {}):
+                destination[field] = source[field]
+
+    async def _remove_duplicate_position(self, symbol: str, position_id: str) -> None:
+        """Delete a duplicate Redis position record and clean indexes."""
+
+        await self.redis.delete(f'positions:open:{symbol}:{position_id}')
+        await self.redis.srem(f'positions:by_symbol:{symbol}', position_id)
+        self.stop_orders.pop(position_id, None)
+        self.target_orders.pop(position_id, None)
+
+    # ------------------------------------------------------------------
+    # Position lifecycle helpers
+    # ------------------------------------------------------------------
+    def _position_multiplier(self, position: Dict[str, Any]) -> int:
+        contract_type = position.get('contract', {}).get('type', '').lower()
+        return 100 if contract_type == 'option' else 1
+
+    def _weighted_entry_price(
+        self,
+        current_qty: float,
+        current_price: float,
+        fill_qty: float,
+        fill_price: float,
+    ) -> float:
+        try:
+            total_qty = current_qty + fill_qty
+            if total_qty <= 0:
+                return fill_price
+            weighted = ((current_qty * current_price) + (fill_qty * fill_price)) / total_qty
+            return round(weighted, 6)
+        except Exception:
+            return fill_price
+
+    async def _cancel_bracket_orders(self, position: Dict[str, Any]) -> None:
+        position_id = position.get('id')
+        stop_trade = self.stop_orders.pop(position_id, None)
+        if stop_trade and not stop_trade.isDone():
+            try:
+                self.ib.cancelOrder(stop_trade.order)
+            except Exception as exc:
+                self.logger.warning(f"Failed to cancel stop for {position_id}: {exc}")
+
+        for trade in self.target_orders.pop(position_id, []):
+            try:
+                if trade and not trade.isDone():
+                    self.ib.cancelOrder(trade.order)
+            except Exception as exc:
+                self.logger.warning(f"Failed to cancel target for {position_id}: {exc}")
+
+        position['stop_order_id'] = None
+        position['target_order_ids'] = []
+        position['oca_group'] = None
+
+    async def _finalize_position_close(
+        self,
+        position: Dict[str, Any],
+        exit_price: float,
+        realized_pnl_delta: float,
+        reason: str,
+    ) -> None:
+        symbol = position.get('symbol')
+        position_id = position.get('id')
+
+        if not symbol or not position_id:
+            return
+
+        await self._cancel_bracket_orders(position)
+
+        position['quantity'] = 0
+        position['status'] = 'CLOSED'
+        position['exit_price'] = exit_price
+        position['exit_time'] = datetime.utcnow().isoformat()
+        position['close_reason'] = reason
+        position['realized_pnl'] = position.get('realized_pnl', 0.0) + realized_pnl_delta
+
+        redis_key = f'positions:open:{symbol}:{position_id}'
+        await self.redis.delete(redis_key)
+        await self.redis.srem(f'positions:by_symbol:{symbol}', position_id)
+
+        closed_key = f'positions:closed:{datetime.utcnow().strftime("%Y%m%d")}:{position_id}'
+        await self.redis.setex(closed_key, 604800, json.dumps(position))
+
+        await self.redis.incr('positions:closed:total')
+        await self.redis.incrbyfloat('positions:pnl:realized:total', position['realized_pnl'])
+        await self.redis.incrbyfloat('risk:daily_pnl', realized_pnl_delta)
+
+        self.logger.info(
+            f"Position {position_id[:8]} closed ({reason}): {symbol} @ ${exit_price:.2f}, "
+            f"realized Δ ${realized_pnl_delta:+.2f}"
+        )
+
+
+    async def _archive_position(self, position: Dict[str, Any], reason: str) -> None:
+        """Move a stale Redis position to the closed bucket."""
+
+        symbol = position.get('symbol')
+        position_id = position.get('id')
+        if not symbol or not position_id:
+            return
+
+        now_iso = datetime.utcnow().isoformat()
+        position['status'] = 'CLOSED'
+        position['exit_reason'] = reason
+        position.setdefault('close_reason', reason)
+        position.setdefault('exit_time', now_iso)
+        position.setdefault('exit_price', position.get('current_price'))
+
+        redis_key = f'positions:open:{symbol}:{position_id}'
+        await self.redis.delete(redis_key)
+        await self.redis.srem(f'positions:by_symbol:{symbol}', position_id)
+
+        closed_key = f'positions:closed:{datetime.utcnow().strftime("%Y%m%d")}:{position_id}'
+        await self.redis.setex(closed_key, 604800, json.dumps(position))
+
+        self.stop_orders.pop(position_id, None)
+        self.target_orders.pop(position_id, None)
+
+        self.logger.info(
+            f"Position sync: Archived {symbol} position {position_id[:8]} ({reason})"
+        )
+
     async def start(self):
         """
         Main execution loop for processing signals.
@@ -121,6 +420,9 @@ class ExecutionManager:
         self.ib.orderStatusEvent += self.on_order_status
         self.ib.execDetailsEvent += self.on_fill  # execDetailsEvent for fills in ib_insync
         self.ib.errorEvent += self.on_error
+
+        # Start position sync task (runs every 30 seconds)
+        asyncio.create_task(self.position_sync_loop())
 
         while True:
             try:
@@ -188,6 +490,170 @@ class ExecutionManager:
         await self.redis.set('execution:connection:status', 'failed')
         return False
 
+    async def position_sync_loop(self):
+        """
+        Background task that syncs positions with IBKR every 30 seconds.
+        """
+        while True:
+            try:
+                await asyncio.sleep(30)  # Run every 30 seconds
+
+                raw_redis_keys = await self.redis.keys('positions:open:*')
+                redis_positions: Dict[str, Dict[str, Any]] = {}
+
+                for raw_key in raw_redis_keys:
+                    key = raw_key.decode('utf-8') if isinstance(raw_key, bytes) else raw_key
+                    position_data = await self.redis.get(key)
+                    if not position_data:
+                        continue
+
+                    position = json.loads(position_data)
+                    symbol = position.get('symbol')
+                    position_id = position.get('id')
+                    if not symbol or not position_id:
+                        continue
+
+                    quantity = position.get('quantity', 0)
+                    try:
+                        quantity_val = float(quantity)
+                    except (TypeError, ValueError):
+                        quantity_val = 0.0
+
+                    if quantity_val <= 0:
+                        await self._archive_position(position, 'SYNCED_ZERO_QUANTITY')
+                        continue
+
+                    redis_positions[key] = position
+
+                if not self.ib.isConnected():
+                    continue
+
+                # Get current positions from IBKR
+                ib_positions = await self.ib.reqPositionsAsync()
+
+                ib_position_map: Dict[str, Dict[str, Any]] = {}
+                ib_contract_index: Dict[tuple, str] = {}
+
+                for account, contract, size, avg_cost in ib_positions:
+                    if abs(size) == 0:
+                        continue
+
+                    key = f"{account}:{contract.conId}"
+                    ib_position_map[key] = {
+                        'id': key,
+                        'contract': contract,
+                        'size': size,
+                        'avg_cost': avg_cost,
+                        'account': account,
+                    }
+
+                    canonical_key = self._canonical_contract_key(
+                        getattr(contract, 'symbol', None),
+                        contract,
+                        'LONG' if size >= 0 else 'SHORT',
+                    )
+                    ib_contract_index[canonical_key] = key
+
+                processed_ib_ids: set = set()
+
+                for redis_key, position in list(redis_positions.items()):
+                    symbol = position.get('symbol')
+                    position_id = position.get('id')
+
+                    if not symbol or not position_id:
+                        continue
+
+                    canonical_key = self._canonical_contract_key(
+                        symbol,
+                        position.get('contract', {}),
+                        position.get('side'),
+                    )
+
+                    ib_entry = ib_position_map.get(position_id)
+                    if ib_entry:
+                        updated_snapshot = self._create_position_snapshot_from_ib(
+                            position_id,
+                            ib_entry['contract'],
+                            ib_entry['size'],
+                            ib_entry['avg_cost'],
+                            ib_entry['account'],
+                            existing=position,
+                        )
+                        await self.redis.set(redis_key, json.dumps(updated_snapshot))
+                        processed_ib_ids.add(position_id)
+                        continue
+
+                    ib_match_id = ib_contract_index.get(canonical_key)
+                    if ib_match_id:
+                        ib_entry = ib_position_map.get(ib_match_id)
+                        if not ib_entry:
+                            continue
+
+                        dest_key = f'positions:open:{symbol}:{ib_match_id}'
+                        destination = redis_positions.get(dest_key)
+                        if destination is None:
+                            dest_json = await self.redis.get(dest_key)
+                            if dest_json:
+                                destination = json.loads(dest_json)
+                            else:
+                                destination = self._create_position_snapshot_from_ib(
+                                    ib_match_id,
+                                    ib_entry['contract'],
+                                    ib_entry['size'],
+                                    ib_entry['avg_cost'],
+                                    ib_entry['account'],
+                                )
+
+                        self._merge_position_metadata(position, destination)
+                        await self.redis.set(dest_key, json.dumps(destination))
+                        await self.redis.sadd(f'positions:by_symbol:{symbol}', ib_match_id)
+
+                        if position_id != ib_match_id:
+                            await self._remove_duplicate_position(symbol, position_id)
+                            redis_positions.pop(redis_key, None)
+
+                        redis_positions[dest_key] = destination
+                        processed_ib_ids.add(ib_match_id)
+                        continue
+
+                    # No IB match – position has been closed outside the system
+                    await self._archive_position(position, 'SYNCED_CLOSED')
+                    redis_positions.pop(redis_key, None)
+
+                for ib_id, ib_entry in ib_position_map.items():
+                    if ib_id in processed_ib_ids:
+                        continue
+
+                    contract = ib_entry['contract']
+                    symbol = getattr(contract, 'symbol', None)
+                    if not symbol:
+                        continue
+
+                    # Skip zero-quantity positions from IB
+                    if abs(ib_entry['size']) < 0.0001:
+                        self.logger.debug(f"Position sync: Skipping zero-quantity {symbol} position {ib_id}")
+                        continue
+
+                    snapshot = self._create_position_snapshot_from_ib(
+                        ib_id,
+                        contract,
+                        ib_entry['size'],
+                        ib_entry['avg_cost'],
+                        ib_entry['account'],
+                    )
+
+                    redis_key = f'positions:open:{symbol}:{ib_id}'
+                    await self.redis.set(redis_key, json.dumps(snapshot))
+                    await self.redis.sadd(f'positions:by_symbol:{symbol}', ib_id)
+
+                    self.logger.info(f"Position sync: Added new {symbol} position {ib_id}")
+
+                self.logger.debug("Position sync completed")
+
+            except Exception as e:
+                self.logger.error(f"Error in position sync loop: {e}")
+                await asyncio.sleep(30)
+
     async def reconcile_positions(self):
         """Backfill Redis with any live IB positions that are missing locally."""
         if not self.ib.isConnected():
@@ -201,54 +667,29 @@ class ExecutionManager:
 
         for account, contract, size, avg_cost in positions:
             try:
-                symbol = contract.symbol
+                if abs(size) == 0:
+                    continue
+
+                symbol = getattr(contract, 'symbol', None)
+                if not symbol:
+                    continue
+
                 position_id = f"{account}:{contract.conId}"
                 redis_key = f'positions:open:{symbol}:{position_id}'
 
-                if await self.redis.exists(redis_key):
-                    continue
+                existing_json = await self.redis.get(redis_key)
+                existing = json.loads(existing_json) if existing_json else None
 
-                contract_payload = {
-                    'symbol': contract.symbol,
-                    'secType': contract.secType,
-                    'exchange': contract.exchange,
-                    'currency': contract.currency,
-                }
-                if getattr(contract, 'lastTradeDateOrContractMonth', None):
-                    contract_payload['expiry'] = contract.lastTradeDateOrContractMonth
-                if getattr(contract, 'strike', None) is not None:
-                    contract_payload['strike'] = contract.strike
-                    contract_payload['right'] = getattr(contract, 'right', None)
-                    contract_payload['type'] = 'option'
-                else:
-                    contract_payload['type'] = contract_payload.get('secType', 'STK').lower()
+                snapshot = self._create_position_snapshot_from_ib(
+                    position_id,
+                    contract,
+                    size,
+                    avg_cost,
+                    account,
+                    existing=existing,
+                )
 
-                quantity = abs(size)
-                side = 'LONG' if size >= 0 else 'SHORT'
-
-                position_snapshot = {
-                    'id': position_id,
-                    'symbol': symbol,
-                    'contract': contract_payload,
-                    'side': side,
-                    'strategy': 'RECONCILED',
-                    'quantity': quantity,
-                    'entry_price': avg_cost,
-                    'entry_time': datetime.utcnow().isoformat(),
-                    'commission': 0.0,
-                    'stop_loss': None,
-                    'targets': [],
-                    'current_price': avg_cost,
-                    'unrealized_pnl': 0.0,
-                    'realized_pnl': 0.0,
-                    'stop_order_id': None,
-                    'status': 'OPEN',
-                    'order_id': None,
-                    'signal_id': None,
-                    'reconciled': True,
-                }
-
-                await self.redis.set(redis_key, json.dumps(position_snapshot))
+                await self.redis.set(redis_key, json.dumps(snapshot))
                 await self.redis.sadd(f'positions:by_symbol:{symbol}', position_id)
                 self.logger.info(f"Reconciled live IB position for {symbol} ({position_id})")
             except Exception as snapshot_error:  # pragma: no cover - defensive per-position
@@ -373,6 +814,7 @@ class ExecutionManager:
             side = signal.get('side')  # LONG or SHORT
             confidence = signal.get('confidence', 60)
             strategy = signal.get('strategy')  # 0DTE, 1DTE, 14DTE, MOC
+            strategy_code = self._normalize_strategy(strategy)
 
             self.logger.info(f"Executing signal: {symbol} {side} {strategy} (confidence={confidence}%)")
 
@@ -397,7 +839,7 @@ class ExecutionManager:
             # Determine order type and price
             action = 'BUY' if side == 'LONG' else 'SELL'
 
-            if confidence > 85 and strategy != '0DTE':  # Never use market for 0DTE
+            if confidence > 85 and strategy_code != '0DTE':  # Never use market for 0DTE
                 # Market order for high confidence (except 0DTE)
                 order = MarketOrder(action, order_size)
                 order_type = 'MARKET'
@@ -436,7 +878,7 @@ class ExecutionManager:
                 'size': order_size,
                 'order_type': order_type,
                 'confidence': confidence,
-                'strategy': strategy,
+                'strategy': strategy_code or strategy,
                 'entry_target': signal.get('entry'),
                 'stop_loss': signal.get('stop'),
                 'targets': signal.get('targets', []),
@@ -594,6 +1036,7 @@ class ExecutionManager:
 
             confidence = signal.get('confidence', 60) / 100.0
             strategy = signal.get('strategy')
+            strategy_code = self._normalize_strategy(strategy)
             contract_payload = signal.get('contract', {})
             raw_type = contract_payload.get('type') or 'option'
             contract_type = str(raw_type).strip().lower()
@@ -621,7 +1064,7 @@ class ExecutionManager:
                     contracts = int(position_size / (option_price * 100))
 
                     # Apply strategy-specific limits
-                    if strategy == '0DTE':
+                    if strategy_code == '0DTE':
                         max_contracts = min(self.max_0dte_contracts, 50)
                     else:
                         max_contracts = min(self.max_other_contracts, 100)
@@ -844,32 +1287,88 @@ class ExecutionManager:
             entry_time = last_fill_time.isoformat() if last_fill_time else datetime.utcnow().isoformat()
 
             # Create position record
-            position_id = str(uuid.uuid4())
-            position = {
-                'id': position_id,
-                'symbol': symbol,
-                'contract': signal.get('contract'),
-                'side': signal.get('side'),
-                'strategy': signal.get('strategy'),
-                'quantity': total_quantity,
-                'entry_price': avg_price,
-                'entry_time': entry_time,
-                'commission': total_commission,
-                'stop_loss': signal.get('stop'),
-                'targets': signal.get('targets', []),
-                'current_price': avg_price,
-                'unrealized_pnl': 0,
-                'realized_pnl': 0,
-                'stop_order_id': None,
-                'target_order_ids': [],
-                'oca_group': None,
-                'status': 'OPEN',
-                'order_id': order_id,
-                'signal_id': signal.get('id')
-            }
+            ib_contract = getattr(trade, 'contract', None)
+            account = next(
+                (
+                    getattr(fill.execution, 'acctNumber', None)
+                    for fill in fills
+                    if getattr(fill.execution, 'acctNumber', None)
+                ),
+                None,
+            )
+            con_id = getattr(ib_contract, 'conId', None)
+
+            if account and con_id:
+                position_id = f"{account}:{con_id}"
+            else:
+                position_id = str(uuid.uuid4())
+
+            contract_payload = dict(signal.get('contract', {}) or {})
+            if ib_contract:
+                contract_payload.update(self._contract_payload_from_ib(ib_contract))
+            contract_payload['symbol'] = symbol
+
+            redis_key = f'positions:open:{symbol}:{position_id}'
+            existing_json = await self.redis.get(redis_key)
+            existing_position = json.loads(existing_json) if existing_json else None
+
+            if existing_position:
+                position = existing_position
+                existing_qty = float(position.get('quantity', 0) or 0)
+                existing_commission = float(position.get('commission', 0.0) or 0.0)
+                existing_entry_price = float(position.get('entry_price', avg_price) or avg_price)
+            else:
+                existing_qty = 0.0
+                existing_commission = 0.0
+                existing_entry_price = avg_price
+                position = {
+                    'id': position_id,
+                    'symbol': symbol,
+                    'quantity': 0,
+                    'commission': 0.0,
+                    'unrealized_pnl': 0,
+                    'realized_pnl': 0,
+                    'stop_order_id': None,
+                    'target_order_ids': [],
+                    'oca_group': None,
+                    'status': 'OPEN',
+                    'targets': signal.get('targets', []),
+                    'stop_loss': signal.get('stop'),
+                }
+
+            new_quantity = existing_qty + total_quantity
+            position['quantity'] = new_quantity
+            position['commission'] = existing_commission + total_commission
+            position['entry_price'] = self._weighted_entry_price(
+                existing_qty,
+                existing_entry_price,
+                total_quantity,
+                avg_price,
+            )
+
+            position['contract'] = contract_payload
+            position['side'] = signal.get('side')
+            normalized_strategy = self._normalize_strategy(signal.get('strategy'))
+            if normalized_strategy:
+                position['strategy'] = normalized_strategy
+            elif position.get('strategy'):
+                position['strategy'] = self._normalize_strategy(position.get('strategy'))
+            position['entry_time'] = entry_time
+            if signal.get('stop') is not None:
+                position['stop_loss'] = signal.get('stop')
+
+            targets_from_signal = signal.get('targets')
+            if targets_from_signal is not None:
+                position['targets'] = targets_from_signal
+            position['current_price'] = avg_price
+            position['order_id'] = order_id
+            position['signal_id'] = signal.get('id')
+            position['reconciled'] = False
+            position['ib_account'] = account
+            position['ib_con_id'] = con_id
 
             # Store position in Redis
-            await self.redis.set(f'positions:open:{symbol}:{position_id}', json.dumps(position))
+            await self.redis.set(redis_key, json.dumps(position))
 
             # Add to symbol index
             await self.redis.sadd(f'positions:by_symbol:{symbol}', position_id)
@@ -940,13 +1439,14 @@ class ExecutionManager:
 
             entry_price = float(position.get('entry_price') or 0)
             strategy = position.get('strategy')
+            strategy_code = self._normalize_strategy(strategy)
 
             # Determine stop price from signal or defaults
             stop_price = position.get('stop_loss')
             if not stop_price and entry_price:
-                if strategy == '0DTE':
+                if strategy_code == '0DTE':
                     stop_price = entry_price * (0.5 if side == 'LONG' else 1.5)
-                elif strategy == '1DTE':
+                elif strategy_code == '1DTE':
                     stop_price = entry_price * (0.75 if side == 'LONG' else 1.25)
                 else:
                     stop_price = entry_price * (0.7 if side == 'LONG' else 1.3)
@@ -1015,6 +1515,7 @@ class ExecutionManager:
             position['stop_order_id'] = stop_order_id
             position['target_order_ids'] = target_order_ids
             position['oca_group'] = oca_group
+            position['stop_loss'] = stop_price
 
             await self.redis.set(f'positions:open:{symbol}:{position_id}', json.dumps(position))
 
@@ -1146,8 +1647,13 @@ class ExecutionManager:
                 f"{fill.execution.shares} @ ${fill.execution.price:.2f}"
             )
 
-            # Update metrics asynchronously
-            asyncio.create_task(self.update_fill_metrics(fill))
+            async def _process_fill():
+                handled = await self.handle_bracket_fill(fill)
+                if not handled:
+                    await self._handle_untracked_fill(fill)
+                await self.update_fill_metrics(fill)
+
+            asyncio.create_task(_process_fill())
 
         except Exception as e:
             self.logger.error(f"Error handling fill: {e}")
@@ -1173,6 +1679,156 @@ class ExecutionManager:
 
         except Exception as e:
             self.logger.error(f"Error handling IBKR error: {e}")
+
+    async def handle_bracket_fill(self, fill) -> bool:
+        """
+        Handle fills for stop loss and target orders.
+        """
+        try:
+            order_id = getattr(fill.execution, 'orderId', None)
+            if not order_id:
+                return False
+
+            symbol = fill.contract.symbol
+            filled_qty = abs(getattr(fill.execution, 'shares', 0))
+            fill_price = getattr(fill.execution, 'price', 0)
+
+            # Check if this is a stop or target order by checking all positions
+            position_keys = await self.redis.keys(f'positions:open:{symbol}:*')
+
+            for key in position_keys:
+                position_data = await self.redis.get(key)
+                if not position_data:
+                    continue
+
+                position = json.loads(position_data)
+                stop_order_id = position.get('stop_order_id')
+                target_order_ids = position.get('target_order_ids', [])
+
+                # Check if this fill is for a stop or target order
+                if order_id == stop_order_id or order_id in target_order_ids:
+                    multiplier = self._position_multiplier(position)
+                    if position.get('side') == 'LONG':
+                        realized_pnl = (fill_price - position.get('entry_price', 0)) * filled_qty * multiplier
+                    else:
+                        realized_pnl = (position.get('entry_price', 0) - fill_price) * filled_qty * multiplier
+
+                    reason = 'STOP' if order_id == stop_order_id else 'TARGET'
+                    await self._finalize_position_close(position, fill_price, realized_pnl, reason)
+                    return True
+
+        except Exception as e:
+            self.logger.error(f"Error handling bracket fill: {e}")
+        return False
+
+    async def _handle_untracked_fill(self, fill) -> None:
+        """Handle fills that are not tied to tracked entry/stop/target orders."""
+
+        order_id = getattr(fill.execution, 'orderId', None)
+        if order_id and order_id in self.pending_orders:
+            # Entry order – handled by handle_fill
+            return
+
+        account = getattr(fill.execution, 'acctNumber', None)
+        con_id = getattr(fill.contract, 'conId', None)
+        symbol = getattr(fill.contract, 'symbol', None)
+        if not (account and con_id and symbol):
+            return
+
+        redis_key = f'positions:open:{symbol}:{account}:{con_id}'
+        position_json = await self.redis.get(redis_key)
+        if not position_json:
+            return
+
+        position = json.loads(position_json)
+        side = (position.get('side') or '').upper()
+        fill_side = (getattr(fill.execution, 'side', '') or '').upper()
+        filled_qty = abs(getattr(fill.execution, 'shares', 0))
+        fill_price = getattr(fill.execution, 'price', 0.0)
+
+        if filled_qty == 0 or side not in {'LONG', 'SHORT'} or fill_side not in {'BOT', 'SLD'}:
+            return
+
+        if (side == 'LONG' and fill_side == 'SLD') or (side == 'SHORT' and fill_side == 'BOT'):
+            # Reducing or closing position
+            await self._apply_position_reduction(position, filled_qty, fill_price, 'MANUAL')
+        elif (side == 'LONG' and fill_side == 'BOT') or (side == 'SHORT' and fill_side == 'SLD'):
+            # Scaling into existing position
+            await self._apply_position_addition(position, filled_qty, fill_price)
+
+    async def _apply_position_addition(
+        self,
+        position: Dict[str, Any],
+        added_qty: float,
+        fill_price: float,
+    ) -> None:
+        symbol = position.get('symbol')
+        position_id = position.get('id')
+        if not symbol or not position_id:
+            return
+
+        current_qty = float(position.get('quantity', 0) or 0.0)
+        new_qty = current_qty + added_qty
+
+        position['entry_price'] = self._weighted_entry_price(
+            current_qty,
+            float(position.get('entry_price', fill_price) or fill_price),
+            added_qty,
+            fill_price,
+        )
+        position['quantity'] = new_qty
+        position['current_price'] = fill_price
+        position['last_update'] = time.time()
+
+        await self.redis.set(
+            f'positions:open:{symbol}:{position_id}',
+            json.dumps(position)
+        )
+
+    async def _apply_position_reduction(
+        self,
+        position: Dict[str, Any],
+        closed_qty: float,
+        fill_price: float,
+        reason: str,
+    ) -> None:
+        symbol = position.get('symbol')
+        position_id = position.get('id')
+        if not symbol or not position_id:
+            return
+
+        current_qty = float(position.get('quantity', 0) or 0.0)
+        closed_qty = min(closed_qty, current_qty)
+        if closed_qty <= 0:
+            return
+
+        multiplier = self._position_multiplier(position)
+        entry_price = float(position.get('entry_price', 0) or 0.0)
+        side = (position.get('side') or '').upper()
+
+        if side == 'LONG':
+            realized_delta = (fill_price - entry_price) * closed_qty * multiplier
+        else:
+            realized_delta = (entry_price - fill_price) * closed_qty * multiplier
+
+        position['quantity'] = max(current_qty - closed_qty, 0)
+        position['realized_pnl'] = position.get('realized_pnl', 0.0) + realized_delta
+        position.setdefault('reductions', []).append(
+            {
+                'quantity': closed_qty,
+                'price': fill_price,
+                'reason': reason,
+                'timestamp': datetime.utcnow().isoformat(),
+            }
+        )
+
+        if position['quantity'] <= 0:
+            await self._finalize_position_close(position, fill_price, realized_delta, reason)
+        else:
+            await self.redis.set(
+                f'positions:open:{symbol}:{position_id}',
+                json.dumps(position)
+            )
 
     async def update_fill_metrics(self, fill):
         """

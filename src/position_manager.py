@@ -16,9 +16,7 @@ Redis Keys Used:
         - positions:closed:{date}:{position_id} (closed positions)
         - positions:by_symbol:{symbol} (symbol index)
         - positions:pnl:unrealized (total unrealized P&L)
-        - positions:pnl:realized (total realized P&L)
         - positions:pnl:realized:total (cumulative realized P&L)
-        - risk:daily_pnl (daily P&L for risk manager)
         - positions:summary (portfolio summary)
         - positions:closed:total (closed position counter)
 
@@ -173,6 +171,20 @@ class PositionManager:
                 if await self.redis.exists(redis_key):
                     continue
 
+                try:
+                    quantity = abs(float(size))
+                except (TypeError, ValueError):
+                    self.logger.warning(
+                        "Skipping IBKR position with unparseable size %s for %s",
+                        size,
+                        symbol,
+                    )
+                    continue
+
+                if quantity <= 0:
+                    # Ignore reconciling flat snapshots
+                    continue
+
                 contract_payload = {
                     'symbol': contract.symbol,
                     'secType': contract.secType,
@@ -188,7 +200,9 @@ class PositionManager:
                 else:
                     contract_payload['type'] = contract_payload.get('secType', 'STK').lower()
 
-                quantity = abs(size)
+                if isinstance(quantity, float) and quantity.is_integer():
+                    quantity = int(quantity)
+
                 side = 'LONG' if size >= 0 else 'SHORT'
 
                 position_snapshot = {
@@ -228,19 +242,53 @@ class PositionManager:
         try:
             position_keys = await self.redis.keys('positions:open:*')
 
+            redis_position_ids = set()
+
             for key in position_keys:
                 position_json = await self.redis.get(key)
                 if position_json:
                     position = json.loads(position_json)
                     position_id = position.get('id')
 
+                    if not position_id:
+                        continue
+
                     # Store in memory
                     self.positions[position_id] = position
+                    redis_position_ids.add(position_id)
 
                     # Subscribe to market data if needed
                     symbol = position.get('symbol')
                     if symbol not in self.position_tickers:
                         await self.subscribe_market_data(symbol, position.get('contract'))
+
+            # Remove any cached positions that no longer exist in Redis
+            stale_ids = set(self.positions.keys()) - redis_position_ids
+            for stale_id in stale_ids:
+                stale_position = self.positions.pop(stale_id, None)
+                self.high_water_marks.pop(stale_id, None)
+                self.stop_orders.pop(stale_id, None)
+                self.trailing_stops.pop(stale_id, None)
+
+                if not stale_position:
+                    continue
+
+                symbol = stale_position.get('symbol')
+                if not symbol:
+                    continue
+
+                # Drop ticker subscriptions with no remaining positions
+                if all(pos.get('symbol') != symbol for pos in self.positions.values()):
+                    ticker = self.position_tickers.pop(symbol, None)
+                    if ticker:
+                        try:
+                            self.ib.cancelMktData(ticker)
+                        except Exception as cancel_error:  # pragma: no cover - defensive guard
+                            self.logger.debug(
+                                "Failed to cancel market data for %s: %s",
+                                symbol,
+                                cancel_error,
+                            )
 
         except Exception as e:
             self.logger.error(f"Error loading positions: {e}")
@@ -319,10 +367,21 @@ class PositionManager:
         Update P&L for all positions.
         """
         total_unrealized_pnl = 0
-        total_realized_pnl = 0
 
         for position_id, position in self.positions.items():
             try:
+                quantity_value = position.get('quantity')
+                try:
+                    quantity = float(quantity_value)
+                except (TypeError, ValueError):
+                    quantity = 0
+
+                status_value = position.get('status', 'OPEN')
+                status = str(status_value).upper() if status_value is not None else 'OPEN'
+
+                if quantity <= 0 or status != 'OPEN':
+                    continue
+
                 symbol = position.get('symbol')
 
                 # Get current price from ticker or Redis
@@ -360,15 +419,12 @@ class PositionManager:
 
                     # Accumulate totals
                     total_unrealized_pnl += unrealized_pnl
-                    total_realized_pnl += position.get('realized_pnl', 0)
 
             except Exception as e:
                 self.logger.error(f"Error updating position {position_id}: {e}")
 
         # Update account totals
         await self.redis.set('positions:pnl:unrealized', total_unrealized_pnl)
-        await self.redis.set('positions:pnl:realized', total_realized_pnl)
-        await self.redis.set('risk:daily_pnl', total_realized_pnl)  # For risk manager
 
     async def get_current_price(self, symbol: str, contract_info: dict) -> float:
         """
@@ -527,6 +583,10 @@ class PositionManager:
                 strategy = position.get('strategy', 'default')
                 side = position.get('side')
 
+                # Skip positions without an active stop order (e.g., reconciled without brackets)
+                if not position.get('stop_order_id'):
+                    continue
+
                 if unrealized_pnl <= 0:
                     continue  # Only trail profitable positions
 
@@ -557,21 +617,33 @@ class PositionManager:
                     new_stop = round(new_stop, 2)
 
                     # Check if new stop is better than current
-                    current_stop = position.get('stop_loss', 0)
+                    current_stop_raw = position.get('stop_loss')
+                    try:
+                        current_stop = float(current_stop_raw) if current_stop_raw is not None else None
+                    except (TypeError, ValueError):
+                        current_stop = None
 
                     should_update = False
-                    if side == 'LONG' and new_stop > current_stop:
-                        should_update = True
-                    elif side == 'SHORT' and new_stop < current_stop:
-                        should_update = True
+                    if side == 'LONG':
+                        if current_stop is None or new_stop > current_stop:
+                            should_update = True
+                    else:  # SHORT
+                        if current_stop is None or new_stop < current_stop:
+                            should_update = True
 
                     if should_update:
                         await self.update_stop_loss(position, new_stop)
-                        self.logger.info(
-                            f"Trailing stop for {position_id[:8]}: "
-                            f"${current_stop:.2f} → ${new_stop:.2f} "
-                            f"(profit: {profit_pct:.1%})"
-                        )
+                        if current_stop is not None:
+                            self.logger.info(
+                                f"Trailing stop for {position_id[:8]}: "
+                                f"${current_stop:.2f} → ${new_stop:.2f} "
+                                f"(profit: {profit_pct:.1%})"
+                            )
+                        else:
+                            self.logger.info(
+                                f"Trailing stop for {position_id[:8]} initialized at ${new_stop:.2f} "
+                                f"(profit: {profit_pct:.1%})"
+                            )
 
             except Exception as e:
                 self.logger.error(f"Error managing trailing stop for {position_id}: {e}")
