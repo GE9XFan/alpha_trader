@@ -17,8 +17,8 @@
 |  | `av_sentiment.py` | 365 | 100% | Configurable ETF exclusions, sentiment quality metrics, and enriched technical metadata stored.【F:src/av_sentiment.py†L1-L365】 |
 | Analytics | `analytics_engine.py` | 585 | 100% | Cadence-aware scheduler drives calculators, honors market hours, and publishes portfolio/sector/correlation artifacts via the shared Redis schema.【F:src/analytics_engine.py†L35-L584】 |
 |  | `vpin_calculator.py` | 317 | 100% | VPIN logic migrated intact with async Redis use.【F:src/vpin_calculator.py†L31-L116】 |
-|  | `gex_dex_calculator.py` | 482 | 95% | Exposure calculations complete; uses Redis solely for inputs/outputs.【F:src/gex_dex_calculator.py†L29-L140】 |
-|  | `pattern_analyzer.py` | 477 | 95% | Sweep/hidden order detection finalized with Redis metrics writes.【F:src/pattern_analyzer.py†L32-L186】 |
+|  | `gex_dex_calculator.py` | 482 | 100% | Normalized chain support, canonical analytics writes, and TTL policies aligned with the engine.【F:src/gex_dex_calculator.py†L29-L520】 |
+|  | `pattern_analyzer.py` | 477 | 100% | Toxicity/OBI/sweep metrics publish through shared helpers with velocity tracking TTLs.【F:src/pattern_analyzer.py†L32-L360】 |
 |  | `parameter_discovery.py` | 828 | 90% | Automated tuning pipeline operational with configurable schedules.【F:src/parameter_discovery.py†L31-L246】 |
 | Signal Generation | `signal_generator.py` | 512 | 95% | Production guardrails and audits running; keep an eye on runtime imports for future cleanup.【F:src/signal_generator.py†L33-L420】 |
 |  | `dte_strategies.py` | 822 | 95% | Strategy evaluation extracted cleanly with shared interfaces.【F:src/dte_strategies.py†L30-L300】 |
