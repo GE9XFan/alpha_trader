@@ -24,27 +24,12 @@ import pytz
 import holidays
 from typing import Dict, List, Any, Optional, Tuple, Callable
 from datetime import datetime, timedelta
-from collections import deque, defaultdict
 from ib_insync import IB, Stock, MarketOrder, LimitOrder, util, Ticker
 import logging
 from redis_keys import Keys
+from ibkr_processor import IBKRDataProcessor
 import traceback
 from decimal import Decimal, ROUND_HALF_UP
-
-# Venue normalization mapping for IBKR marketMaker field
-VENUE_MAP = {
-    "NSDQ": "NSDQ", "NASDAQ": "NSDQ",  # Normalize NASDAQ variants to NSDQ
-    "BATS": "BATS", "EDGX": "EDGX", "EDGEA": "EDGEA", 
-    "DRCTEDGE": "DRCTEDGE", "BYX": "BYX",
-    "ARCA": "ARCA", "NYSE": "NYSE", "AMEX": "AMEX", 
-    "NYSENAT": "NYSENAT", "PSX": "PSX", "IEX": "IEX", 
-    "LTSE": "LTSE", "CHX": "CHX", "ISE": "ISE",
-    "PEARL": "PEARL", "MEMX": "MEMX", "BEX": "BEX",
-    "IBEOS": "IBEOS", "IBKRATS": "IBKRATS",
-    "OVERNIGHT": "OVERNIGHT", "ISLAND": "NSDQ",  # ISLAND is NASDAQ
-    "SMART": "SMART", "UNKNOWN": "UNKNOWN", "": "UNKNOWN"
-}
-
 
 class IBKRIngestion:
     """
@@ -76,20 +61,15 @@ class IBKRIngestion:
         
         # Store depth tickers to prevent garbage collection
         self.depth_tickers = {}
-        
-        # Aggregated TOB across exchanges
-        self.aggregated_tob = {}
-        
+
         # L2 fallback tracking
         self.l2_fallback_exchanges = set()
-        
-        # Order books per exchange
-        self.order_books = {}
-        
-        # Trade and bar buffers - increased sizes for proper accumulation
-        self.trades_buffer = defaultdict(lambda: deque(maxlen=5000))
-        self.bars_buffer = defaultdict(lambda: deque(maxlen=500))
-        self.last_trade = {}  # Cache last trade prices
+
+        # Processing helpers encapsulate normalization/stateful buffers
+        self.processor = IBKRDataProcessor(config)
+
+        # Background task tracking for clean shutdowns
+        self._background_tasks: List[asyncio.Task] = []
         
         # TTL configuration
         self.ttls = config['modules']['data_ingestion']['store_ttls']
@@ -152,13 +132,15 @@ class IBKRIngestion:
             
             # Start metrics loop
             metrics_task = asyncio.create_task(self._metrics_loop())
-            
-            # Start freshness check loop  
+
+            # Start freshness check loop
             freshness_task = asyncio.create_task(self._freshness_check_loop())
-            
+
             # Start status logger loop
             status_task = asyncio.create_task(self._status_logger_loop())
-            
+
+            self._background_tasks = [metrics_task, freshness_task, status_task]
+
             # Keep running
             while self.running and self.connected:
                 await asyncio.sleep(1)
@@ -329,14 +311,6 @@ class IBKRIngestion:
                 isSmartDepth=is_smart  # True for SMART to get venue codes
             )
             
-            # Initialize per-exchange order book
-            self.order_books[f"{symbol}:{exchange}"] = {
-                'bids': [],
-                'asks': [],
-                'timestamp': 0,
-                'exchange': exchange
-            }
-            
             return depth_ticker
             
         except Exception as e:
@@ -408,7 +382,7 @@ class IBKRIngestion:
     async def _on_depth_update_async(self, ticker, exchange: str):
         """Async handler for Level 2 market depth updates per exchange."""
         start_time = time.perf_counter()
-        
+
         try:
             if not ticker or not ticker.contract:
                 return
@@ -425,155 +399,39 @@ class IBKRIngestion:
                 return
             
             async with self.lock:
-                # Initialize book if needed
-                if book_key not in self.order_books:
-                    self.order_books[book_key] = {
-                        'bids': [], 'asks': [], 
-                        'timestamp': 0, 'exchange': exchange
-                    }
-                
-                book = self.order_books[book_key]
-                
-                # Update order book from ticker's DOM data with venue normalization
-                venues_seen = set()
-                
-                # Extract and normalize venue codes from SMART depth
-                book['bids'] = []
-                for level in (ticker.domBids or []):
-                    # When using SMART depth, marketMaker contains venue code
-                    raw_venue = level.marketMaker if hasattr(level, 'marketMaker') else ''
-                    venue = VENUE_MAP.get(raw_venue, 'UNKNOWN') if raw_venue else 'UNKNOWN'
-                    venues_seen.add(venue)
-                    
-                    book['bids'].append({
-                        'price': float(level.price),
-                        'size': int(level.size),
-                        'venue': venue,  # Store normalized venue code
-                        'mm': venue  # Keep for backward compatibility
-                    })
-                
-                book['asks'] = []
-                for level in (ticker.domAsks or []):
-                    raw_venue = level.marketMaker if hasattr(level, 'marketMaker') else ''
-                    venue = VENUE_MAP.get(raw_venue, 'UNKNOWN') if raw_venue else 'UNKNOWN'
-                    venues_seen.add(venue)
-                    
-                    book['asks'].append({
-                        'price': float(level.price),
-                        'size': int(level.size),
-                        'venue': venue,
-                        'mm': venue
-                    })
-                
-                # Log unique venues seen (only occasionally to avoid spam)
-                if venues_seen and venues_seen != {'UNKNOWN'} and random.random() < 0.01:  # 1% sample
+                book = self.processor.update_depth_book(symbol, exchange, ticker)
+                if not book:
+                    return
+
+                venues_seen = {
+                    level.get('venue')
+                    for level in [*book.get('bids', []), *book.get('asks', [])]
+                    if level.get('venue')
+                }
+                if venues_seen and venues_seen != {'UNKNOWN'} and random.random() < 0.01:
                     self.logger.debug(f"Venues in {symbol} book: {sorted(venues_seen)}")
-                
-                book['timestamp'] = int(datetime.now().timestamp() * 1000)
-                
-                # Update Redis with async pipeline
+
                 async with self.redis.pipeline(transaction=False) as pipe:
-                    # Store exchange-specific book
                     book_ttl = self.ttls['order_book']
                     await pipe.setex(Keys.market_book(symbol, exchange), book_ttl, json.dumps(book))
-                    
-                    # CRITICAL: Also store at the aggregated location for analytics
-                    # Analytics and status logger expect market:{symbol}:book
                     await pipe.setex(Keys.market_book(symbol), book_ttl, json.dumps(book))
-                    
-                    # CRITICAL: Always update aggregated TOB and :ticker
-                    await self._update_aggregated_tob(symbol, book, pipe)
-                    
+
+                    aggregated = self.processor.compute_aggregated_tob(symbol)
+                    if aggregated:
+                        await pipe.setex(
+                            Keys.market_ticker(symbol),
+                            self.ttls['market_data'],
+                            json.dumps(aggregated)
+                        )
+
                     await pipe.execute()
-                
+
                 # Update monitoring
                 self.update_counts['depth'] += 1
                 self.last_update_times[symbol] = time.time()
-                
+
         except Exception as e:
             self.logger.error(f"Error processing depth for {symbol}:{exchange}: {e}")
-    
-    async def _update_aggregated_tob(self, symbol: str, exchange_book: dict, pipe):
-        """
-        Update aggregated best bid/ask across all exchanges.
-        NOTE: pipe is passed in from caller's async with block.
-        """
-        if symbol not in self.aggregated_tob:
-            self.aggregated_tob[symbol] = {
-                'best_bid': 0,
-                'best_ask': float('inf'),
-                'bid_exchange': '',
-                'ask_exchange': ''
-            }
-        
-        agg = self.aggregated_tob[symbol]
-        exchange = exchange_book.get('exchange', 'UNKNOWN')
-        
-        # Update if this exchange has better prices
-        if exchange_book['bids']:
-            best_bid = float(exchange_book['bids'][0]['price'])
-            if best_bid > agg['best_bid']:
-                agg['best_bid'] = best_bid
-                agg['bid_exchange'] = exchange
-        
-        if exchange_book['asks']:
-            best_ask = float(exchange_book['asks'][0]['price'])
-            if best_ask < agg['best_ask']:
-                agg['best_ask'] = best_ask
-                agg['ask_exchange'] = exchange
-        
-        # Write aggregated TOB to Redis as :ticker
-        if agg['best_bid'] > 0 and agg['best_ask'] < float('inf'):
-            # Generate timestamp once
-            current_ts = int(time.time() * 1000)
-            
-            # Staleness guard: only write if this update is newer
-            last_ts = self.last_tob_ts.get(symbol, 0)
-            if current_ts <= last_ts:
-                return  # Skip stale update
-            
-            # Get cached last trade and ensure it's float
-            last_price = self.last_trade.get(symbol)
-            if last_price is not None:
-                last_price = float(last_price)
-            
-            # Calculate derived values with guards
-            bid = round(float(agg['best_bid']), 6)
-            ask = round(float(agg['best_ask']), 6)
-            mid = round((bid + ask) / 2, 6)
-            spread = round(ask - bid, 6)
-            
-            # Calculate spread_bps only if bid > 0
-            spread_bps = None
-            if bid > 0:
-                spread_bps = round((spread / bid) * 10000, 2)
-            
-            ticker_data = {
-                'symbol': symbol,
-                'bid': bid,
-                'ask': ask,
-                'last': last_price,
-                'mid': mid,
-                'spread': spread,
-                'spread_bps': spread_bps,
-                'bid_exchange': agg['bid_exchange'],
-                'ask_exchange': agg['ask_exchange'],
-                'timestamp': current_ts
-            }
-            
-            # Numeric sanity check: skip if any value is non-finite
-            import math
-            numeric_values = [v for v in [bid, ask, mid, spread, spread_bps, last_price] if v is not None]
-            if any(not math.isfinite(v) for v in numeric_values):
-                self.logger.warning(f"Non-finite value detected for {symbol}, skipping update")
-                return
-            
-            # Atomic write with TTL from config
-            ttl = self.ttls['market_data']
-            await pipe.setex(Keys.market_ticker(symbol), ttl, json.dumps(ticker_data))
-            
-            # Update last timestamp after successful write
-            self.last_tob_ts[symbol] = current_ts
     
     async def _on_tob_update_async(self, ticker):
         """Update :ticker from top-of-book for non-L2 symbols, or for L2 symbols when *no* L2 venue is active."""
@@ -592,52 +450,19 @@ class IBKRIngestion:
             if has_working_l2:
                 return  # L2 aggregation will maintain ticker data
         
-        # Update :ticker with TOB data
-        if ticker.bid and ticker.ask:
-            # Cache last trade if available
-            if ticker.last:
-                self.last_trade[symbol] = float(ticker.last)
-            
-            # Calculate values with proper types and rounding
-            bid = round(float(ticker.bid), 6)
-            ask = round(float(ticker.ask), 6)
-            last_price = float(ticker.last) if ticker.last else self.last_trade.get(symbol)
-            mid = round((bid + ask) / 2, 6)
-            spread = round(ask - bid, 6)
-            
-            # Calculate spread_bps only if bid > 0
-            spread_bps = None
-            if bid > 0:
-                spread_bps = round((spread / bid) * 10000, 2)
-            
-            ticker_data = {
-                'symbol': symbol,
-                'bid': bid,
-                'ask': ask,
-                'last': last_price,
-                'mid': mid,
-                'spread': spread,
-                'spread_bps': spread_bps,
-                'timestamp': int(time.time() * 1000)
-            }
-            
-            # Numeric sanity check
-            import math
-            numeric_values = [v for v in [bid, ask, mid, spread, spread_bps, last_price] if v is not None]
-            if any(not math.isfinite(v) for v in numeric_values):
-                self.logger.warning(f"Non-finite value detected for {symbol} in TOB update, skipping")
-                return
-            
-            async with self.redis.pipeline(transaction=False) as pipe:
-                await pipe.setex(
-                    Keys.market_ticker(symbol), 
-                    self.ttls['market_data'], 
-                    json.dumps(ticker_data)
-                )
-                await pipe.execute()
-            
-            # Update monitoring
-            self.last_update_times[symbol] = time.time()
+        ticker_data = self.processor.build_quote_ticker(symbol, ticker)
+        if not ticker_data:
+            return
+
+        async with self.redis.pipeline(transaction=False) as pipe:
+            await pipe.setex(
+                Keys.market_ticker(symbol),
+                self.ttls['market_data'],
+                json.dumps(ticker_data)
+            )
+            await pipe.execute()
+
+        self.last_update_times[symbol] = time.time()
     
     async def _on_ticker_update_async(self, tickers):
         """Process ticker updates for trades and depth."""
@@ -672,12 +497,6 @@ class IBKRIngestion:
                     'venue': venue  # Add venue to trade data
                 }
                 
-                # Cache last trade
-                self.last_trade[symbol] = float(ticker.last)
-                
-                # Add to buffer
-                self.trades_buffer[symbol].append(trade)
-                
                 # Update Redis
                 await self._update_trade_data_redis(symbol, trade, ticker)
                 
@@ -687,70 +506,24 @@ class IBKRIngestion:
     
     async def _update_trade_data_redis(self, symbol: str, trade: Dict, ticker):
         """Update Redis with trade data using :ticker key consistently."""
+        last_price_data, ticker_data = self.processor.prepare_trade_storage(symbol, trade, ticker)
+
         async with self.redis.pipeline(transaction=False) as pipe:
-            # Get TTLs from config
-            ttls = self.ttls
-            
-            # Update last price as JSON with timestamp
-            last_price_data = {
-                'price': trade['price'],
-                'ts': trade['time']  # Fixed: use 'time' key, not 'timestamp'
-            }
-            await pipe.set(f'market:{symbol}:last', json.dumps(last_price_data))  # TODO: Normalize this key
-            
-            # CRITICAL: Write to :ticker key for analytics to read
-            # Round values properly - check for NaN
-            last_price = round(float(trade['price']), 6)
-            bid = None
-            if ticker.bid and not math.isnan(ticker.bid):
-                bid = round(float(ticker.bid), 6)
-            ask = None
-            if ticker.ask and not math.isnan(ticker.ask):
-                ask = round(float(ticker.ask), 6)
-            
-            # Handle volume - check for NaN
-            volume = 0
-            if ticker.volume and not math.isnan(ticker.volume):
-                volume = int(ticker.volume)
-            
-            # Handle vwap - check for NaN
-            vwap = None
-            if ticker.vwap and not math.isnan(ticker.vwap):
-                vwap = round(float(ticker.vwap), 6)
-            
-            ticker_data = {
-                'symbol': symbol,
-                'bid': bid,
-                'ask': ask,
-                'last': last_price,
-                'volume': volume,
-                'vwap': vwap,
-                'timestamp': trade['time']
-            }
-            
-            # Calculate derived fields if we have bid/ask
-            if bid is not None and ask is not None:
-                ticker_data['mid'] = round((bid + ask) / 2, 6)
-                ticker_data['spread'] = round(ask - bid, 6)
-                # Calculate spread_bps only if bid > 0
-                if bid > 0:
-                    ticker_data['spread_bps'] = round((ask - bid) / bid * 10000, 2)
-                else:
-                    ticker_data['spread_bps'] = None
-            
-            await pipe.setex(Keys.market_ticker(symbol), ttls['market_data'], json.dumps(ticker_data))
-            
+            ttl = self.ttls['market_data']
+            await pipe.setex(Keys.market_last(symbol), ttl, json.dumps(last_price_data))
+            await pipe.setex(Keys.market_ticker(symbol), ttl, json.dumps(ticker_data))
+
             # Store trades list - APPEND without deleting!
             trades_key = Keys.market_trades(symbol)
-            
+
             # Only push new trades from buffer
-            if self.trades_buffer[symbol]:
+            if self.processor.trades_buffer[symbol]:
                 # Push the latest trade
                 pipe.rpush(trades_key, json.dumps(trade))
                 # Keep only last 1000 trades
                 pipe.ltrim(trades_key, -1000, -1)
-                pipe.expire(trades_key, ttls.get('trades', 3600))
-            
+                pipe.expire(trades_key, self.ttls.get('trades', 3600))
+
             await pipe.execute()
     
     async def _on_bar_update_async(self, bars, hasNewBar):
@@ -785,7 +558,7 @@ class IBKRIngestion:
             }
             
             # Add to buffer
-            self.bars_buffer[symbol].append(bar_data)
+            self.processor.record_bar(symbol, bar_data)
             
             # Update Redis - APPEND without deleting!
             async with self.redis.pipeline(transaction=False) as pipe:
@@ -847,12 +620,27 @@ class IBKRIngestion:
                 stale_symbols[symbol] = age
         
         # Update Redis with stale symbols
-        if stale_symbols:
-            # Store stale symbol info
-            mapping_data = {k: str(v) for k, v in stale_symbols.items()}
-            await self.redis.hset('monitoring:data:stale', mapping=mapping_data)
-        else:
-            await self.redis.delete('monitoring:data:stale')
+        status_key = Keys.get_system_key('status', module='ibkr_ingestion')
+        ttl = self.ttls.get('monitoring', 60)
+
+        async with self.redis.pipeline(transaction=False) as pipe:
+            status_payload = {
+                'state': 'OK',
+                'ts': int(time.time() * 1000)
+            }
+
+            if stale_symbols:
+                mapping_data = {k: str(v) for k, v in stale_symbols.items()}
+                await pipe.hset('monitoring:data:stale', mapping=mapping_data)
+                status_payload.update({
+                    'state': 'STALE',
+                    'symbols': ','.join(sorted(stale_symbols.keys()))
+                })
+            else:
+                await pipe.delete('monitoring:data:stale')
+
+            await pipe.setex(status_key, ttl, json.dumps(status_payload))
+            await pipe.execute()
     
     async def _freshness_check_loop(self):
         """Loop to check data freshness."""
@@ -932,6 +720,14 @@ class IBKRIngestion:
         while self.running:
             try:
                 # Calculate metrics
+                now = time.time()
+                ages = [now - ts for ts in self.last_update_times.values() if ts]
+                max_age = max(ages) if ages else 0
+                stale_symbols = [
+                    symbol for symbol, ts in self.last_update_times.items()
+                    if ts and (now - ts) > self.staleness_threshold
+                ]
+
                 metrics = {
                     'connected': '1' if self.connected else '0',
                     'symbols_subscribed': len(self.subscriptions),
@@ -939,26 +735,36 @@ class IBKRIngestion:
                     'standard_symbols': len([s for s in self.subscriptions if self.subscriptions[s].get('type') == 'STANDARD']),
                     'depth_updates': self.update_counts.get('depth', 0),
                     'trade_updates': self.update_counts.get('trades', 0),
-                    'bar_updates': self.update_counts.get('bars', 0)
+                    'bar_updates': self.update_counts.get('bars', 0),
+                    'max_lag_s': round(max_age, 3),
+                    'stale_count': len(stale_symbols),
+                    'reconnect_attempts': self.reconnect_attempts,
                 }
-                
+
+                if stale_symbols:
+                    metrics['stale_symbols'] = ','.join(sorted(stale_symbols))
+
                 # Store metrics
-                # Explicitly store metrics to Redis
-                await self.redis.hset('monitoring:ibkr:metrics', mapping=metrics)
-                
-                # Update heartbeat
-                heartbeat = {
-                    'ts': int(datetime.now().timestamp() * 1000),
-                    'connected': self.connected,
-                    'symbols': len(self.all_symbols)
-                }
-                
-                ttl = self.ttls.get('heartbeat', 15)
-                await self.redis.setex(Keys.heartbeat('ibkr_ingestion'), ttl, json.dumps(heartbeat))
-                
+                metrics_key = 'monitoring:ibkr:metrics'
+                async with self.redis.pipeline(transaction=False) as pipe:
+                    await pipe.hset(metrics_key, mapping={k: str(v) for k, v in metrics.items()})
+                    await pipe.expire(metrics_key, self.ttls.get('metrics', 60))
+
+                    # Update heartbeat alongside metrics
+                    heartbeat = {
+                        'ts': int(datetime.now().timestamp() * 1000),
+                        'connected': self.connected,
+                        'symbols': len(self.all_symbols)
+                    }
+
+                    ttl = self.ttls.get('heartbeat', 15)
+                    await pipe.setex(Keys.heartbeat('ibkr_ingestion'), ttl, json.dumps(heartbeat))
+
+                    await pipe.execute()
+
                 # Reset counters
                 self.update_counts = {'depth': 0, 'trades': 0, 'bars': 0}
-                
+
                 await asyncio.sleep(10)
                 
             except Exception as e:
@@ -1000,19 +806,35 @@ class IBKRIngestion:
         """Attempt to reconnect after disconnection."""
         if not self.running:
             return
-            
+
         self.logger.info("Attempting to reconnect to IBKR...")
         await self._connect_with_retry()
-        
+
         if self.connected:
             # Re-establish subscriptions
             await self._setup_subscriptions()
-    
+
+    async def _cancel_background_tasks(self):
+        """Stop any background loops started in :meth:`start`."""
+        tasks, self._background_tasks = self._background_tasks, []
+        for task in tasks:
+            task.cancel()
+
+        for task in tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                continue
+            except Exception as exc:
+                self.logger.debug("Background task %s exited with %s", getattr(task, 'get_name', lambda: task)(), exc)
+
     async def _cleanup(self):
         """Clean up resources on shutdown."""
         self.logger.info("Cleaning up IBKR connections...")
-        
+
         try:
+            await self._cancel_background_tasks()
+
             # Only try to cancel if we're connected
             if self.ib.isConnected():
                 # Cancel all depth subscriptions safely
@@ -1046,16 +868,12 @@ class IBKRIngestion:
                 
                 # Disconnect from IBKR
                 self.ib.disconnect()
-            
+
             # Clear all data structures
             self.depth_tickers.clear()
             self.subscriptions.clear()
-            self.order_books.clear()
-            self.trades_buffer.clear()
-            self.aggregated_tob.clear()
-            self.last_tob_ts.clear()
-            self.last_trade.clear()
-            
+            self.processor.reset()
+
             # Update Redis
             await self.redis.set('ibkr:connected', '0')
             

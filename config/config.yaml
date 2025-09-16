@@ -46,6 +46,12 @@ alpha_vantage:
   safety_buffer: 10
   retry_attempts: 3
   retry_delay: 2
+  failure_threshold: 3
+  failure_backoff_seconds: 120
+  failure_backoff_max: 900
+  options_pubsub_channel: "events:options:chain"
+  sentiment:
+    skip_symbols: ["SPY", "QQQ", "IWM", "VXX"]
   options_update_interval: 10
   sentiment_update_interval: 300
   technicals_update_interval: 60
@@ -67,8 +73,8 @@ modules:
       order_book: 60       # Keep order books for 1 minute  
       bars: 3600           # Keep bars for 1 hour (need 100+ for analytics)
       trades: 3600         # Keep trades for 1 hour (need 1000+ for VPIN)
-      options_chain: 60    # Keep options for 1 minute
-      greeks: 60           # Keep greeks for 1 minute
+      options_chain: 300    # Keep options for 1 minute
+      greeks: 300           # Keep greeks for 1 minute
       sentiment: 300       # Keep sentiment for 5 minutes
       technicals: 300      # Keep technicals for 5 minutes
       metrics: 60          # Keep metrics for 1 minute

@@ -13,8 +13,8 @@ import asyncio
 import json
 import redis.asyncio as aioredis
 import aiohttp
-from typing import Dict, Any, List
-from datetime import datetime
+from typing import Dict, Any, List, Optional
+from datetime import datetime, timezone
 import logging
 from redis_keys import Keys
 
@@ -29,12 +29,33 @@ class SentimentProcessor:
         self.config = config
         self.redis = redis_conn
         self.logger = logging.getLogger(__name__)
+        av_config = config.get('alpha_vantage', {})
+        sentiment_config = av_config.get('sentiment', {})
+        default_skip = ['SPY', 'QQQ', 'IWM', 'VXX']
+        self.skip_sentiment_symbols = set(sentiment_config.get('skip_symbols', default_skip))
+        self.ttls = config['modules']['data_ingestion']['store_ttls']
+
+    @staticmethod
+    def _parse_time(value: str) -> Optional[datetime]:
+        if not value:
+            return None
+
+        formats = ('%Y-%m-%dT%H:%M:%SZ', '%Y%m%dT%H%M%S')
+        for fmt in formats:
+            try:
+                parsed = datetime.strptime(value, fmt)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return parsed
+            except ValueError:
+                continue
+        return None
 
     async def fetch_sentiment(self, session: aiohttp.ClientSession, symbol: str,
                               rate_limiter, base_url: str, api_key: str, ttls: Dict):
         """Fetch sentiment data."""
-        # Skip sentiment for ETFs as Alpha Vantage doesn't support them
-        if symbol in ['SPY', 'QQQ', 'IWM','VXX']:
+        # Skip sentiment for configured symbols (primarily ETFs)
+        if symbol in self.skip_sentiment_symbols:
             self.logger.info(f"Skipping sentiment for ETF {symbol} (not supported by Alpha Vantage)")
             return None
 
@@ -210,6 +231,8 @@ class SentimentProcessor:
                 # Process and store complete feed data
                 articles = []
                 ticker_sentiments = []
+                source_counts: Dict[str, int] = {}
+                article_ages: List[float] = []
 
                 for article in feed:
                     # Store complete article data
@@ -225,6 +248,15 @@ class SentimentProcessor:
                         'overall_sentiment_label': article.get('overall_sentiment_label', 'Neutral'),
                         'ticker_sentiment': []
                     }
+
+                    source = article_data.get('source')
+                    if source:
+                        source_counts[source] = source_counts.get(source, 0) + 1
+
+                    published_dt = self._parse_time(article_data.get('time_published', ''))
+                    if published_dt:
+                        age_minutes = max(0.0, (datetime.now(timezone.utc) - published_dt).total_seconds() / 60.0)
+                        article_ages.append(age_minutes)
 
                     # Process ticker-specific sentiment for this article
                     if 'ticker_sentiment' in article:
@@ -280,6 +312,31 @@ class SentimentProcessor:
                     json.dumps(sentiment_data)
                 )
 
+                avg_age_minutes = None
+                fresh_pct = None
+                if article_ages:
+                    avg_age_minutes = sum(article_ages) / len(article_ages)
+                    fresh_count = sum(1 for age in article_ages if age <= 60)
+                    fresh_pct = round((fresh_count / len(article_ages)) * 100, 2)
+
+                monitoring_payload = {
+                    'symbol': symbol,
+                    'timestamp': sentiment_data['timestamp'],
+                    'article_count': len(feed),
+                    'avg_sentiment': avg_sentiment,
+                    'avg_relevance': avg_relevance,
+                    'avg_age_minutes': round(avg_age_minutes, 2) if avg_age_minutes is not None else None,
+                    'fresh_articles_pct': fresh_pct,
+                    'sources': source_counts,
+                    'total_mentions': len(ticker_sentiments)
+                }
+
+                await self.redis.setex(
+                    f'monitoring:sentiment:{symbol}',
+                    self.ttls.get('monitoring', 60),
+                    json.dumps(monitoring_payload)
+                )
+
                 # Determine overall label based on average sentiment
                 overall_label = 'Neutral'
                 if avg_sentiment <= -0.35:
@@ -311,13 +368,20 @@ class SentimentProcessor:
                 latest_date = sorted(values.keys())[0]
                 latest_values = values[latest_date]
 
+                metadata = {
+                    'interval': indicator_config['params'].get('interval'),
+                    'lookback': indicator_config['params'].get('time_period'),
+                    'source': 'alpha_vantage'
+                }
+
                 # Handle multi-value indicators (MACD, BBANDS)
                 if 'value_keys' in indicator_config:
                     # Multi-value indicator like MACD or BBANDS
                     tech_data = {
                         'symbol': symbol,
                         'indicator': indicator_name,
-                        'timestamp': int(datetime.now().timestamp() * 1000)
+                        'timestamp': int(datetime.now().timestamp() * 1000),
+                        'metadata': metadata
                     }
 
                     # Add each value component
@@ -350,7 +414,8 @@ class SentimentProcessor:
                         'symbol': symbol,
                         'indicator': indicator_name,
                         'value': latest_value,
-                        'timestamp': int(datetime.now().timestamp() * 1000)
+                        'timestamp': int(datetime.now().timestamp() * 1000),
+                        'metadata': metadata
                     }
 
                     await self.redis.setex(

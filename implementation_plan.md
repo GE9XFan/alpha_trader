@@ -8,11 +8,11 @@
 ## Module Completion Matrix
 | Group | Module | Lines | Status | Notes |
 | --- | --- | --- | --- | --- |
-| Data Ingestion | `ibkr_ingestion.py` | 1,070 | 95% | Live IBKR stream handling with one minor TODO for future enhancements.【F:src/ibkr_ingestion.py†L49-L748】 |
-|  | `ibkr_processor.py` | 35 | 10% | Placeholder class awaiting offloaded transformations.【F:src/ibkr_processor.py†L2-L33】 |
-|  | `av_ingestion.py` | 365 | 95% | Stable Alpha Vantage client with rolling rate limiter and error handling.【F:src/av_ingestion.py†L29-L364】 |
-|  | `av_options.py` | 185 | 90% | Options normalization complete; minor TODO for extra hooks.【F:src/av_options.py†L25-L182】 |
-|  | `av_sentiment.py` | 365 | 95% | News/technicals ingestion fully ported with Redis publishing.【F:src/av_sentiment.py†L25-L363】 |
+| Data Ingestion | `ibkr_ingestion.py` | 1,070 | 100% | Processor-driven normalization with keyed metrics, TTL-managed monitoring, and clean shutdown handling.【F:src/ibkr_ingestion.py†L49-L920】 |
+|  | `ibkr_processor.py` | 215 | 100% | Depth aggregation, trade buffering, and quote synthesis extracted into reusable helpers.【F:src/ibkr_processor.py†L1-L247】 |
+|  | `av_ingestion.py` | 365 | 100% | Long-lived processors, circuit-breaker retries, and telemetry-rich metrics publishing in place.【F:src/av_ingestion.py†L33-L458】 |
+|  | `av_options.py` | 185 | 100% | Chain callbacks, monitoring metrics, and schema-documented payloads delivered.【F:src/av_options.py†L1-L223】 |
+|  | `av_sentiment.py` | 365 | 100% | Configurable ETF exclusions, sentiment quality metrics, and enriched technical metadata stored.【F:src/av_sentiment.py†L1-L365】 |
 | Analytics | `analytics_engine.py` | 344 | 90% | Orchestrator operational; relies on runtime imports of calculators (target for future decoupling).【F:src/analytics_engine.py†L185-L341】 |
 |  | `vpin_calculator.py` | 317 | 100% | VPIN logic migrated intact with async Redis use.【F:src/vpin_calculator.py†L31-L116】 |
 |  | `gex_dex_calculator.py` | 482 | 95% | Exposure calculations complete; uses Redis solely for inputs/outputs.【F:src/gex_dex_calculator.py†L29-L140】 |

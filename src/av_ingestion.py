@@ -155,6 +155,18 @@ class AlphaVantageIngestion:
         # TTLs from data_ingestion config
         self.ttls = config['modules']['data_ingestion']['store_ttls']
 
+        # Processors are instantiated once and reused across fetch cycles
+        from av_options import OptionsProcessor
+        from av_sentiment import SentimentProcessor
+
+        self.options_processor = OptionsProcessor(self.config, self.redis)
+        self.sentiment_processor = SentimentProcessor(self.config, self.redis)
+
+        # Optional downstream notification channel for new option chains
+        self.options_channel = self.av_config.get('options_pubsub_channel', 'events:options:chain')
+        if hasattr(self.options_processor, 'register_chain_callback'):
+            self.options_processor.register_chain_callback(self._on_new_options_chain)
+
         # Update intervals
         self.options_interval = self.av_config.get('options_update_interval', 10)
         self.sentiment_interval = self.av_config.get('sentiment_update_interval', 300)
@@ -175,6 +187,25 @@ class AlphaVantageIngestion:
             self.last_options_update[symbol] = now - self.options_interval + offset
             self.last_sentiment_update[symbol] = now - self.sentiment_interval + (offset * 5)
             self.last_technicals_update[symbol] = now - self.technicals_interval + (offset * 2)
+
+        self._last_update_map = {
+            'options': self.last_options_update,
+            'sentiment': self.last_sentiment_update,
+            'technicals': self.last_technicals_update,
+        }
+
+        # Failure tracking for circuit breaking
+        self.failure_threshold = self.av_config.get('failure_threshold', 3)
+        self.failure_backoff_seconds = self.av_config.get('failure_backoff_seconds', 120)
+        self.failure_backoff_max = self.av_config.get('failure_backoff_max', 900)
+        self.symbol_failures: Dict[str, Dict[str, Dict[str, Any]]] = {
+            symbol: {
+                'options': {'failures': 0, 'suspended_until': 0.0, 'last_error': '', 'last_notice': 0.0},
+                'sentiment': {'failures': 0, 'suspended_until': 0.0, 'last_error': '', 'last_notice': 0.0},
+                'technicals': {'failures': 0, 'suspended_until': 0.0, 'last_error': '', 'last_notice': 0.0},
+            }
+            for symbol in self.symbols
+        }
 
         self.running = False
         self.logger.info(f"AlphaVantageIngestion initialized for {len(self.symbols)} symbols")
@@ -224,26 +255,21 @@ class AlphaVantageIngestion:
                         sentiment_jitter = random.uniform(-0.25, 0.25) * self.sentiment_interval
                         technicals_jitter = random.uniform(-0.25, 0.25) * self.technicals_interval
 
-                        # Check if options need update (with jitter)
-                        if current_time - self.last_options_update.get(symbol, 0) >= (self.options_interval + options_jitter):
-                            tasks.append(self._fetch_with_retry(
-                                self.fetch_options_chain, session, symbol
-                            ))
-                            self.last_options_update[symbol] = current_time
+                        update_plan = [
+                            ('options', self.options_interval + options_jitter, self.fetch_options_chain),
+                            ('sentiment', self.sentiment_interval + sentiment_jitter, self.fetch_sentiment),
+                            ('technicals', self.technicals_interval + technicals_jitter, self.fetch_technicals),
+                        ]
 
-                        # Check if sentiment needs update (with jitter)
-                        if current_time - self.last_sentiment_update.get(symbol, 0) >= (self.sentiment_interval + sentiment_jitter):
-                            tasks.append(self._fetch_with_retry(
-                                self.fetch_sentiment, session, symbol
-                            ))
-                            self.last_sentiment_update[symbol] = current_time
+                        for data_type, target_interval, fetcher in update_plan:
+                            last_update = self._last_update_map[data_type].get(symbol, 0)
+                            if current_time - last_update >= target_interval:
+                                if self._is_suspended(symbol, data_type, current_time):
+                                    self._mark_attempt(symbol, data_type, current_time)
+                                    continue
 
-                        # Check if technicals need update (with jitter)
-                        if current_time - self.last_technicals_update.get(symbol, 0) >= (self.technicals_interval + technicals_jitter):
-                            tasks.append(self._fetch_with_retry(
-                                self.fetch_technicals, session, symbol
-                            ))
-                            self.last_technicals_update[symbol] = current_time
+                                tasks.append(self._run_fetch(data_type, symbol, session, fetcher))
+                                self._mark_attempt(symbol, data_type, current_time)
 
                     if tasks:
                         self.logger.info(f"Fetching {len(tasks)} updates from Alpha Vantage...")
@@ -252,7 +278,7 @@ class AlphaVantageIngestion:
                         # Log errors
                         for result in results:
                             if isinstance(result, Exception):
-                                self.logger.error(f"Fetch error: {result}")
+                                self.logger.debug(f"Fetch error result: {result}")
 
                     await asyncio.sleep(1)
 
@@ -260,7 +286,7 @@ class AlphaVantageIngestion:
                     self.logger.error(f"Update loop error: {e}")
                     await asyncio.sleep(1)
 
-    async def _fetch_with_retry(self, func, *args, **kwargs):
+    async def _fetch_with_retry(self, func, *args, context: Optional[Dict[str, Any]] = None, **kwargs):
         """Retry wrapper with exponential backoff and jitter for robust network handling."""
         last_error = None
 
@@ -272,14 +298,14 @@ class AlphaVantageIngestion:
                 last_error = e
                 if e.status == 429:
                     wait_time = 60
-                    self.logger.warning(f"Rate limited (429), waiting {wait_time}s")
+                    self.logger.warning(f"{self._context_label(context)}Rate limited (429), waiting {wait_time}s")
                     await asyncio.sleep(wait_time)
                 elif attempt < self.retry_attempts - 1:
                     delay = self.retry_delay_base ** (attempt + 1)
                     # Add ±20% jitter
                     jitter = delay * 0.2 * (2 * random.random() - 1)
                     actual_delay = max(0.1, delay + jitter)
-                    self.logger.debug(f"HTTP {e.status}, retry in {actual_delay:.1f}s")
+                    self.logger.debug(f"{self._context_label(context)}HTTP {e.status}, retry in {actual_delay:.1f}s")
                     await asyncio.sleep(actual_delay)
 
             except asyncio.TimeoutError as e:
@@ -288,7 +314,7 @@ class AlphaVantageIngestion:
                     delay = self.retry_delay_base ** (attempt + 1)
                     jitter = delay * 0.2 * (2 * random.random() - 1)
                     actual_delay = max(0.1, delay + jitter)
-                    self.logger.debug(f"Timeout, retry in {actual_delay:.1f}s")
+                    self.logger.debug(f"{self._context_label(context)}Timeout, retry in {actual_delay:.1f}s")
                     await asyncio.sleep(actual_delay)
 
             except (aiohttp.ClientError, aiohttp.ClientConnectionError,
@@ -299,7 +325,10 @@ class AlphaVantageIngestion:
                     delay = self.retry_delay_base ** (attempt + 1)
                     jitter = delay * 0.2 * (2 * random.random() - 1)
                     actual_delay = max(0.1, delay + jitter)
-                    self.logger.warning(f"Network error ({type(e).__name__}), retry {attempt+1}/{self.retry_attempts} in {actual_delay:.1f}s")
+                    self.logger.warning(
+                        f"{self._context_label(context)}Network error ({type(e).__name__}), "
+                        f"retry {attempt+1}/{self.retry_attempts} in {actual_delay:.1f}s"
+                    )
                     await asyncio.sleep(actual_delay)
 
             except Exception as e:
@@ -308,44 +337,153 @@ class AlphaVantageIngestion:
                     delay = self.retry_delay_base ** (attempt + 1)
                     jitter = delay * 0.2 * (2 * random.random() - 1)
                     actual_delay = max(0.1, delay + jitter)
-                    self.logger.warning(f"Unexpected error ({type(e).__name__}), retry in {actual_delay:.1f}s")
+                    self.logger.warning(
+                        f"{self._context_label(context)}Unexpected error ({type(e).__name__}), "
+                        f"retry in {actual_delay:.1f}s"
+                    )
                     await asyncio.sleep(actual_delay)
 
         raise last_error or Exception(f"All {self.retry_attempts} retry attempts failed")
 
+    def _context_label(self, context: Optional[Dict[str, Any]]) -> str:
+        if not context:
+            return ''
+        symbol = context.get('symbol')
+        data_type = context.get('type')
+        label_parts = []
+        if data_type:
+            label_parts.append(str(data_type))
+        if symbol:
+            label_parts.append(str(symbol))
+        if not label_parts:
+            return ''
+        return f"[{'/'.join(label_parts)}] "
+
+    def _mark_attempt(self, symbol: str, data_type: str, current_time: float) -> None:
+        self._last_update_map[data_type][symbol] = current_time
+
+    def _reset_failure(self, symbol: str, data_type: str) -> None:
+        state = self.symbol_failures[symbol][data_type]
+        if state['failures'] or state['suspended_until']:
+            state.update({'failures': 0, 'suspended_until': 0.0, 'last_error': '', 'last_notice': 0.0})
+
+    def _record_failure(self, symbol: str, data_type: str, error: Exception) -> None:
+        state = self.symbol_failures[symbol][data_type]
+        state['failures'] += 1
+        state['last_error'] = str(error)
+        now = time.time()
+        if state['failures'] >= self.failure_threshold:
+            exponent = max(0, state['failures'] - self.failure_threshold)
+            backoff = min(self.failure_backoff_seconds * (2 ** exponent), self.failure_backoff_max)
+            state['suspended_until'] = now + backoff
+            state['last_notice'] = now
+            self.logger.warning(
+                "Circuit breaking %s fetch for %s after %s failures; pausing %.0fs (%s)",
+                data_type,
+                symbol,
+                state['failures'],
+                backoff,
+                error,
+            )
+        else:
+            self.logger.debug("Failure %s for %s/%s: %s", state['failures'], data_type, symbol, error)
+
+    def _is_suspended(self, symbol: str, data_type: str, current_time: float) -> bool:
+        state = self.symbol_failures[symbol][data_type]
+        if current_time < state['suspended_until']:
+            if current_time - state['last_notice'] > 30:
+                remaining = state['suspended_until'] - current_time
+                self.logger.debug(
+                    "Skipping %s for %s; suspended %.0fs remaining", data_type, symbol, remaining
+                )
+                state['last_notice'] = current_time
+            return True
+        return False
+
+    async def _run_fetch(self, data_type: str, symbol: str, session: aiohttp.ClientSession, fetcher) -> Any:
+        context = {'type': data_type, 'symbol': symbol}
+        try:
+            result = await self._fetch_with_retry(fetcher, session, symbol, context=context)
+        except Exception as exc:
+            self._record_failure(symbol, data_type, exc)
+            return exc
+        else:
+            self._reset_failure(symbol, data_type)
+            return result
+
     async def fetch_options_chain(self, session: aiohttp.ClientSession, symbol: str):
         """Fetch options chain with semaphore rate limiting."""
-        # Delegated to av_options.py
-        from av_options import OptionsProcessor
-        processor = OptionsProcessor(self.config, self.redis)
-        return await processor.fetch_options_chain(session, symbol, self.rate_limiter, self.base_url, self.api_key, self.ttls)
+        return await self.options_processor.fetch_options_chain(
+            session, symbol, self.rate_limiter, self.base_url, self.api_key, self.ttls
+        )
 
     async def fetch_sentiment(self, session: aiohttp.ClientSession, symbol: str):
         """Fetch sentiment data."""
-        # Delegated to av_sentiment.py
-        from av_sentiment import SentimentProcessor
-        processor = SentimentProcessor(self.config, self.redis)
-        return await processor.fetch_sentiment(session, symbol, self.rate_limiter, self.base_url, self.api_key, self.ttls)
+        return await self.sentiment_processor.fetch_sentiment(
+            session, symbol, self.rate_limiter, self.base_url, self.api_key, self.ttls
+        )
 
     async def fetch_technicals(self, session: aiohttp.ClientSession, symbol: str):
         """Fetch all technical indicators: RSI, MACD, BBANDS, ATR."""
-        # Delegated to av_sentiment.py for now (should be av_technicals.py but keeping original structure)
-        from av_sentiment import SentimentProcessor
-        processor = SentimentProcessor(self.config, self.redis)
-        return await processor.fetch_technicals(session, symbol, self.rate_limiter, self.base_url, self.api_key, self.ttls)
+        return await self.sentiment_processor.fetch_technicals(
+            session, symbol, self.rate_limiter, self.base_url, self.api_key, self.ttls
+        )
+
+    async def _on_new_options_chain(self, symbol: str, payload: Dict[str, Any]) -> None:
+        """Publish lightweight notifications when a fresh chain arrives."""
+        try:
+            message = {
+                'symbol': symbol,
+                'as_of': payload.get('as_of'),
+                'contracts': payload.get('contract_count'),
+                'source': payload.get('source', 'alpha_vantage'),
+            }
+            await self.redis.publish(self.options_channel, json.dumps(message))
+        except Exception as exc:
+            self.logger.debug("Failed to publish options chain for %s: %s", symbol, exc)
 
     async def _metrics_loop(self):
         """Publish metrics to Redis."""
         while self.running:
             try:
-                # Update heartbeat
+                limiter_stats = self.rate_limiter.get_stats()
+                now = time.time()
+                suspended = []
+                total_failures = 0
+
+                for symbol, states in self.symbol_failures.items():
+                    for data_type, state in states.items():
+                        total_failures += state['failures']
+                        if now < state['suspended_until']:
+                            suspended.append(f"{symbol}:{data_type}")
+
+                metrics = {
+                    'symbols': len(self.symbols),
+                    'rate_capacity': limiter_stats.get('capacity', 0),
+                    'rate_tokens': round(limiter_stats.get('current_tokens', 0.0), 2),
+                    'rate_total_requests': limiter_stats.get('total_requests', 0),
+                    'rate_avg_wait_ms': round(limiter_stats.get('avg_wait_time', 0.0) * 1000, 2),
+                    'rate_max_wait_ms': round(limiter_stats.get('max_wait_time', 0.0) * 1000, 2),
+                    'failures_total': total_failures,
+                    'suspended_feeds': len(suspended),
+                }
+
+                if suspended:
+                    metrics['suspended_list'] = ','.join(sorted(suspended))
+
                 heartbeat = {
                     'ts': int(datetime.now().timestamp() * 1000),
                     'symbols': len(self.symbols)
                 }
 
                 ttl = self.ttls.get('heartbeat', 15)
-                await self.redis.setex(Keys.heartbeat('alpha_vantage'), ttl, json.dumps(heartbeat))
+                metrics_key = 'monitoring:alpha_vantage:metrics'
+
+                async with self.redis.pipeline(transaction=False) as pipe:
+                    await pipe.hset(metrics_key, mapping={k: str(v) for k, v in metrics.items()})
+                    await pipe.expire(metrics_key, self.ttls.get('metrics', 60))
+                    await pipe.setex(Keys.heartbeat('alpha_vantage'), ttl, json.dumps(heartbeat))
+                    await pipe.execute()
 
                 await asyncio.sleep(10)
 

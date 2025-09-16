@@ -12,10 +12,11 @@ Redis keys used:
 
 import asyncio
 import json
+import math
 import redis.asyncio as aioredis
 import aiohttp
-from typing import Dict, Any
-from datetime import datetime
+from typing import Any, Dict, Callable, List
+from datetime import datetime, timezone
 import logging
 from redis_keys import Keys
 
@@ -30,6 +31,72 @@ class OptionsProcessor:
         self.config = config
         self.redis = redis_conn
         self.logger = logging.getLogger(__name__)
+        self._chain_callbacks: List[Callable[[str, Dict[str, Any]], Any]] = []
+
+    @staticmethod
+    def _to_float(value):
+        """Convert Alpha Vantage numeric fields to float."""
+        if value in (None, "", "null"):
+            return None
+        try:
+            number = float(value)
+            if math.isnan(number) or math.isinf(number):
+                return None
+            return number
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _to_int(value):
+        """Convert Alpha Vantage numeric fields to int."""
+        if value in (None, "", "null"):
+            return None
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
+
+    def _normalize_contract(self, contract: Dict[str, Any], symbol: str, timestamp_ms: int) -> Dict[str, Any]:
+        """Normalize a single contract while preserving all key data."""
+        contract_id = contract.get('contractID')
+        normalized = {
+            'contract_id': contract_id,
+            'occ_symbol': contract_id,
+            'symbol': contract.get('symbol', symbol),
+            'expiration': contract.get('expiration') or contract.get('date'),
+            'strike': self._to_float(contract.get('strike')),
+            'type': contract.get('type'),
+            'last': self._to_float(contract.get('last')),
+            'last_price': self._to_float(contract.get('last')),
+            'mark': self._to_float(contract.get('mark')),
+            'bid': self._to_float(contract.get('bid')),
+            'ask': self._to_float(contract.get('ask')),
+            'bid_size': self._to_int(contract.get('bid_size')),
+            'ask_size': self._to_int(contract.get('ask_size')),
+            'volume': self._to_int(contract.get('volume')),
+            'open_interest': self._to_int(contract.get('open_interest')),
+            'implied_volatility': self._to_float(contract.get('implied_volatility')),
+            'delta': self._to_float(contract.get('delta')),
+            'gamma': self._to_float(contract.get('gamma')),
+            'theta': self._to_float(contract.get('theta')),
+            'vega': self._to_float(contract.get('vega')),
+            'rho': self._to_float(contract.get('rho')),
+            'quote_ts': timestamp_ms,
+        }
+
+        # Carry through any remaining fields without modification for future consumers.
+        extras = {}
+        for key, value in contract.items():
+            if key not in normalized:
+                extras[key] = value
+        if extras:
+            normalized['extras'] = extras
+
+        return normalized
+
+    def register_chain_callback(self, callback: Callable[[str, Dict[str, Any]], Any]) -> None:
+        """Allow external modules to react to new option chains."""
+        self._chain_callbacks.append(callback)
 
     async def fetch_options_chain(self, session: aiohttp.ClientSession, symbol: str,
                                    rate_limiter, base_url: str, api_key: str, ttls: Dict):
@@ -87,6 +154,15 @@ class OptionsProcessor:
                 self.logger.error(f"HTTP {e.status} for {symbol}: {e}")
             return None
 
+    async def _notify_chain(self, symbol: str, payload: Dict[str, Any]) -> None:
+        for callback in self._chain_callbacks:
+            try:
+                result = callback(symbol, payload)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as exc:
+                self.logger.debug("Options chain callback error for %s: %s", symbol, exc)
+
     async def _store_options_data(self, symbol: str, data: Dict, ttls: Dict):
         """Store options chain data to Redis."""
         try:
@@ -96,6 +172,9 @@ class OptionsProcessor:
             # Separate calls and puts - AV uses 'type' not 'option_type'
             calls = [c for c in contracts if c.get('type') == 'call']
             puts = [c for c in contracts if c.get('type') == 'put']
+
+            skipped_contracts = 0
+            missing_greeks = 0
 
             # Store to Redis
             async with self.redis.pipeline(transaction=False) as pipe:
@@ -113,31 +192,101 @@ class OptionsProcessor:
                         json.dumps(puts)
                     )
 
-                # Store Greeks separately - AV has inline greeks, not nested
+                # Build normalized chain payload alongside raw response
+                timestamp_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+                by_contract = {}
+                expirations = {}
+
                 for contract in contracts:
-                    # Extract greeks from contract (they're inline in AV response)
+                    contract_id = contract.get('contractID')
+                    if not contract_id:
+                        skipped_contracts += 1
+                        continue
+
+                    normalized = self._normalize_contract(contract, symbol, timestamp_ms)
+                    by_contract[contract_id] = normalized
+
+                    expiration = normalized.get('expiration')
+                    option_type = (normalized.get('type') or '').lower()
+                    if expiration:
+                        summary = expirations.setdefault(expiration, {'calls': 0, 'puts': 0, 'strikes': set()})
+                        if normalized.get('strike') is not None:
+                            summary['strikes'].add(normalized['strike'])
+                        if option_type == 'call':
+                            summary['calls'] += 1
+                        elif option_type == 'put':
+                            summary['puts'] += 1
+
+                    # Store individual contract greeks for backward compatibility
                     greeks = {
-                        'delta': contract.get('delta'),
-                        'gamma': contract.get('gamma'),
-                        'theta': contract.get('theta'),
-                        'vega': contract.get('vega'),
-                        'rho': contract.get('rho'),
-                        'implied_volatility': contract.get('implied_volatility'),
-                        'open_interest': contract.get('open_interest')
+                        'delta': normalized.get('delta'),
+                        'gamma': normalized.get('gamma'),
+                        'theta': normalized.get('theta'),
+                        'vega': normalized.get('vega'),
+                        'rho': normalized.get('rho'),
+                        'implied_volatility': normalized.get('implied_volatility'),
+                        'open_interest': normalized.get('open_interest')
                     }
 
-                    # AV uses 'contractID' not 'contract_id'
-                    contract_id = contract.get('contractID')
-                    if contract_id and any(greeks.values()):
-                        # Store individual contract greeks (legacy format)
-                        key = f"options:{symbol}:{contract_id}:greeks"  # TODO: Migrate to normalized greeks hash
+                    greek_values = [greeks['delta'], greeks['gamma'], greeks['theta'], greeks['vega'], greeks['rho']]
+                    if not any(value is not None for value in greek_values):
+                        missing_greeks += 1
+
+                    if any(value is not None for value in greeks.values()):
+                        key = f"options:{symbol}:{contract_id}:greeks"
                         await pipe.setex(
                             key,
                             ttls['greeks'],
                             json.dumps(greeks)
                         )
 
+                expiration_summary = []
+                for expiration, summary in expirations.items():
+                    expiration_summary.append({
+                        'expiration': expiration,
+                        'calls': summary['calls'],
+                        'puts': summary['puts'],
+                        'strikes': sorted(summary['strikes'])
+                    })
+                expiration_summary.sort(key=lambda item: item['expiration'])
+
+                chain_payload = {
+                    'symbol': symbol,
+                    'source': 'alpha_vantage',
+                    'as_of': timestamp_ms,
+                    'contract_count': len(by_contract),
+                    'schema_version': 1,
+                    'expiration_summary': expiration_summary,
+                    'raw': data,
+                    'by_contract': by_contract,
+                    'metrics': {
+                        'skipped_contracts': skipped_contracts,
+                        'missing_greeks': missing_greeks,
+                    }
+                }
+
+                await pipe.setex(
+                    Keys.options_chain(symbol),
+                    ttls['options_chain'],
+                    json.dumps(chain_payload)
+                )
+
                 await pipe.execute()
+
+                monitoring_payload = {
+                    'symbol': symbol,
+                    'as_of': timestamp_ms,
+                    'contracts': len(by_contract),
+                    'skipped_contracts': skipped_contracts,
+                    'missing_greeks': missing_greeks,
+                }
+                await self.redis.setex(
+                    f'monitoring:options:{symbol}',
+                    ttls.get('monitoring', 60),
+                    json.dumps(monitoring_payload)
+                )
+
+                await self._notify_chain(symbol, chain_payload)
 
                 # Log success with sample contract details
                 log_msg = f"Stored options for {symbol}: calls={len(calls)}, puts={len(puts)}"

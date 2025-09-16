@@ -9,10 +9,10 @@ The original monolith has been reorganized into 29 focused modules grouped by re
 | Module | Lines | Primary Classes | Responsibilities | Redis Touchpoints |
 | --- | --- | --- | --- | --- |
 | `ibkr_ingestion.py` | 1,070 | `IBKRIngestion` | Maintains IBKR Level 2, trade tape, and 1-minute bars for configured symbols.【F:src/ibkr_ingestion.py†L49-L748】 | `market:{symbol}:book`, `market:{symbol}:trades`, `market:{symbol}:bars`, `heartbeat:ibkr_ingestion`【F:src/ibkr_ingestion.py†L2-L63】 |
-| `ibkr_processor.py` | 35 | `IBKRDataProcessor` | Placeholder for future offloading of ingestion-side transformations; currently logs initialization only.【F:src/ibkr_processor.py†L2-L33】 | _None yet_ |
-| `av_ingestion.py` | 365 | `RollingRateLimiter`, `AlphaVantageIngestion` | Manages Alpha Vantage REST calls with token-bucket rate limiting and orchestrates downstream processors.【F:src/av_ingestion.py†L29-L364】 | `options:{symbol}:*`, `sentiment:{symbol}`, `technicals:{symbol}:{indicator}`, `heartbeat:alpha_vantage`【F:src/av_ingestion.py†L2-L13】 |
-| `av_options.py` | 185 | `OptionsProcessor` | Normalizes option chains, Greeks, and exposures from Alpha Vantage responses.【F:src/av_options.py†L25-L182】 | `options:{symbol}:calls`, `options:{symbol}:puts`, `options:{symbol}:{contractID}:greeks`【F:src/av_options.py†L2-L13】 |
-| `av_sentiment.py` | 365 | `SentimentProcessor` | Aggregates Alpha Vantage news sentiment and technical indicators for Redis consumers.【F:src/av_sentiment.py†L25-L363】 | `sentiment:{symbol}`, `technicals:{symbol}:{indicator}`【F:src/av_sentiment.py†L2-L12】 |
+| `ibkr_processor.py` | 303 | `IBKRDataProcessor` | Normalizes depth, trade, and quote events; caches aggregated top-of-book payloads; and keeps reusable buffers for ingestion loops and tests.【F:src/ibkr_processor.py†L31-L219】 | _Helper for ingestion (no direct Redis writes)_ |
+| `av_ingestion.py` | 502 | `RollingRateLimiter`, `AlphaVantageIngestion` | Coordinates long-lived options and sentiment processors behind a rolling-window limiter, applies per-feed circuit breakers, and publishes telemetry for downstream consumers.【F:src/av_ingestion.py†L45-L493】 | `monitoring:alpha_vantage:metrics`, `heartbeat:alpha_vantage`【F:src/av_ingestion.py†L447-L493】 |
+| `av_options.py` | 334 | `OptionsProcessor` | Emits normalized chains with per-contract metadata, fires registered callbacks, and records monitoring payloads alongside raw responses.【F:src/av_options.py†L29-L322】 | `options:{symbol}:calls`, `options:{symbol}:puts`, `options:{symbol}:chain`, `options:{symbol}:{contractID}:greeks`, `monitoring:options:{symbol}`【F:src/av_options.py†L214-L309】 |
+| `av_sentiment.py` | 429 | `SentimentProcessor` | Streams news sentiment with configurable ETF exclusions, parallel technical fetches, and enriched monitoring metadata for dashboards.【F:src/av_sentiment.py†L25-L335】 | `sentiment:{symbol}`, `technicals:{symbol}:{indicator}`, `monitoring:sentiment:{symbol}`【F:src/av_sentiment.py†L74-L339】 |
 
 ### Analytics
 | Module | Lines | Primary Classes | Responsibilities | Redis Touchpoints |
@@ -116,6 +116,20 @@ Because IBKR does not expose market-maker identities, toxicity detection blends 
 3. **Credentials** – Provide environment variables such as `ALPHA_VANTAGE_API_KEY` before launching; `main.py` loads `.env` and substitutes `${VAR}` placeholders automatically.【F:config/config.yaml†L41-L50】【F:src/main.py†L43-L82】
 4. **Run the orchestrator** – Execute `python main.py` to initialize modules based on configuration flags. Modules marked disabled in `config/config.yaml` will be skipped until ready.【F:config/config.yaml†L58-L160】【F:src/main.py†L97-L192】
 
+## Market Data Enhancements
+- **IBKR normalization & freshness telemetry** – `IBKRIngestion` now routes every depth, trade, and quote update through `IBKRDataProcessor`, which caches DOM snapshots, aggregated top-of-book payloads, and trade buffers for reuse in downstream writers and tests. Staleness and metrics loops surface gaps via Redis so operators can alert before analytics drift.【F:src/ibkr_processor.py†L53-L219】【F:src/ibkr_ingestion.py†L68-L210】【F:src/ibkr_ingestion.py†L560-L748】
+- **Alpha Vantage resilience** – The ingestion loop reuses long-lived option and sentiment processors, wraps fetches in jittered exponential retries, and applies per-symbol/per-feed circuit breakers that back off noisy endpoints while continuing healthy ones. Rolling-window rate limiter stats are exposed for real-time capacity tracking.【F:src/av_ingestion.py†L76-L493】
+- **Option-chain instrumentation** – `OptionsProcessor` emits normalized payloads with expiration summaries, per-contract metadata, and monitoring counters before fanning out optional callbacks over the configurable pub/sub channel (default `events:options:chain`).【F:src/av_options.py†L64-L321】【F:config/config.yaml†L41-L92】
+- **Sentiment & technical metadata** – `SentimentProcessor` respects configurable ETF skip lists, fetches RSI/MACD/BBANDS/ATR in parallel, and stores rich monitoring payloads that capture freshness, article mix, and technical readings for dashboards.【F:src/av_sentiment.py†L29-L339】
+
+## Telemetry & Monitoring
+- `monitoring:ibkr:metrics` – Aggregated IBKR update counts, reconnect attempts, and stale symbol flags refreshed every 10 seconds in lockstep with the ingestion heartbeat.【F:src/ibkr_ingestion.py†L718-L766】
+- `monitoring:data:stale` – Symbol→age hash populated when market data exceeds freshness thresholds, cleared outside market hours or once feeds recover.【F:src/ibkr_ingestion.py†L588-L645】
+- `monitoring:alpha_vantage:metrics` – RollingRateLimiter token levels, average wait times, and circuit-breaker suspensions exported for Alpha Vantage fetch loops.【F:src/av_ingestion.py†L440-L493】
+- `monitoring:options:{symbol}` – Contract counts, skipped contracts, and missing Greeks for each chain alongside the canonical `options:{symbol}:chain` document.【F:src/av_options.py†L253-L287】
+- `monitoring:sentiment:{symbol}` – Sentiment averages, article age, and source counts mirroring the stored news feed to simplify health dashboards.【F:src/av_sentiment.py†L312-L339】
+- `events:options:chain` – Optional pub/sub broadcast for consumers that want to react immediately to refreshed chains; override `alpha_vantage.options_pubsub_channel` to use an alternate topic.【F:src/av_ingestion.py†L125-L210】【F:config/config.yaml†L41-L97】
+
 ## Development Workflow
 - **Redis schema** – Use the helpers in `redis_keys.py` when adding new keys to guarantee consistency and TTL discipline.【F:src/redis_keys.py†L143-L205】
 - **Modular testing** – Each major service exposes async `start()` and `stop()` methods (or synchronous equivalents) to support targeted integration tests and rehearsal in isolation.【F:src/analytics_engine.py†L228-L341】【F:src/signal_generator.py†L121-L199】
@@ -123,7 +137,7 @@ Because IBKR does not expose market-maker identities, toxicity detection blends 
 - **Optional services** – Social, dashboard, and morning-analysis modules contain extensive TODO markers describing pending work; treat them as blueprints until the required APIs and dependencies are provisioned.【F:src/twitter_bot.py†L35-L133】【F:src/dashboard_server.py†L83-L223】【F:src/morning_scanner.py†L85-L206】
 
 ## Testing & Validation
-Automated tests live under `tests/` and currently exercise the legacy aggregate modules. As the refactor proceeds, update these suites to import the modular classes directly to ensure coverage aligns with the new structure.【F:tests/test_day6.py†L21-L39】【F:tests/test_day8.py†L18-L30】 Redis-based smoke tests such as `tests/verify_signals.py` remain valuable for validating live data flows.【F:tests/verify_signals.py†L1-L60】 Use `pytest` with `pytest-asyncio` for async modules.【F:requirements.txt†L22-L28】
+Targeted regression tests now accompany the market-data helpers. `tests/test_ibkr_processor.py` exercises depth normalization, aggregated top-of-book generation, and trade/ticker payload shaping; run it with `pytest tests/test_ibkr_processor.py` after altering ingestion code to guarantee deterministic math.【F:tests/test_ibkr_processor.py†L1-L68】 Legacy integration suites (`tests/test_day6.py`, `tests/test_day8.py`) remain in place while the refactor migrates coverage to the new module boundaries, and Redis-based smoke tests such as `tests/verify_signals.py` still validate end-to-end data flows.【F:tests/test_day6.py†L21-L39】【F:tests/test_day8.py†L18-L30】【F:tests/verify_signals.py†L1-L60】 Use `pytest` with `pytest-asyncio` for async modules.【F:requirements.txt†L22-L28】
 
 ## Roadmap Snapshot
 Implementation priorities are tracked in `implementation_plan.md`, including module completion percentages, outstanding TODO counts, and integration milestones across execution, social, and dashboard pillars.【F:implementation_plan.md†L1-L40】 Refer to that document before beginning new work to understand dependencies and sequencing.

@@ -9,7 +9,8 @@ MARKET_KEYS = {
     'ticker': 'market:{symbol}:ticker',      # Latest ticker/quote
     'trades': 'market:{symbol}:trades',      # Recent trades list
     'bars': 'market:{symbol}:bars',          # OHLCV bars
-    'dom': 'market:{symbol}:dom',           # Depth of market
+    'dom': 'market:{symbol}:dom',            # Depth of market snapshot
+    'last': 'market:{symbol}:last',          # Cached last trade price
 }
 
 # Options Data Keys  
@@ -194,7 +195,12 @@ class Keys:
     def market_ticker(symbol: str) -> str:
         """Get market ticker key."""
         return f'market:{symbol}:ticker'
-    
+
+    @staticmethod
+    def market_last(symbol: str) -> str:
+        """Get last traded price key."""
+        return f'market:{symbol}:last'
+
     @staticmethod
     def market_trades(symbol: str) -> str:
         """Get market trades key."""
