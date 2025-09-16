@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -10,7 +11,8 @@ SRC_PATH = ROOT / 'src'
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
-from signal_generator import SignalGenerator
+import redis_keys as rkeys
+from signal_generator import SignalGenerator, default_feature_reader
 from dte_strategies import DTEStrategies
 from moc_strategy import MOCStrategy
 from signal_distributor import SignalValidator
@@ -75,7 +77,9 @@ class AsyncPipeline:
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
-        await self.execute()
+        # aioredis pipelines do not auto-execute; keep compatibility with
+        # callers that explicitly await execute().
+        return False
 
     def hincrbyfloat(self, key, field, amount):
         self.commands.append(self.redis.hincrbyfloat(key, field, amount))
@@ -92,8 +96,18 @@ class AsyncPipeline:
     def expire(self, key, ttl):
         self.commands.append(self.redis.expire(key, ttl))
 
+    def get(self, key):
+        self.commands.append(self.redis.get(key))
+        return self
+
+    def lrange(self, key, start, end):
+        self.commands.append(self.redis.lrange(key, start, end))
+        return self
+
     def execute(self):
-        return asyncio.gather(*self.commands)
+        result = asyncio.gather(*self.commands)
+        self.commands = []
+        return result
 
 
 @pytest.mark.asyncio
@@ -145,3 +159,22 @@ async def test_signal_validator_confidence_scaling():
     invalid = validator.validate_signal({'confidence': 40, 'strategy': '0dte'})
     assert valid is True
     assert invalid is False
+
+
+@pytest.mark.asyncio
+async def test_default_feature_reader_uses_vpin_and_obi_fields():
+    redis = DummyRedis()
+    symbol = 'SPY'
+    redis.store[rkeys.analytics_vpin_key(symbol)] = json.dumps({'value': 0.9794})
+    redis.store[rkeys.analytics_obi_key(symbol)] = json.dumps(
+        {
+            'level1_imbalance': 0.6364,
+            'level5_imbalance': 0.6433,
+            'pressure_ratio': 1.93,
+        }
+    )
+
+    features = await default_feature_reader(redis, symbol)
+
+    assert features['vpin'] == pytest.approx(0.9794)
+    assert features['obi'] == pytest.approx(0.6364)
