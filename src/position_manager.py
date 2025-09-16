@@ -263,9 +263,26 @@ class PositionManager:
                 if chain_data:
                     chain = json.loads(chain_data)
                     occ_symbol = contract_info.get('occ_symbol')
-                    if occ_symbol and occ_symbol in chain:
-                        option_data = chain[occ_symbol]
-                        return option_data.get('last_price', option_data.get('mark', 0))
+                    option_data = None
+
+                    if isinstance(chain, dict):
+                        by_contract = chain.get('by_contract') if 'by_contract' in chain else None
+                        if occ_symbol and isinstance(by_contract, dict):
+                            option_data = by_contract.get(occ_symbol)
+                        elif occ_symbol:
+                            option_data = chain.get(occ_symbol)
+
+                    if option_data:
+                        # Prefer mark, then last, then derived mid
+                        mark_price = option_data.get('mark') or option_data.get('last_price')
+                        if mark_price is not None:
+                            return mark_price
+                        if option_data.get('last') is not None:
+                            return option_data.get('last')
+                        bid = option_data.get('bid')
+                        ask = option_data.get('ask')
+                        if bid is not None and ask is not None:
+                            return (bid + ask) / 2
 
             return None
 
@@ -328,18 +345,27 @@ class PositionManager:
 
             if chain_data:
                 chain = json.loads(chain_data)
-                if occ_symbol in chain:
-                    option_data = chain[occ_symbol]
+                option_data = None
 
-                    # Extract Greeks from Alpha Vantage data
+                by_contract = chain.get('by_contract') if isinstance(chain, dict) else None
+                if occ_symbol and isinstance(by_contract, dict):
+                    option_data = by_contract.get(occ_symbol)
+                elif occ_symbol and isinstance(chain, dict):
+                    option_data = chain.get(occ_symbol)
+
+                if option_data:
                     quantity = position.get('quantity', 0)
+
+                    def scaled(value):
+                        return value * quantity * 100 if value is not None else 0
+
                     greeks = {
-                        'delta': option_data.get('delta', 0) * quantity * 100,  # Position delta
-                        'gamma': option_data.get('gamma', 0) * quantity * 100,  # Position gamma
-                        'theta': option_data.get('theta', 0) * quantity * 100,  # Daily theta
-                        'vega': option_data.get('vega', 0) * quantity * 100,    # Vega per 1% IV
-                        'rho': option_data.get('rho', 0) * quantity * 100,      # Rho
-                        'iv': option_data.get('implied_volatility', 0)          # IV
+                        'delta': scaled(option_data.get('delta')),
+                        'gamma': scaled(option_data.get('gamma')),
+                        'theta': scaled(option_data.get('theta')),
+                        'vega': scaled(option_data.get('vega')),
+                        'rho': scaled(option_data.get('rho')),
+                        'iv': option_data.get('implied_volatility', 0)
                     }
 
                     # Store position Greeks

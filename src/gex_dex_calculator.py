@@ -15,9 +15,11 @@ import json
 import re
 import redis.asyncio as aioredis
 import time
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Any, Tuple, Optional, Iterable
 import logging
 import traceback
+
+from redis_keys import Keys
 
 # OCC option symbol regex pattern: UNDERLYING(1-6) + YYMMDD(6) + C/P + STRIKE(8)
 _OCC_RE = re.compile(r'^(?P<root>[A-Z]{1,6})(?P<date>\d{6})(?P<cp>[CP])(?P<strike>\d{8})$')
@@ -100,34 +102,48 @@ class GEXDEXCalculator:
             if spot is None or spot <= 0:
                 return {'error': 'Invalid spot price'}
 
-            # 2. Get all option Greeks keys for this symbol
-            # Note: Alpha Vantage stores options differently than expected
-            # We need to check for the actual format used
-            greek_keys = []
-
-            # Use direct KEYS command - SCAN is broken with aioredis
-            pattern = f'options:{symbol}:*:greeks'
+            # 2. Load option contracts either from normalized chain or legacy greeks keys
+            contracts_iter: Iterable[Dict[str, Any]] = []
+            using_normalized_chain = False
 
             try:
-                # Direct KEYS command - simple and works
-                greek_keys = await self.redis.keys(pattern)
+                chain_json = await self.redis.get(Keys.options_chain(symbol))
+            except Exception:
+                chain_json = None
+
+            if chain_json:
+                try:
+                    chain_payload = json.loads(chain_json)
+                    by_contract = chain_payload.get('by_contract') or {}
+                    if isinstance(by_contract, dict) and by_contract:
+                        contracts_iter = by_contract.values()
+                        using_normalized_chain = True
+                except Exception as exc:
+                    self.logger.error(f"Failed to parse normalized chain for {symbol}: {exc}")
+                    contracts_iter = []
+
+            greek_keys = []
+            if not contracts_iter:
+                pattern = f'options:{symbol}:*:greeks'
+
+                try:
+                    greek_keys = await self.redis.keys(pattern)
+
+                    if not greek_keys:
+                        for alt_pattern in [f'options:{symbol}:greeks:*', f'greeks:{symbol}:*']:
+                            greek_keys = await self.redis.keys(alt_pattern)
+                            if greek_keys:
+                                break
+
+                    self.logger.debug(f"Found {len(greek_keys)} option contracts for {symbol}")
+
+                except Exception as e:
+                    self.logger.error(f"Failed to get option keys for {symbol}: {e}")
+                    return {'error': f'Failed to get options for {symbol}'}
 
                 if not greek_keys:
-                    # Try alternate patterns
-                    for alt_pattern in [f'options:{symbol}:greeks:*', f'greeks:{symbol}:*']:
-                        greek_keys = await self.redis.keys(alt_pattern)
-                        if greek_keys:
-                            break
-
-                self.logger.debug(f"Found {len(greek_keys)} option contracts for {symbol}")
-
-            except Exception as e:
-                self.logger.error(f"Failed to get option keys for {symbol}: {e}")
-                return {'error': f'Failed to get options for {symbol}'}
-
-            if not greek_keys:
-                self.logger.warning(f"No options data for {symbol}")
-                return {'error': f'No options data for {symbol}'}
+                    self.logger.warning(f"No options data for {symbol}")
+                    return {'error': f'No options data for {symbol}'}
 
             # 3. Calculate GEX for each strike
             gex_by_strike = {}
@@ -140,70 +156,104 @@ class GEXDEXCalculator:
             puts_processed = 0
             contracts_skipped = 0
 
-            for key in greek_keys:
-                try:
-                    # Get Greeks data
-                    greeks_json = await self.redis.get(key)
-                    if not greeks_json:
-                        continue
-
-                    greeks = json.loads(greeks_json)
-                    # Convert string values to floats (Alpha Vantage returns strings)
+            if using_normalized_chain:
+                for contract in contracts_iter:
                     try:
-                        gamma = float(greeks.get('gamma', 0))
-                    except (ValueError, TypeError):
-                        gamma = 0
+                        gamma = contract.get('gamma') or 0
+                        open_interest = contract.get('open_interest') or 0
+                        strike = contract.get('strike') or 0
+                        option_type = (contract.get('type') or '').lower()
 
-                    # Guardrail: Skip invalid gamma values (AV quirks)
-                    if gamma < 0 or gamma > 1:  # Gamma should be 0-1
+                        if not isinstance(gamma, (int, float)) or not isinstance(open_interest, (int, float)):
+                            contracts_skipped += 1
+                            continue
+
+                        if gamma <= 0 or open_interest <= 0:
+                            contracts_skipped += 1
+                            continue
+
+                        if not isinstance(strike, (int, float)) or strike <= 0:
+                            contracts_skipped += 1
+                            continue
+
+                        if option_type not in ('call', 'put'):
+                            contracts_skipped += 1
+                            continue
+
+                        if gamma < 0 or gamma > 1:
+                            contracts_skipped += 1
+                            continue
+
+                        if option_type == 'call':
+                            contract_gex = gamma * open_interest * contract_multiplier * spot * spot
+                            calls_processed += 1
+                        else:
+                            contract_gex = -gamma * open_interest * contract_multiplier * spot * spot
+                            puts_processed += 1
+
+                        gex_by_strike.setdefault(strike, 0)
+                        gex_by_strike[strike] += contract_gex
+                        total_gex += contract_gex
+
+                        oi_by_strike.setdefault(strike, 0)
+                        oi_by_strike[strike] += open_interest
+
+                    except Exception as exc:
                         contracts_skipped += 1
-                        continue
-
-                    # Get open interest (might be in separate key or same dict)
+                        self.logger.debug(f"Skipping normalized contract: {exc}")
+            else:
+                for key in greek_keys:
                     try:
-                        open_interest = float(greeks.get('open_interest', 0))
-                    except (ValueError, TypeError):
-                        open_interest = 0
+                        greeks_json = await self.redis.get(key)
+                        if not greeks_json:
+                            continue
 
-                    if open_interest <= 0 or gamma == 0:
+                        greeks = json.loads(greeks_json)
+                        try:
+                            gamma = float(greeks.get('gamma', 0))
+                        except (ValueError, TypeError):
+                            gamma = 0
+
+                        if gamma < 0 or gamma > 1:
+                            contracts_skipped += 1
+                            continue
+
+                        try:
+                            open_interest = float(greeks.get('open_interest', 0))
+                        except (ValueError, TypeError):
+                            open_interest = 0
+
+                        if open_interest <= 0 or gamma == 0:
+                            contracts_skipped += 1
+                            continue
+
+                        strike = self._extract_strike_from_key(key)
+                        option_type = self._extract_option_type(key)
+
+                        if strike <= 0 or not option_type:
+                            contracts_skipped += 1
+                            continue
+
+                        if option_type == 'call':
+                            contract_gex = gamma * open_interest * contract_multiplier * spot * spot
+                            calls_processed += 1
+                        else:  # put
+                            contract_gex = -gamma * open_interest * contract_multiplier * spot * spot
+                            puts_processed += 1
+
+                        if strike not in gex_by_strike:
+                            gex_by_strike[strike] = 0
+                        gex_by_strike[strike] += contract_gex
+                        total_gex += contract_gex
+
+                        if strike not in oi_by_strike:
+                            oi_by_strike[strike] = 0
+                        oi_by_strike[strike] += int(open_interest)
+
+                    except Exception as e:
                         contracts_skipped += 1
+                        self.logger.debug(f"Error processing option {key}: {e}")
                         continue
-
-                    # Extract strike and option type
-                    strike = self._extract_strike_from_key(key)
-                    option_type = self._extract_option_type(key)
-
-                    if strike <= 0 or not option_type:
-                        contracts_skipped += 1
-                        continue
-
-                    # Calculate GEX for this contract
-                    # GEX = Gamma * Open Interest * Contract Multiplier * Spot^2
-                    # Alpha Vantage gamma is per $1 move, no /100 needed
-                    # For calls: positive gamma exposure
-                    # For puts: negative gamma exposure (dealers are short)
-
-                    if option_type == 'call':
-                        contract_gex = gamma * open_interest * contract_multiplier * spot * spot
-                        calls_processed += 1
-                    else:  # put
-                        contract_gex = -gamma * open_interest * contract_multiplier * spot * spot
-                        puts_processed += 1
-
-                    # Aggregate by strike
-                    if strike not in gex_by_strike:
-                        gex_by_strike[strike] = 0
-                    gex_by_strike[strike] += contract_gex
-                    total_gex += contract_gex
-
-                    # Track OI per strike for filtering
-                    if strike not in oi_by_strike:
-                        oi_by_strike[strike] = 0
-                    oi_by_strike[strike] += int(open_interest)
-
-                except Exception as e:
-                    self.logger.debug(f"Error processing option {key}: {e}")
-                    continue
 
             # Debug logging for telemetry
             if symbol == 'SPY' or self.logger.level <= logging.DEBUG:
