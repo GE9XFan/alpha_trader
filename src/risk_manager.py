@@ -49,9 +49,10 @@ import time
 import logging
 import numpy as np
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, time as dt_time
 from typing import Dict, List, Any, Optional
 import redis.asyncio as aioredis
+import pytz
 
 
 @dataclass
@@ -186,8 +187,8 @@ class RiskManager:
         """
         self.logger.info("Starting risk manager...")
 
-        # Reset daily metrics at market open
-        await self.reset_daily_metrics()
+        # Check if we need to reset daily metrics (only at market open, not on restart)
+        await self.check_and_reset_daily_metrics()
 
         while True:
             try:
@@ -897,12 +898,56 @@ class RiskManager:
         except Exception as e:
             self.logger.error(f"Error updating risk metrics: {e}")
 
-    async def reset_daily_metrics(self):
+    async def check_and_reset_daily_metrics(self):
         """
-        Reset daily risk metrics at market open.
+        Reset daily risk metrics only if it's a new trading day.
         """
         try:
-            # Reset daily P&L
+            eastern = pytz.timezone('US/Eastern')
+            now_utc = datetime.utcnow().replace(tzinfo=pytz.utc)
+            now_et = now_utc.astimezone(eastern)
+            today = now_et.date()
+            today_str = now_et.strftime('%Y%m%d')
+
+            last_reset_raw = await self.redis.get('risk:daily:reset_time')
+            last_reset_dt: Optional[datetime] = None
+            if last_reset_raw:
+                try:
+                    last_reset_dt = datetime.fromtimestamp(float(last_reset_raw), tz=pytz.utc).astimezone(eastern)
+                except (ValueError, OSError):
+                    last_reset_dt = None
+
+            if last_reset_dt and last_reset_dt.date() == today:
+                self.logger.info(f"Daily metrics already set for {today_str}, not resetting")
+                return
+
+            if not last_reset_dt:
+                daily_pnl = float(await self.redis.get('risk:daily_pnl') or 0.0)
+                daily_trades = int(await self.redis.get('risk:daily_trades') or 0)
+                open_positions = await self.redis.keys('positions:open:*')
+                if abs(daily_pnl) > 1e-6 or daily_trades > 0 or open_positions:
+                    self.logger.info(
+                        "Daily metrics already active with no reset timestamp; preserving current totals"
+                    )
+                    return
+
+            market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+
+            if now_et < market_open:
+                self.logger.info("Pre-market restart detected; resetting metrics ahead of open")
+
+            await self.reset_daily_metrics()
+            self.logger.info(f"Daily metrics reset for {today_str}")
+
+        except Exception as e:
+            self.logger.error(f"Error checking daily reset: {e}")
+
+    async def reset_daily_metrics(self):
+        """
+        Actually reset daily risk metrics.
+        """
+        try:
+            # Reset daily P&L and trades
             await self.redis.set('risk:daily_pnl', 0)
             await self.redis.set('risk:daily_trades', 0)
             await self.redis.set('risk:daily:reset_time', time.time())

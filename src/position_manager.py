@@ -88,6 +88,25 @@ class PositionManager:
         # Copy rules to avoid mutating shared config structures
         self.eod_rules = [dict(rule) for rule in default_eod_rules]
 
+    async def _increment_position_count(self, amount: int = 1) -> None:
+        """Increase the cached open-position count."""
+        if amount <= 0:
+            return
+        await self.redis.incrby('positions:count', amount)
+
+    async def _decrement_position_count(self, symbol: str, amount: int = 1) -> None:
+        """Decrease the cached open-position count and clean empty symbol sets."""
+        if amount <= 0:
+            return
+
+        new_value = await self.redis.decrby('positions:count', amount)
+        if new_value < 0:
+            await self.redis.set('positions:count', 0)
+
+        members = await self.redis.scard(f'positions:by_symbol:{symbol}')
+        if members == 0:
+            await self.redis.delete(f'positions:by_symbol:{symbol}')
+
     async def start(self):
         """
         Main position management loop.
@@ -228,7 +247,9 @@ class PositionManager:
                 }
 
                 await self.redis.set(redis_key, json.dumps(position_snapshot))
-                await self.redis.sadd(f'positions:by_symbol:{symbol}', position_id)
+                added = await self.redis.sadd(f'positions:by_symbol:{symbol}', position_id)
+                if added:
+                    await self._increment_position_count(added)
                 self.positions[position_id] = position_snapshot
             except Exception as snapshot_error:  # pragma: no cover - per-position guard
                 self.logger.error(
@@ -261,6 +282,9 @@ class PositionManager:
                     symbol = position.get('symbol')
                     if symbol not in self.position_tickers:
                         await self.subscribe_market_data(symbol, position.get('contract'))
+
+            # Update the position count to match reality
+            await self.redis.set('positions:count', len(redis_position_ids))
 
             # Remove any cached positions that no longer exist in Redis
             stale_ids = set(self.positions.keys()) - redis_position_ids
@@ -870,6 +894,8 @@ class PositionManager:
 
                 position['realized_pnl'] = position.get('realized_pnl', 0) + final_pnl
 
+            position['quantity'] = 0
+
             # Move to closed positions
             await self.redis.delete(f'positions:open:{symbol}:{position_id}')
             await self.redis.setex(
@@ -878,10 +904,13 @@ class PositionManager:
                 json.dumps(position)
             )
 
-            # Update metrics
-            await self.redis.srem(f'positions:by_symbol:{symbol}', position_id)
+            # Update metrics and symbol index
+            removed = await self.redis.srem(f'positions:by_symbol:{symbol}', position_id)
+            if removed:
+                await self._decrement_position_count(symbol, removed)
             await self.redis.incr('positions:closed:total')
             await self.redis.incrbyfloat('positions:pnl:realized:total', position['realized_pnl'])
+            await self.redis.incrbyfloat('risk:daily_pnl', position['realized_pnl'])
 
             # Remove from memory
             if position_id in self.positions:

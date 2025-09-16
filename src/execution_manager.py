@@ -288,9 +288,31 @@ class ExecutionManager:
         """Delete a duplicate Redis position record and clean indexes."""
 
         await self.redis.delete(f'positions:open:{symbol}:{position_id}')
-        await self.redis.srem(f'positions:by_symbol:{symbol}', position_id)
+        removed = await self.redis.srem(f'positions:by_symbol:{symbol}', position_id)
+        if removed:
+            await self._decrement_position_count(symbol, removed)
+
         self.stop_orders.pop(position_id, None)
         self.target_orders.pop(position_id, None)
+
+    async def _increment_position_count(self, amount: int = 1) -> None:
+        """Increase the cached open-position count."""
+        if amount <= 0:
+            return
+        await self.redis.incrby('positions:count', amount)
+
+    async def _decrement_position_count(self, symbol: str, amount: int = 1) -> None:
+        """Decrease the cached open-position count and clean empty symbol sets."""
+        if amount <= 0:
+            return
+
+        new_value = await self.redis.decrby('positions:count', amount)
+        if new_value < 0:
+            await self.redis.set('positions:count', 0)
+
+        members = await self.redis.scard(f'positions:by_symbol:{symbol}')
+        if members == 0:
+            await self.redis.delete(f'positions:by_symbol:{symbol}')
 
     # ------------------------------------------------------------------
     # Position lifecycle helpers
@@ -359,7 +381,9 @@ class ExecutionManager:
 
         redis_key = f'positions:open:{symbol}:{position_id}'
         await self.redis.delete(redis_key)
-        await self.redis.srem(f'positions:by_symbol:{symbol}', position_id)
+        removed = await self.redis.srem(f'positions:by_symbol:{symbol}', position_id)
+        if removed:
+            await self._decrement_position_count(symbol, removed)
 
         closed_key = f'positions:closed:{datetime.utcnow().strftime("%Y%m%d")}:{position_id}'
         await self.redis.setex(closed_key, 604800, json.dumps(position))
@@ -388,10 +412,18 @@ class ExecutionManager:
         position.setdefault('close_reason', reason)
         position.setdefault('exit_time', now_iso)
         position.setdefault('exit_price', position.get('current_price'))
+        realized_total = float(position.get('realized_pnl', 0.0) or 0.0)
+        if realized_total:
+            await self.redis.incrbyfloat('positions:pnl:realized:total', realized_total)
+            await self.redis.incrbyfloat('risk:daily_pnl', realized_total)
+
+        position['quantity'] = 0
 
         redis_key = f'positions:open:{symbol}:{position_id}'
         await self.redis.delete(redis_key)
-        await self.redis.srem(f'positions:by_symbol:{symbol}', position_id)
+        removed = await self.redis.srem(f'positions:by_symbol:{symbol}', position_id)
+        if removed:
+            await self._decrement_position_count(symbol, removed)
 
         closed_key = f'positions:closed:{datetime.utcnow().strftime("%Y%m%d")}:{position_id}'
         await self.redis.setex(closed_key, 604800, json.dumps(position))
@@ -399,8 +431,9 @@ class ExecutionManager:
         self.stop_orders.pop(position_id, None)
         self.target_orders.pop(position_id, None)
 
-        self.logger.info(
-            f"Position sync: Archived {symbol} position {position_id[:8]} ({reason})"
+        self.logger.warning(
+            f"Position sync: Archived {symbol} position {position_id[:8]} ({reason}); "
+            "realized P&L may be incomplete"
         )
 
     async def start(self):
@@ -644,7 +677,9 @@ class ExecutionManager:
 
                     redis_key = f'positions:open:{symbol}:{ib_id}'
                     await self.redis.set(redis_key, json.dumps(snapshot))
-                    await self.redis.sadd(f'positions:by_symbol:{symbol}', ib_id)
+                    added = await self.redis.sadd(f'positions:by_symbol:{symbol}', ib_id)
+                    if added:
+                        await self._increment_position_count(added)
 
                     self.logger.info(f"Position sync: Added new {symbol} position {ib_id}")
 
@@ -690,7 +725,9 @@ class ExecutionManager:
                 )
 
                 await self.redis.set(redis_key, json.dumps(snapshot))
-                await self.redis.sadd(f'positions:by_symbol:{symbol}', position_id)
+                added = await self.redis.sadd(f'positions:by_symbol:{symbol}', position_id)
+                if not existing and added:
+                    await self._increment_position_count(added)
                 self.logger.info(f"Reconciled live IB position for {symbol} ({position_id})")
             except Exception as snapshot_error:  # pragma: no cover - defensive per-position
                 self.logger.error(
@@ -1370,8 +1407,10 @@ class ExecutionManager:
             # Store position in Redis
             await self.redis.set(redis_key, json.dumps(position))
 
-            # Add to symbol index
-            await self.redis.sadd(f'positions:by_symbol:{symbol}', position_id)
+            # Add to symbol index and update open-position count only when new
+            added = await self.redis.sadd(f'positions:by_symbol:{symbol}', position_id)
+            if not existing_position and added:
+                await self._increment_position_count(added)
 
             # Update metrics
             await self.redis.incr('execution:fills:total')
@@ -1637,7 +1676,7 @@ class ExecutionManager:
         except Exception as e:
             self.logger.error(f"Error handling order status: {e}")
 
-    def on_fill(self, fill):
+    def on_fill(self, trade, fill):
         """
         Handle fill events from IBKR.
         """
@@ -1648,7 +1687,7 @@ class ExecutionManager:
             )
 
             async def _process_fill():
-                handled = await self.handle_bracket_fill(fill)
+                handled = await self.handle_bracket_fill(trade, fill)
                 if not handled:
                     await self._handle_untracked_fill(fill)
                 await self.update_fill_metrics(fill)
@@ -1680,7 +1719,7 @@ class ExecutionManager:
         except Exception as e:
             self.logger.error(f"Error handling IBKR error: {e}")
 
-    async def handle_bracket_fill(self, fill) -> bool:
+    async def handle_bracket_fill(self, trade, fill) -> bool:
         """
         Handle fills for stop loss and target orders.
         """

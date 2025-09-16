@@ -76,6 +76,19 @@ class EmergencyManager:
         self.redis = redis_conn
         self.ib = ib_connection
         self.logger = logging.getLogger(__name__)
+        
+    async def _decrement_position_count(self, symbol: str, amount: int = 1) -> None:
+        """Decrease the cached open-position count and clean empty symbol sets."""
+        if amount <= 0:
+            return
+
+        new_value = await self.redis.decrby('positions:count', amount)
+        if new_value < 0:
+            await self.redis.set('positions:count', 0)
+
+        members = await self.redis.scard(f'positions:by_symbol:{symbol}')
+        if members == 0:
+            await self.redis.delete(f'positions:by_symbol:{symbol}')
 
     async def emergency_close_all(self):
         """
@@ -198,7 +211,9 @@ class EmergencyManager:
             # Remove from open positions
             redis_key = f'positions:open:{symbol}:{position_id}'
             await self.redis.delete(redis_key)
-            await self.redis.srem(f'positions:by_symbol:{symbol}', position_id)
+            removed = await self.redis.srem(f'positions:by_symbol:{symbol}', position_id)
+            if removed:
+                await self._decrement_position_count(symbol, removed)
 
             self.logger.warning(f"Emergency close initiated for {symbol} {side} x{quantity}")
 
