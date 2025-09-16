@@ -266,6 +266,12 @@ class EmergencyManager:
 
             await self.redis.delete('signals:pending')
 
+            execution_signal_keys = await self.redis.keys('signals:execution:*')
+            for signal_key in execution_signal_keys:
+                await self.redis.delete(signal_key)
+
+            await self.redis.delete('signals:execution')
+
             self.logger.warning(f"Cancelled {cancelled_count} orders")
 
             # Update metrics
@@ -453,7 +459,7 @@ class CircuitBreakers:
         self.logger = logging.getLogger(__name__)
         self.last_reset = time.time()
 
-    def check_breaker(self, breaker_name: str, current_value: float) -> bool:
+    async def check_breaker(self, breaker_name: str, current_value: float) -> bool:
         """
         Check if circuit breaker should trip.
 
@@ -486,7 +492,7 @@ class CircuitBreakers:
             breaker['current'] = current_value
 
             # Store current value in Redis
-            self.redis.setex(
+            await self.redis.setex(
                 f'circuit_breakers:{breaker_name}:current',
                 60,
                 json.dumps({
@@ -526,15 +532,15 @@ class CircuitBreakers:
                     'timestamp_iso': datetime.now().isoformat()
                 }
 
-                self.redis.lpush('circuit_breakers:trips:history', json.dumps(trip_event))
-                self.redis.ltrim('circuit_breakers:trips:history', 0, 99)
+                await self.redis.lpush('circuit_breakers:trips:history', json.dumps(trip_event))
+                await self.redis.ltrim('circuit_breakers:trips:history', 0, 99)
 
                 # Set breaker status
-                self.redis.set(f'circuit_breakers:{breaker_name}:tripped', 'true')
-                self.redis.setex(f'circuit_breakers:{breaker_name}:trip_time', 3600, time.time())
+                await self.redis.set(f'circuit_breakers:{breaker_name}:tripped', 'true')
+                await self.redis.setex(f'circuit_breakers:{breaker_name}:trip_time', 3600, time.time())
 
                 # Increment metrics
-                self.redis.incr(f'metrics:circuit_breakers:{breaker_name}:trips')
+                await self.redis.incr(f'metrics:circuit_breakers:{breaker_name}:trips')
 
                 return True
 
@@ -556,7 +562,7 @@ class CircuitBreakers:
             # Fail safe - trip on error
             return True
 
-    def reset_daily_breakers(self):
+    async def reset_daily_breakers(self):
         """
         Reset daily circuit breakers.
         Called at market open each day.
@@ -583,13 +589,13 @@ class CircuitBreakers:
                 self.breakers['system_errors']['last_triggered'] = None
 
             # Clear Redis flags
-            self.redis.delete('circuit_breakers:daily_loss:tripped')
-            self.redis.delete('circuit_breakers:consecutive_losses:tripped')
-            self.redis.delete('circuit_breakers:system_errors:tripped')
+            await self.redis.delete('circuit_breakers:daily_loss:tripped')
+            await self.redis.delete('circuit_breakers:consecutive_losses:tripped')
+            await self.redis.delete('circuit_breakers:system_errors:tripped')
 
             # Reset Redis counters
-            self.redis.set('risk:consecutive_losses', '0')
-            self.redis.set('system:errors:count', '0')
+            await self.redis.set('risk:consecutive_losses', '0')
+            await self.redis.set('system:errors:count', '0')
 
             # Update reset timestamp
             self.last_reset = time.time()
@@ -600,18 +606,18 @@ class CircuitBreakers:
                 'breakers_reset': ['daily_loss', 'consecutive_losses', 'system_errors']
             }
 
-            self.redis.setex('circuit_breakers:last_reset', 86400, json.dumps(reset_event))
+            await self.redis.setex('circuit_breakers:last_reset', 86400, json.dumps(reset_event))
 
             # Log reset event
-            self.redis.lpush('circuit_breakers:reset:history', json.dumps(reset_event))
-            self.redis.ltrim('circuit_breakers:reset:history', 0, 29)  # Keep last 30 resets
+            await self.redis.lpush('circuit_breakers:reset:history', json.dumps(reset_event))
+            await self.redis.ltrim('circuit_breakers:reset:history', 0, 29)  # Keep last 30 resets
 
             self.logger.info("Daily circuit breakers reset complete")
 
         except Exception as e:
             self.logger.error(f"Error resetting daily breakers: {e}")
 
-    def get_breaker_status(self) -> dict:
+    async def get_breaker_status(self) -> dict:
         """
         Get current status of all breakers.
 
@@ -631,35 +637,35 @@ class CircuitBreakers:
             for name, breaker in self.breakers.items():
                 # Update current values from Redis where applicable
                 if name == 'daily_loss':
-                    daily_pnl = self.redis.get('risk:daily_pnl')
-                    account_value = self.redis.get('account:value')
-                    if daily_pnl and account_value:
-                        loss_pct = abs(min(0, float(daily_pnl))) / float(account_value) * 100
+                    daily_pnl_raw = await self.redis.get('risk:daily_pnl')
+                    account_value_raw = await self.redis.get('account:value')
+                    if daily_pnl_raw and account_value_raw:
+                        loss_pct = abs(min(0, float(daily_pnl_raw))) / float(account_value_raw) * 100
                         breaker['current'] = loss_pct
 
                 elif name == 'consecutive_losses':
-                    losses = self.redis.get('risk:consecutive_losses')
-                    if losses:
-                        breaker['current'] = int(losses)
+                    losses_raw = await self.redis.get('risk:consecutive_losses')
+                    if losses_raw:
+                        breaker['current'] = int(losses_raw)
 
                 elif name == 'drawdown':
-                    drawdown_pct = self.redis.get('risk:drawdown:current')
-                    if drawdown_pct:
-                        breaker['current'] = float(drawdown_pct)
+                    drawdown_pct_raw = await self.redis.get('risk:drawdown:current')
+                    if drawdown_pct_raw:
+                        breaker['current'] = float(drawdown_pct_raw)
 
                 elif name == 'volatility_spike':
-                    vol_spike = self.redis.get('market:volatility:spike')
-                    if vol_spike:
-                        breaker['current'] = float(vol_spike)
+                    vol_spike_raw = await self.redis.get('market:volatility:spike')
+                    if vol_spike_raw:
+                        breaker['current'] = float(vol_spike_raw)
 
                 elif name == 'system_errors':
-                    errors = self.redis.get('system:errors:count')
-                    if errors:
-                        breaker['current'] = int(errors)
+                    errors_raw = await self.redis.get('system:errors:count')
+                    if errors_raw:
+                        breaker['current'] = int(errors_raw)
 
                 elif name == 'position_limit':
-                    positions = len(self.redis.keys('positions:open:*'))
-                    breaker['current'] = positions
+                    open_positions = await self.redis.keys('positions:open:*')
+                    breaker['current'] = len(open_positions)
 
                 # Calculate status
                 current = breaker['current']
@@ -701,7 +707,7 @@ class CircuitBreakers:
                 status['breakers'][name] = breaker_status
 
             # Store status in Redis
-            self.redis.setex('circuit_breakers:status', 60, json.dumps(status))
+            await self.redis.setex('circuit_breakers:status', 60, json.dumps(status))
 
             return status
 

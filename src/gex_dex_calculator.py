@@ -12,6 +12,7 @@ Redis keys used:
 """
 
 import json
+import math
 import re
 import redis.asyncio as aioredis
 import time
@@ -42,6 +43,71 @@ class GEXDEXCalculator:
             'alerts': 3600,
             'heartbeat': 15
         })
+
+    async def _update_metric_statistics(
+        self,
+        symbol: str,
+        metric: str,
+        value: float,
+        window: int = 120,
+        min_samples: int = 5,
+    ) -> Dict[str, float]:
+        """Record metric history and compute rolling z-score statistics."""
+
+        history_key = f'analytics:{symbol}:{metric}:history'
+        stats = {
+            'zscore': 0.0,
+            'mean': float(value),
+            'stdev': 0.0,
+            'samples': 0,
+            'window': window,
+        }
+
+        try:
+            await self.redis.lpush(history_key, value)
+            await self.redis.ltrim(history_key, 0, window - 1)
+            # Retain history for an hour by default to avoid churn
+            await self.redis.expire(history_key, max(window * 5, 3600))
+
+            raw_history = await self.redis.lrange(history_key, 0, window - 1)
+            values = []
+            for raw in raw_history:
+                if raw is None:
+                    continue
+                if isinstance(raw, bytes):
+                    try:
+                        raw = raw.decode()
+                    except Exception:
+                        continue
+                try:
+                    values.append(float(raw))
+                except (TypeError, ValueError):
+                    continue
+
+            if not values:
+                return stats
+
+            stats['samples'] = len(values)
+            mean = sum(values) / len(values)
+            stats['mean'] = mean
+
+            if len(values) < min_samples:
+                return stats
+
+            variance = sum((v - mean) ** 2 for v in values) / len(values)
+            stdev = math.sqrt(max(variance, 1e-12))
+            stats['stdev'] = stdev
+
+            if stdev > 0:
+                stats['zscore'] = (float(value) - mean) / stdev
+
+            return stats
+
+        except Exception as exc:  # pragma: no cover - defensive telemetry
+            self.logger.debug(
+                f"Failed to update {metric} statistics for {symbol}: {exc}"
+            )
+            return stats
 
     def _extract_occ(self, key: str) -> Tuple[Optional[str], float]:
         """
@@ -317,6 +383,13 @@ class GEXDEXCalculator:
                 'timestamp': time.time()
             }
 
+            stats = await self._update_metric_statistics(symbol, 'gex', float(total_gex))
+            result['zscore'] = stats['zscore']
+            result['zscore_mean'] = stats['mean']
+            result['zscore_stddev'] = stats['stdev']
+            result['zscore_samples'] = stats['samples']
+            result['zscore_window'] = stats['window']
+
             # 6. Store in Redis with configured TTL
             ttl = self.ttls.get('analytics', self.ttls.get('metrics', 60))
             await self.redis.setex(
@@ -512,6 +585,13 @@ class GEXDEXCalculator:
                 'units': 'dollar_delta',  # Explicit units for downstream consumers
                 'timestamp': time.time()
             }
+
+            stats = await self._update_metric_statistics(symbol, 'dex', float(total_dex))
+            result['zscore'] = stats['zscore']
+            result['zscore_mean'] = stats['mean']
+            result['zscore_stddev'] = stats['stdev']
+            result['zscore_samples'] = stats['samples']
+            result['zscore_window'] = stats['window']
 
             # 9. Store in Redis
             ttl = self.ttls.get('analytics', self.ttls.get('metrics', 60))

@@ -660,6 +660,7 @@ async def default_feature_reader(redis_conn: aioredis.Redis, symbol: str) -> Dic
     gex_data = _decode(gex_raw) or {}
     if isinstance(gex_data, dict):
         features['gex'] = gex_data.get('total_gex') or gex_data.get('gex') or 0
+        features['gex_z'] = gex_data.get('zscore') or gex_data.get('z') or 0
         by_strike = gex_data.get('gex_by_strike') or {}
         if isinstance(by_strike, dict):
             parsed_strikes = []

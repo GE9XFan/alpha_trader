@@ -116,7 +116,7 @@ modules:
   
   signals:
     enabled: true
-    dry_run: true
+    dry_run: false
     publish_channel: "signals:out"
 
     # Guardrails (apply before any strategy logic)

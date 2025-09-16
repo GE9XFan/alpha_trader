@@ -346,7 +346,7 @@ class PatternAnalyzer:
 
             # Store result
             sweep_value = 1.0 if is_sweep else 0.0
-            await self.redis.setex(rkeys.analytics_metric_key(symbol, 'sweep'), 5, str(sweep_value))
+            await self.redis.setex(rkeys.analytics_metric_key(symbol, 'sweep'), 30, str(sweep_value))
 
             if is_sweep:
                 self.logger.info(f"SWEEP detected for {symbol}: {unique_prices} levels, {total_size} shares")

@@ -86,7 +86,8 @@ class SignalDeduplication:
         self.LUA_ATOMIC_EMIT = """
         -- KEYS[1] = idempotency_key "signals:emitted:<emit_id>"
         -- KEYS[2] = cooldown_key    "signals:cooldown:<contract_fp>"
-        -- KEYS[3] = queue_key       "signals:pending:<symbol>"
+        -- KEYS[3] = queue_pending   "signals:pending:<symbol>"
+        -- KEYS[4] = queue_execution "signals:execution:<symbol>"
         -- ARGV[1] = signal_json
         -- ARGV[2] = idempotency_ttl_seconds
         -- ARGV[3] = cooldown_ttl_seconds
@@ -95,6 +96,7 @@ class SignalDeduplication:
             redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[2]) * 1000)
             if redis.call('EXISTS', KEYS[2]) == 0 then
                 redis.call('LPUSH', KEYS[3], ARGV[1])
+                redis.call('LPUSH', KEYS[4], ARGV[1])
                 redis.call('PEXPIRE', KEYS[2], tonumber(ARGV[3]) * 1000)
                 return 1  -- Signal enqueued
             else
@@ -222,7 +224,8 @@ class SignalDeduplication:
         # Prepare keys and arguments
         idempotency_key = f'signals:emitted:{signal_id}'
         cooldown_key = f'signals:cooldown:{contract_fp}'
-        queue_key = f'signals:pending:{symbol}'
+        queue_key_pending = f'signals:pending:{symbol}'
+        queue_key_execution = f'signals:execution:{symbol}'
 
         signal_json = json.dumps(signal)
 
@@ -230,10 +233,11 @@ class SignalDeduplication:
             # Execute atomic operation
             result = await self.redis.evalsha(
                 self.lua_sha,
-                3,  # Number of keys
+                4,  # Number of keys
                 idempotency_key,
                 cooldown_key,
-                queue_key,
+                queue_key_pending,
+                queue_key_execution,
                 signal_json,
                 str(ttl),
                 str(self.cooldown_s)
@@ -246,10 +250,11 @@ class SignalDeduplication:
                 self.lua_sha = await self.redis.script_load(self.LUA_ATOMIC_EMIT)
                 result = await self.redis.evalsha(
                     self.lua_sha,
-                    3,
+                    4,
                     idempotency_key,
                     cooldown_key,
-                    queue_key,
+                    queue_key_pending,
+                    queue_key_execution,
                     signal_json,
                     str(ttl),
                     str(self.cooldown_s)

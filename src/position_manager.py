@@ -36,7 +36,7 @@ import re
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 import pytz
 import redis.asyncio as aioredis
-from ib_insync import IB, Stock, Option, MarketOrder, StopOrder
+from ib_insync import IB, Stock, Option, LimitOrder, MarketOrder, StopOrder
 
 
 class PositionManager:
@@ -704,14 +704,17 @@ class PositionManager:
 
             if ib_contract and self.ib.isConnected():
                 action = 'SELL' if side == 'LONG' else 'BUY'
-                order = MarketOrder(action, close_quantity)
+                limit_price = round(float(target_price), 2)
+                order = LimitOrder(action, close_quantity, limit_price)
+                order.tif = 'GTC'
                 trade = self.ib.placeOrder(ib_contract, order)
 
-                # Wait for fill
-                await asyncio.sleep(1)
+                fill_deadline = time.time() + 5
+                while time.time() < fill_deadline and not trade.isDone():
+                    await asyncio.sleep(0.2)
 
                 if trade.isDone() and trade.orderStatus.status == 'Filled':
-                    fill_price = trade.fills[-1].execution.price if trade.fills else target_price
+                    fill_price = trade.fills[-1].execution.price if trade.fills else limit_price
 
                     position['current_target_index'] = target_index + 1
                     await self._register_partial_close(
@@ -719,6 +722,17 @@ class PositionManager:
                         close_quantity,
                         fill_price,
                         f'Target {target_index + 1}'
+                    )
+                else:
+                    if not trade.isDone():
+                        try:
+                            self.ib.cancelOrder(trade.order)
+                        except Exception as cancel_error:
+                            self.logger.error(
+                                f"Failed to cancel scale-out order for {position_id}: {cancel_error}"
+                            )
+                    self.logger.info(
+                        f"Scale-out limit order for {symbol} target {target_index + 1} timed out without fill"
                     )
 
         except Exception as e:
@@ -739,6 +753,24 @@ class PositionManager:
                 if stop_trade and not stop_trade.isDone():
                     self.ib.cancelOrder(stop_trade.order)
                 del self.stop_orders[position_id]
+
+            # Cancel any outstanding target/limit orders associated with brackets
+            target_order_ids = position.get('target_order_ids') or []
+            if target_order_ids:
+                for order_id in target_order_ids:
+                    try:
+                        existing_trade = next(
+                            (trade for trade in self.ib.trades() if trade.order.orderId == order_id),
+                            None
+                        )
+                        if existing_trade and not existing_trade.isDone():
+                            self.ib.cancelOrder(existing_trade.order)
+                    except Exception as cancel_error:
+                        self.logger.error(
+                            f"Failed to cancel target order {order_id} for {position_id}: {cancel_error}"
+                        )
+            position['target_order_ids'] = []
+            position['oca_group'] = None
 
             # Update position record
             position['status'] = 'CLOSED'

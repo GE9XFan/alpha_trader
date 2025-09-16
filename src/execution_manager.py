@@ -12,7 +12,7 @@ Redis Keys Used:
         - risk:daily_pnl (daily P&L for risk checks)
         - risk:new_positions_allowed (risk manager gate)
         - risk:position_size_multiplier (position sizing adjustment)
-        - signals:pending:{symbol} (pending signals queue)
+        - signals:execution:{symbol} (execution signals queue)
         - positions:open:{symbol}:* (open position tracking)
     Write:
         - health:execution:heartbeat (health monitoring)
@@ -91,6 +91,7 @@ class ExecutionManager:
         # Order management
         self.pending_orders: Dict[int, Dict[str, Any]] = {}  # order_id -> order details
         self.stop_orders: Dict[str, Any] = {}  # position_id -> stop trade/order
+        self.target_orders: Dict[str, List[Any]] = {}  # position_id -> list of target trades
         self.active_trades: Dict[int, Dict[str, Any]] = {}  # order_id -> {'trade': trade, 'signal': signal}
 
         # Connection state
@@ -267,7 +268,7 @@ class ExecutionManager:
                 continue
 
             # Get pending signal (handle bytes or string)
-            signal_data = await self.redis.rpop(f'signals:pending:{symbol}')
+            signal_data = await self.redis.rpop(f'signals:execution:{symbol}')
             if not signal_data:
                 continue
 
@@ -804,6 +805,8 @@ class ExecutionManager:
                 'unrealized_pnl': 0,
                 'realized_pnl': 0,
                 'stop_order_id': None,
+                'target_order_ids': [],
+                'oca_group': None,
                 'status': 'OPEN',
                 'order_id': order_id,
                 'signal_id': signal.get('id')
@@ -869,50 +872,102 @@ class ExecutionManager:
                 self.logger.error(f"Failed to create contract for stop loss")
                 return
 
-            # Determine stop action (opposite of entry)
+            # Determine stop and target actions (opposite of entry)
             side = position.get('side')
-            stop_action = 'SELL' if side == 'LONG' else 'BUY'
+            close_action = 'SELL' if side == 'LONG' else 'BUY'
 
-            # Get stop price from position
+            quantity = position.get('quantity') or 0
+            if quantity <= 0:
+                self.logger.warning("Cannot place bracket orders without quantity")
+                return
+
+            entry_price = float(position.get('entry_price') or 0)
+            strategy = position.get('strategy')
+
+            # Determine stop price from signal or defaults
             stop_price = position.get('stop_loss')
-            if not stop_price:
-                # Calculate default stop based on strategy
-                entry_price = position.get('entry_price')
-                strategy = position.get('strategy')
-
+            if not stop_price and entry_price:
                 if strategy == '0DTE':
-                    # 50% stop for 0DTE options
-                    stop_price = entry_price * 0.5 if side == 'LONG' else entry_price * 1.5
+                    stop_price = entry_price * (0.5 if side == 'LONG' else 1.5)
                 elif strategy == '1DTE':
-                    # 25% stop for 1DTE
-                    stop_price = entry_price * 0.75 if side == 'LONG' else entry_price * 1.25
+                    stop_price = entry_price * (0.75 if side == 'LONG' else 1.25)
                 else:
-                    # 30% stop for longer dated
-                    stop_price = entry_price * 0.7 if side == 'LONG' else entry_price * 1.3
+                    stop_price = entry_price * (0.7 if side == 'LONG' else 1.3)
 
-            # Round stop price
-            stop_price = round(stop_price, 2)
+            if not stop_price:
+                self.logger.warning("Unable to determine stop price for bracket order")
+                return
 
-            # Create stop order
-            quantity = position.get('quantity')
-            stop_order = StopOrder(stop_action, quantity, stop_price)
+            stop_price = round(float(stop_price), 2)
 
-            # Place stop order
+            # Determine target prices (use first configured target or derive default)
+            raw_targets = position.get('targets', []) or []
+            target_prices = []
+            for target in raw_targets:
+                try:
+                    target_val = round(float(target), 2)
+                except (TypeError, ValueError):
+                    continue
+                if target_val > 0:
+                    target_prices.append(target_val)
+
+            if not target_prices and entry_price:
+                if side == 'LONG':
+                    target_prices.append(round(entry_price * 1.3, 2))
+                else:
+                    target_prices.append(round(entry_price * 0.7, 2))
+
+            # Ensure targets make sense relative to entry
+            if side == 'LONG':
+                target_prices = [tp for tp in target_prices if tp >= stop_price]
+            else:
+                target_prices = [tp for tp in target_prices if tp <= stop_price]
+
+            position_id = position.get('id')
+            symbol = position.get('symbol')
+            oca_group = f"OCA_{position_id}"
+
+            # Create and submit stop order
+            stop_order = StopOrder(close_action, quantity, stop_price)
+            stop_order.ocaGroup = oca_group
+            stop_order.ocaType = 1
+            stop_order.tif = 'GTC'
+
             stop_trade = self.ib.placeOrder(ib_contract, stop_order)
             stop_order_id = stop_trade.order.orderId
 
-            # Update position with stop order ID
+            # Create profit-taking orders (use first target to bracket full position)
+            target_order_ids: List[int] = []
+            target_trades: List[Any] = []
+            for target_price in target_prices[:1]:
+                limit_order = LimitOrder(close_action, quantity, target_price)
+                limit_order.ocaGroup = oca_group
+                limit_order.ocaType = 1
+                limit_order.tif = 'GTC'
+
+                target_trade = self.ib.placeOrder(ib_contract, limit_order)
+                target_trades.append(target_trade)
+                target_order_ids.append(target_trade.order.orderId)
+
+                self.logger.info(
+                    f"Target order placed: {close_action} {quantity} @ ${target_price:.2f} "
+                    f"for position {position_id[:8]}"
+                )
+
+            # Update position with bracket metadata
             position['stop_order_id'] = stop_order_id
-            position_id = position.get('id')
-            symbol = position.get('symbol')
+            position['target_order_ids'] = target_order_ids
+            position['oca_group'] = oca_group
 
             await self.redis.set(f'positions:open:{symbol}:{position_id}', json.dumps(position))
 
-            # Track active stop
+            # Track active orders
             self.stop_orders[position_id] = stop_trade
+            if target_trades:
+                self.target_orders[position_id] = target_trades
 
             self.logger.info(
-                f"Stop loss placed: {stop_action} {quantity} @ ${stop_price:.2f} "
+                f"Stop loss placed: {close_action} {quantity} @ ${stop_price:.2f} "
                 f"for position {position_id[:8]}"
             )
 
