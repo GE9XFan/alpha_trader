@@ -208,7 +208,7 @@ modules:
         free:    { delay_seconds: 300, include_all_details: false }
   
   execution:
-    enabled: false  # Day 6+
+    enabled: true  # Day 6+
   
   dashboard:
     enabled: false  # Day 7+
