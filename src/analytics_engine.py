@@ -26,7 +26,8 @@ from collections import defaultdict
 import logging
 import traceback
 
-from redis_keys import Keys, get_ttl
+import redis_keys as rkeys
+from redis_keys import get_ttl
 from vpin_calculator import VPINCalculator
 from gex_dex_calculator import GEXDEXCalculator
 from pattern_analyzer import PatternAnalyzer
@@ -102,7 +103,7 @@ class MetricsAggregator:
         metrics['sector_flows'] = self._build_sector_summary(snapshots)
 
         await self.redis.setex(
-            Keys.analytics_portfolio_summary(),
+            rkeys.analytics_portfolio_summary_key(),
             self.ttls['portfolio'],
             json.dumps(metrics)
         )
@@ -116,7 +117,7 @@ class MetricsAggregator:
         ttl = self.ttls['sector']
 
         for sector, payload in summary.items():
-            await self.redis.setex(Keys.analytics_sector(sector), ttl, json.dumps(payload))
+            await self.redis.setex(rkeys.analytics_sector_key(sector), ttl, json.dumps(payload))
 
         return summary
 
@@ -162,7 +163,7 @@ class MetricsAggregator:
                         })
 
         await self.redis.setex(
-            Keys.analytics_portfolio_correlation(),
+            rkeys.analytics_portfolio_correlation_key(),
             self.ttls['correlation'],
             json.dumps(payload)
         )
@@ -185,24 +186,24 @@ class MetricsAggregator:
                 'volume': 0.0,
             }
 
-            vpin_data = await self._fetch_json(Keys.analytics_vpin(symbol))
+            vpin_data = await self._fetch_json(rkeys.analytics_vpin_key(symbol))
             if vpin_data:
                 try:
                     snapshot['vpin'] = float(vpin_data.get('value'))
                 except (TypeError, ValueError):
                     snapshot['vpin'] = None
 
-            gex_data = await self._fetch_json(Keys.analytics_gex(symbol))
+            gex_data = await self._fetch_json(rkeys.analytics_gex_key(symbol))
             if gex_data:
                 snapshot['gex'] = float(gex_data.get('total_gex', 0.0))
 
-            dex_data = await self._fetch_json(Keys.analytics_dex(symbol))
+            dex_data = await self._fetch_json(rkeys.analytics_dex_key(symbol))
             if dex_data:
                 snapshot['dex'] = float(dex_data.get('total_dex', 0.0))
                 snapshot['call_dex'] = float(dex_data.get('call_dex', 0.0))
                 snapshot['put_dex'] = float(dex_data.get('put_dex', 0.0))
 
-            ticker = await self._fetch_json(Keys.market_ticker(symbol))
+            ticker = await self._fetch_json(rkeys.market_ticker_key(symbol))
             if ticker:
                 try:
                     snapshot['volume'] = float(ticker.get('volume') or ticker.get('vol') or 0.0)
@@ -293,7 +294,7 @@ class MetricsAggregator:
         price_returns: Dict[str, pd.Series] = {}
 
         for symbol in self.symbols:
-            bars_raw = await self.redis.get(Keys.market_bars(symbol))
+            bars_raw = await self.redis.get(rkeys.market_bars_key(symbol))
             if not bars_raw:
                 continue
 
@@ -548,7 +549,7 @@ class AnalyticsEngine:
         }
 
         await self.redis.setex(
-            Keys.heartbeat('analytics'),
+            rkeys.heartbeat_key('analytics'),
             self.ttls.get('heartbeat', get_ttl('heartbeat')),
             json.dumps(heartbeat)
         )

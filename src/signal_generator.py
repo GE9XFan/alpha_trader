@@ -17,7 +17,7 @@ import redis.asyncio as aioredis
 
 from dte_strategies import DTEStrategies
 from moc_strategy import MOCStrategy
-from redis_keys import Keys
+import redis_keys as rkeys
 from signal_deduplication import SignalDeduplication, contract_fingerprint
 
 
@@ -534,22 +534,22 @@ async def default_feature_reader(redis_conn: aioredis.Redis, symbol: str) -> Dic
     logger = logging.getLogger(__name__)
 
     async with redis_conn.pipeline() as pipe:
-        pipe.get(Keys.market_ticker(symbol))
-        pipe.lrange(Keys.market_bars(symbol), -25, -1)
-        pipe.get(Keys.analytics_vpin(symbol))
-        pipe.get(Keys.analytics_obi(symbol))
-        pipe.get(Keys.analytics_gex(symbol))
-        pipe.get(Keys.analytics_dex(symbol))
-        pipe.get(Keys.analytics_toxicity(symbol))
-        pipe.get(Keys.analytics_metric(symbol, 'sweep'))
-        pipe.get(Keys.analytics_metric(symbol, 'hidden'))
-        pipe.get(Keys.analytics_metric(symbol, 'unusual'))
-        pipe.get(Keys.analytics_metric(symbol, 'institutional_flow'))
-        pipe.get(Keys.analytics_metric(symbol, 'retail_flow'))
-        pipe.get(Keys.analytics_metric(symbol, 'gamma_pin'))
-        pipe.get(Keys.analytics_metric(symbol, 'gamma_pull'))
-        pipe.get(Keys.analytics_metric(symbol, 'moc'))
-        pipe.get(Keys.options_chain(symbol))
+        pipe.get(rkeys.market_ticker_key(symbol))
+        pipe.lrange(rkeys.market_bars_key(symbol), -25, -1)
+        pipe.get(rkeys.analytics_vpin_key(symbol))
+        pipe.get(rkeys.analytics_obi_key(symbol))
+        pipe.get(rkeys.analytics_gex_key(symbol))
+        pipe.get(rkeys.analytics_dex_key(symbol))
+        pipe.get(rkeys.analytics_toxicity_key(symbol))
+        pipe.get(rkeys.analytics_metric_key(symbol, 'sweep'))
+        pipe.get(rkeys.analytics_metric_key(symbol, 'hidden'))
+        pipe.get(rkeys.analytics_metric_key(symbol, 'unusual'))
+        pipe.get(rkeys.analytics_metric_key(symbol, 'institutional_flow'))
+        pipe.get(rkeys.analytics_metric_key(symbol, 'retail_flow'))
+        pipe.get(rkeys.analytics_metric_key(symbol, 'gamma_pin'))
+        pipe.get(rkeys.analytics_metric_key(symbol, 'gamma_pull'))
+        pipe.get(rkeys.analytics_metric_key(symbol, 'moc'))
+        pipe.get(rkeys.options_chain_key(symbol))
         raw_results = await pipe.execute()
 
     def _decode(value: Any) -> Any:

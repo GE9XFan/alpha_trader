@@ -22,7 +22,7 @@ import random
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 import logging
-from redis_keys import Keys
+import redis_keys as rkeys
 import traceback
 
 
@@ -482,7 +482,7 @@ class AlphaVantageIngestion:
                 async with self.redis.pipeline(transaction=False) as pipe:
                     await pipe.hset(metrics_key, mapping={k: str(v) for k, v in metrics.items()})
                     await pipe.expire(metrics_key, self.ttls.get('metrics', 60))
-                    await pipe.setex(Keys.heartbeat('alpha_vantage'), ttl, json.dumps(heartbeat))
+                    await pipe.setex(rkeys.heartbeat_key('alpha_vantage'), ttl, json.dumps(heartbeat))
                     await pipe.execute()
 
                 await asyncio.sleep(10)

@@ -26,7 +26,7 @@ from typing import Dict, List, Any, Optional, Tuple, Callable
 from datetime import datetime, timedelta
 from ib_insync import IB, Stock, MarketOrder, LimitOrder, util, Ticker
 import logging
-from redis_keys import Keys
+import redis_keys as rkeys
 from ibkr_processor import IBKRDataProcessor
 import traceback
 from decimal import Decimal, ROUND_HALF_UP
@@ -413,13 +413,13 @@ class IBKRIngestion:
 
                 async with self.redis.pipeline(transaction=False) as pipe:
                     book_ttl = self.ttls['order_book']
-                    await pipe.setex(Keys.market_book(symbol, exchange), book_ttl, json.dumps(book))
-                    await pipe.setex(Keys.market_book(symbol), book_ttl, json.dumps(book))
+                    await pipe.setex(rkeys.market_book_key(symbol, exchange), book_ttl, json.dumps(book))
+                    await pipe.setex(rkeys.market_book_key(symbol), book_ttl, json.dumps(book))
 
                     aggregated = self.processor.compute_aggregated_tob(symbol)
                     if aggregated:
                         await pipe.setex(
-                            Keys.market_ticker(symbol),
+                            rkeys.market_ticker_key(symbol),
                             self.ttls['market_data'],
                             json.dumps(aggregated)
                         )
@@ -456,7 +456,7 @@ class IBKRIngestion:
 
         async with self.redis.pipeline(transaction=False) as pipe:
             await pipe.setex(
-                Keys.market_ticker(symbol),
+                rkeys.market_ticker_key(symbol),
                 self.ttls['market_data'],
                 json.dumps(ticker_data)
             )
@@ -469,11 +469,11 @@ class IBKRIngestion:
         for ticker in tickers:
             if not ticker.contract:
                 continue
-                
+
             symbol = ticker.contract.symbol
-            
+
             # Check if this is a depth ticker
-            for key, depth_ticker in self.depth_tickers.items():
+            for key, depth_ticker in list(self.depth_tickers.items()):
                 if depth_ticker is ticker:
                     # This is a depth ticker update
                     exchange = key.split(':')[1]
@@ -510,11 +510,11 @@ class IBKRIngestion:
 
         async with self.redis.pipeline(transaction=False) as pipe:
             ttl = self.ttls['market_data']
-            await pipe.setex(Keys.market_last(symbol), ttl, json.dumps(last_price_data))
-            await pipe.setex(Keys.market_ticker(symbol), ttl, json.dumps(ticker_data))
+            await pipe.setex(rkeys.market_last_key(symbol), ttl, json.dumps(last_price_data))
+            await pipe.setex(rkeys.market_ticker_key(symbol), ttl, json.dumps(ticker_data))
 
             # Store trades list - APPEND without deleting!
-            trades_key = Keys.market_trades(symbol)
+            trades_key = rkeys.market_trades_key(symbol)
 
             # Only push new trades from buffer
             if self.processor.trades_buffer[symbol]:
@@ -562,7 +562,7 @@ class IBKRIngestion:
             
             # Update Redis - APPEND without deleting!
             async with self.redis.pipeline(transaction=False) as pipe:
-                bars_key = Keys.market_bars(symbol, '1min')
+                bars_key = rkeys.market_bars_key(symbol, '1min')
                 
                 # Push new bar without deleting existing ones
                 pipe.rpush(bars_key, json.dumps(bar_data))
@@ -620,7 +620,7 @@ class IBKRIngestion:
                 stale_symbols[symbol] = age
         
         # Update Redis with stale symbols
-        status_key = Keys.get_system_key('status', module='ibkr_ingestion')
+        status_key = rkeys.get_system_key('status', module='ibkr_ingestion')
         ttl = self.ttls.get('monitoring', 60)
 
         async with self.redis.pipeline(transaction=False) as pipe:
@@ -664,7 +664,7 @@ class IBKRIngestion:
                 
                 for symbol, sub in self.subscriptions.items():
                     # Get current data from Redis (stored as JSON string, not hash)
-                    ticker_json = await self.redis.get(Keys.market_ticker(symbol))
+                    ticker_json = await self.redis.get(rkeys.market_ticker_key(symbol))
                     
                     if ticker_json:
                         try:
@@ -681,7 +681,7 @@ class IBKRIngestion:
                         
                         if sub.get('type') == 'LEVEL2':
                             # Check order book depth
-                            book_data = await self.redis.get(Keys.market_book(symbol))
+                            book_data = await self.redis.get(rkeys.market_book_key(symbol))
                             depth_count = 0
                             if book_data:
                                 book = json.loads(book_data)
@@ -758,7 +758,7 @@ class IBKRIngestion:
                     }
 
                     ttl = self.ttls.get('heartbeat', 15)
-                    await pipe.setex(Keys.heartbeat('ibkr_ingestion'), ttl, json.dumps(heartbeat))
+                    await pipe.setex(rkeys.heartbeat_key('ibkr_ingestion'), ttl, json.dumps(heartbeat))
 
                     await pipe.execute()
 

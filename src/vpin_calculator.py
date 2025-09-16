@@ -19,7 +19,7 @@ from typing import Dict, List, Any
 import logging
 import traceback
 
-from redis_keys import Keys
+import redis_keys as rkeys
 
 
 class VPINCalculator:
@@ -64,7 +64,7 @@ class VPINCalculator:
                 self.logger.warning(f"No discovered bucket size, using default: {bucket_size}")
 
             # 2. Fetch recent trades from Redis (last 1000 trades)
-            trades_json = await self.redis.lrange(Keys.market_trades(symbol), -1000, -1)
+            trades_json = await self.redis.lrange(rkeys.market_trades_key(symbol), -1000, -1)
 
             # Check minimum trades requirement
             min_trades = self.config.get('parameter_discovery', {}).get('vpin', {}).get('min_trades_required', 100)
@@ -104,7 +104,7 @@ class VPINCalculator:
             }
 
             await self.redis.setex(
-                Keys.analytics_vpin(symbol),
+                rkeys.analytics_vpin_key(symbol),
                 ttl,
                 json.dumps(vpin_data)
             )
@@ -144,7 +144,7 @@ class VPINCalculator:
         prev_side = 'buy'  # Default assumption
 
         # Get current bid/ask for midpoint calculation
-        ticker_json = await self.redis.get(Keys.market_ticker(symbol))
+        ticker_json = await self.redis.get(rkeys.market_ticker_key(symbol))
         if ticker_json:
             ticker = json.loads(ticker_json)
             bid = ticker.get('bid', 0)

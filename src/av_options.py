@@ -18,7 +18,7 @@ import aiohttp
 from typing import Any, Dict, Callable, List
 from datetime import datetime, timezone
 import logging
-from redis_keys import Keys
+import redis_keys as rkeys
 
 
 class OptionsProcessor:
@@ -180,14 +180,14 @@ class OptionsProcessor:
             async with self.redis.pipeline(transaction=False) as pipe:
                 if calls:
                     await pipe.setex(
-                        Keys.options_calls(symbol),
+                        rkeys.options_calls_key(symbol),
                         ttls['options_chain'],
                         json.dumps(calls)
                     )
 
                 if puts:
                     await pipe.setex(
-                        Keys.options_puts(symbol),
+                        rkeys.options_puts_key(symbol),
                         ttls['options_chain'],
                         json.dumps(puts)
                     )
@@ -266,7 +266,7 @@ class OptionsProcessor:
                 }
 
                 await pipe.setex(
-                    Keys.options_chain(symbol),
+                    rkeys.options_chain_key(symbol),
                     ttls['options_chain'],
                     json.dumps(chain_payload)
                 )

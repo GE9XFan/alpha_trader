@@ -16,7 +16,6 @@ import aiohttp
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
 import logging
-from redis_keys import Keys
 
 
 class SentimentProcessor:

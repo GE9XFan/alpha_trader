@@ -3,6 +3,8 @@ Redis Key Schema - Standardized keys for AlphaTrader Pro
 This module defines the canonical Redis key patterns used across all modules.
 """
 
+from typing import Optional
+
 # Market Data Keys
 MARKET_KEYS = {
     'book': 'market:{symbol}:book',          # L2 order book
@@ -200,109 +202,109 @@ def get_ttl(data_type: str) -> int:
     """Get TTL for data type in seconds."""
     return TTL_CONFIG.get(data_type, 60)  # Default 60s
 
-class Keys:
-    """Legacy Keys class for backward compatibility."""
-    
-    @staticmethod
-    def market_book(symbol: str, exchange: str = None) -> str:
-        """Get market book key."""
-        if exchange:
-            return f'market:{symbol}:{exchange}:book'
-        return f'market:{symbol}:book'
-    
-    @staticmethod
-    def market_ticker(symbol: str) -> str:
-        """Get market ticker key."""
-        return f'market:{symbol}:ticker'
 
-    @staticmethod
-    def market_last(symbol: str) -> str:
-        """Get last traded price key."""
-        return f'market:{symbol}:last'
+# Convenience helpers -----------------------------------------------------------------
 
-    @staticmethod
-    def market_trades(symbol: str) -> str:
-        """Get market trades key."""
-        return f'market:{symbol}:trades'
-    
-    @staticmethod
-    def market_bars(symbol: str, timeframe: str = None) -> str:
-        """Get market bars key."""
-        if timeframe:
-            return f'market:{symbol}:bars:{timeframe}'
-        return f'market:{symbol}:bars'
-    
-    @staticmethod
-    def market_dom(symbol: str) -> str:
-        """Get market DOM key."""
-        return f'market:{symbol}:dom'
-    
-    @staticmethod
-    def options_chain(symbol: str) -> str:
-        """Get options chain key."""
-        return f'options:{symbol}:chain'
-    
-    @staticmethod
-    def options_calls(symbol: str) -> str:
-        """Get options calls key."""
-        return f'options:{symbol}:calls'
-    
-    @staticmethod
-    def options_puts(symbol: str) -> str:
-        """Get options puts key."""
-        return f'options:{symbol}:puts'
-    
-    @staticmethod
-    def options_greeks(symbol: str) -> str:
-        """Get options greeks key."""
-        return f'options:{symbol}:greeks'
+def market_book_key(symbol: str, exchange: Optional[str] = None) -> str:
+    """Return the order-book key for the symbol, optionally scoped to an exchange."""
+    if exchange:
+        return f"market:{symbol}:{exchange}:book"
+    return get_market_key(symbol, "book")
 
-    @staticmethod
-    def analytics_vpin(symbol: str) -> str:
-        """Get VPIN key."""
-        return ANALYTICS_KEYS['vpin'].format(symbol=symbol)
 
-    @staticmethod
-    def analytics_gex(symbol: str) -> str:
-        """Get GEX key."""
-        return ANALYTICS_KEYS['gex'].format(symbol=symbol)
+def market_ticker_key(symbol: str) -> str:
+    """Return the consolidated ticker key for a symbol."""
+    return get_market_key(symbol, "ticker")
 
-    @staticmethod
-    def analytics_dex(symbol: str) -> str:
-        """Get DEX key."""
-        return ANALYTICS_KEYS['dex'].format(symbol=symbol)
 
-    @staticmethod
-    def analytics_toxicity(symbol: str) -> str:
-        """Get toxicity summary key."""
-        return ANALYTICS_KEYS['toxicity'].format(symbol=symbol)
+def market_last_key(symbol: str) -> str:
+    """Return the cached last trade price key."""
+    return get_market_key(symbol, "last")
 
-    @staticmethod
-    def analytics_obi(symbol: str) -> str:
-        """Get OBI key."""
-        return ANALYTICS_KEYS['obi'].format(symbol=symbol)
 
-    @staticmethod
-    def analytics_metric(symbol: str, metric: str) -> str:
-        """Generic helper for symbol analytics metric."""
-        return f'analytics:{symbol}:{metric}'
+def market_trades_key(symbol: str) -> str:
+    """Return the rolling trades list key."""
+    return get_market_key(symbol, "trades")
 
-    @staticmethod
-    def analytics_portfolio_summary() -> str:
-        """Get portfolio summary key."""
-        return PORTFOLIO_ANALYTICS_KEYS['summary']
 
-    @staticmethod
-    def analytics_portfolio_correlation() -> str:
-        """Get portfolio correlation key."""
-        return PORTFOLIO_ANALYTICS_KEYS['correlation']
+def market_bars_key(symbol: str, timeframe: Optional[str] = None) -> str:
+    """Return the OHLCV bars key, optionally namespaced by timeframe."""
+    base = get_market_key(symbol, "bars")
+    if timeframe:
+        return f"{base}:{timeframe}"
+    return base
 
-    @staticmethod
-    def analytics_sector(sector: str) -> str:
-        """Get sector analytics key."""
-        return PORTFOLIO_ANALYTICS_KEYS['sector'].format(sector=sector)
 
-    @staticmethod
-    def heartbeat(module: str) -> str:
-        """Get heartbeat key."""
-        return f'module:heartbeat:{module}'
+def market_dom_key(symbol: str) -> str:
+    """Return the depth of market snapshot key."""
+    return get_market_key(symbol, "dom")
+
+
+def options_chain_key(symbol: str) -> str:
+    """Return the normalized option chain key."""
+    return get_options_key(symbol, "chain")
+
+
+def options_calls_key(symbol: str) -> str:
+    """Return the cached calls slice key."""
+    return f"options:{symbol}:calls"
+
+
+def options_puts_key(symbol: str) -> str:
+    """Return the cached puts slice key."""
+    return f"options:{symbol}:puts"
+
+
+def options_greeks_key(symbol: str) -> str:
+    """Return the option Greeks hash key."""
+    return get_options_key(symbol, "greeks")
+
+
+def analytics_vpin_key(symbol: str) -> str:
+    """Return the VPIN analytics key."""
+    return ANALYTICS_KEYS["vpin"].format(symbol=symbol)
+
+
+def analytics_gex_key(symbol: str) -> str:
+    """Return the gamma exposure analytics key."""
+    return ANALYTICS_KEYS["gex"].format(symbol=symbol)
+
+
+def analytics_dex_key(symbol: str) -> str:
+    """Return the delta exposure analytics key."""
+    return ANALYTICS_KEYS["dex"].format(symbol=symbol)
+
+
+def analytics_toxicity_key(symbol: str) -> str:
+    """Return the flow toxicity analytics key."""
+    return ANALYTICS_KEYS["toxicity"].format(symbol=symbol)
+
+
+def analytics_obi_key(symbol: str) -> str:
+    """Return the order-book imbalance analytics key."""
+    return ANALYTICS_KEYS["obi"].format(symbol=symbol)
+
+
+def analytics_metric_key(symbol: str, metric: str) -> str:
+    """Return an arbitrary analytics metric key."""
+    return f"analytics:{symbol}:{metric}"
+
+
+def analytics_portfolio_summary_key() -> str:
+    """Return the portfolio summary key."""
+    return PORTFOLIO_ANALYTICS_KEYS["summary"]
+
+
+def analytics_portfolio_correlation_key() -> str:
+    """Return the portfolio correlation key."""
+    return PORTFOLIO_ANALYTICS_KEYS["correlation"]
+
+
+def analytics_sector_key(sector: str) -> str:
+    """Return the sector analytics key for the supplied sector."""
+    return PORTFOLIO_ANALYTICS_KEYS["sector"].format(sector=sector)
+
+
+def heartbeat_key(module: str) -> str:
+    """Return the heartbeat key for a module."""
+    return get_system_key("heartbeat", module=module)

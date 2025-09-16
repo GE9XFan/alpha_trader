@@ -187,7 +187,7 @@ modules:
           obi: 20                    # intraday book skew
           friday_factor: 10          # optional uplift (weekly flows)
         thresholds:
-          min_confidence: 75
+          min_confidence: 60
           min_imbalance_notional: 2.0e9      # $2B combined or symbol-appropriate
           min_imbalance_ratio: 0.60          # |Imbalance| / (Paired + |Imbalance|)
           max_spread_bps: 8                  # option NBBO spread ≤ 8 bps of spot

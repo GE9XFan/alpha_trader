@@ -30,7 +30,8 @@ from typing import Dict, Any, List
 from datetime import datetime
 import pytz
 
-from redis_keys import Keys, get_system_key
+import redis_keys as rkeys
+from redis_keys import get_system_key
 
 
 class SignalDistributor:
@@ -381,7 +382,7 @@ class SignalValidator:
         if risk_halt and str(risk_halt).lower() in ('true', '1'):
             return False
 
-        ticker_raw = await self.redis.get(Keys.market_ticker(symbol))
+        ticker_raw = await self.redis.get(rkeys.market_ticker_key(symbol))
         if ticker_raw:
             if isinstance(ticker_raw, bytes):
                 ticker_raw = ticker_raw.decode('utf-8', errors='ignore')

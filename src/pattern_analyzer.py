@@ -21,7 +21,7 @@ from typing import Dict, List, Any, Optional
 import logging
 import traceback
 
-from redis_keys import Keys
+import redis_keys as rkeys
 
 
 class PatternAnalyzer:
@@ -49,7 +49,7 @@ class PatternAnalyzer:
         """
         try:
             # Get VPIN data as primary toxicity indicator
-            vpin_json = await self.redis.get(Keys.analytics_vpin(symbol))
+            vpin_json = await self.redis.get(rkeys.analytics_vpin_key(symbol))
             if not vpin_json:
                 return {'error': 'No VPIN data available'}
 
@@ -77,7 +77,7 @@ class PatternAnalyzer:
 
             # Store result
             await self.redis.setex(
-                Keys.analytics_toxicity(symbol),
+                rkeys.analytics_toxicity_key(symbol),
                 self.ttls.get('analytics', self.ttls.get('metrics', 60)),
                 json.dumps(result)
             )
@@ -105,7 +105,7 @@ class PatternAnalyzer:
         """
         try:
             # 1. Fetch current order book
-            book_json = await self.redis.get(Keys.market_book(symbol))
+            book_json = await self.redis.get(rkeys.market_book_key(symbol))
             if not book_json:
                 return {'error': 'No order book data'}
 
@@ -175,7 +175,7 @@ class PatternAnalyzer:
             # 6. Store in Redis
             ttl = self.ttls.get('analytics', self.ttls.get('metrics', 60))
             await self.redis.setex(
-                Keys.analytics_obi(symbol),
+                rkeys.analytics_obi_key(symbol),
                 ttl,
                 json.dumps(result)
             )
@@ -346,7 +346,7 @@ class PatternAnalyzer:
 
             # Store result
             sweep_value = 1.0 if is_sweep else 0.0
-            await self.redis.setex(Keys.analytics_metric(symbol, 'sweep'), 5, str(sweep_value))
+            await self.redis.setex(rkeys.analytics_metric_key(symbol, 'sweep'), 5, str(sweep_value))
 
             if is_sweep:
                 self.logger.info(f"SWEEP detected for {symbol}: {unique_prices} levels, {total_size} shares")
@@ -462,7 +462,7 @@ class PatternAnalyzer:
             # 7. Store in Redis
             ttl = self.ttls.get('analytics', self.ttls.get('metrics', 60))
             await self.redis.setex(
-                Keys.analytics_metric(symbol, 'hidden'),
+                rkeys.analytics_metric_key(symbol, 'hidden'),
                 ttl,
                 json.dumps(result)
             )

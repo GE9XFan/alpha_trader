@@ -804,23 +804,61 @@ class PositionManager:
                 strategy = position.get('strategy')
 
                 # Check stop loss hit
-                current_price = position.get('current_price', 0)
-                stop_loss = position.get('stop_loss', 0)
+                current_price_raw = position.get('current_price')
+                stop_loss_raw = position.get('stop_loss')
                 side = position.get('side')
 
-                if stop_loss > 0:
-                    if (side == 'LONG' and current_price <= stop_loss) or \
-                       (side == 'SHORT' and current_price >= stop_loss):
+                current_price = None
+                stop_loss = None
+
+                try:
+                    if current_price_raw is not None:
+                        current_price = float(current_price_raw)
+                except (TypeError, ValueError):
+                    self.logger.debug(
+                        "Invalid current price for %s: %r", position_id, current_price_raw
+                    )
+
+                try:
+                    if stop_loss_raw is not None:
+                        stop_loss = float(stop_loss_raw)
+                except (TypeError, ValueError):
+                    self.logger.debug(
+                        "Invalid stop loss for %s: %r", position_id, stop_loss_raw
+                    )
+
+                if (
+                    stop_loss is not None
+                    and stop_loss > 0
+                    and current_price is not None
+                    and side in {'LONG', 'SHORT'}
+                ):
+                    if (
+                        side == 'LONG' and current_price <= stop_loss
+                    ) or (
+                        side == 'SHORT' and current_price >= stop_loss
+                    ):
                         await self.close_position(position, current_price, 'Stop loss hit')
                         continue
 
                 # Check time-based exits for options
                 if position.get('contract', {}).get('type') == 'option':
-                    greeks = position.get('greeks', {})
-                    theta = greeks.get('theta', 0)
+                    greeks = position.get('greeks', {}) or {}
+                    theta_raw = greeks.get('theta')
+                    try:
+                        theta = float(theta_raw) if theta_raw is not None else 0.0
+                    except (TypeError, ValueError):
+                        self.logger.debug(
+                            "Invalid theta for %s: %r", position_id, theta_raw
+                        )
+                        theta = 0.0
 
                     # Exit if theta decay is too high
-                    if strategy == '0DTE' and abs(theta) > 50:  # $50/day decay
+                    if (
+                        strategy == '0DTE'
+                        and current_price is not None
+                        and abs(theta) > 50  # $50/day decay
+                    ):
                         await self.close_position(position, current_price, 'Theta decay limit')
 
             except Exception as e:

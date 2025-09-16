@@ -19,7 +19,7 @@ from typing import Dict, Any, Tuple, Optional, Iterable
 import logging
 import traceback
 
-from redis_keys import Keys
+import redis_keys as rkeys
 
 # OCC option symbol regex pattern: UNDERLYING(1-6) + YYMMDD(6) + C/P + STRIKE(8)
 _OCC_RE = re.compile(r'^(?P<root>[A-Z]{1,6})(?P<date>\d{6})(?P<cp>[CP])(?P<strike>\d{8})$')
@@ -92,7 +92,7 @@ class GEXDEXCalculator:
         """
         try:
             # 1. Get current spot price
-            ticker_json = await self.redis.get(Keys.market_ticker(symbol))
+            ticker_json = await self.redis.get(rkeys.market_ticker_key(symbol))
             if not ticker_json:
                 self.logger.warning(f"No ticker data for {symbol}")
                 return {'error': 'No spot price'}
@@ -107,7 +107,7 @@ class GEXDEXCalculator:
             using_normalized_chain = False
 
             try:
-                chain_json = await self.redis.get(Keys.options_chain(symbol))
+                chain_json = await self.redis.get(rkeys.options_chain_key(symbol))
             except Exception:
                 chain_json = None
 
@@ -320,7 +320,7 @@ class GEXDEXCalculator:
             # 6. Store in Redis with configured TTL
             ttl = self.ttls.get('analytics', self.ttls.get('metrics', 60))
             await self.redis.setex(
-                Keys.analytics_gex(symbol),
+                rkeys.analytics_gex_key(symbol),
                 ttl,
                 json.dumps(result)
             )
@@ -348,7 +348,7 @@ class GEXDEXCalculator:
         """
         try:
             # 1. Get current spot price
-            ticker_json = await self.redis.get(Keys.market_ticker(symbol))
+            ticker_json = await self.redis.get(rkeys.market_ticker_key(symbol))
             if not ticker_json:
                 self.logger.warning(f"No ticker data for {symbol}")
                 return {'error': 'No spot price'}
@@ -516,7 +516,7 @@ class GEXDEXCalculator:
             # 9. Store in Redis
             ttl = self.ttls.get('analytics', self.ttls.get('metrics', 60))
             await self.redis.setex(
-                Keys.analytics_dex(symbol),
+                rkeys.analytics_dex_key(symbol),
                 ttl,
                 json.dumps(result)
             )

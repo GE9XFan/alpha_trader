@@ -2,12 +2,12 @@
 
 ## Refactor Snapshot
 - **Architecture**: 29 production modules now sit behind a Redis-centric message fabric while `main.py` orchestrates configuration, logging, and shared connection pools.【F:src/main.py†L27-L192】
-- **Data integrity**: The canonical Redis schema now enumerates the `analytics:*` portfolio/sector keys and TTL helpers that calculators use when persisting outputs, keeping Redis namespaces and expirations consistent across modules.【F:src/redis_keys.py†L25-L205】
+- **Data integrity**: The canonical Redis schema now publishes typed helper functions (`get_market_key`, `market_bars_key`, `analytics_vpin_key`, `get_system_key`, etc.) that replaced the legacy `Keys` class, so ingestion, analytics, and signal modules all construct Redis namespaces through validated helpers while sharing TTL policies.【F:src/redis_keys.py†L25-L304】【F:src/ibkr_ingestion.py†L560-L748】【F:src/gex_dex_calculator.py†L29-L520】【F:src/signal_generator.py†L520-L606】
 - **Analytics coordination**: `AnalyticsEngine` seeds calculators on cadence, publishes sector/portfolio snapshots, and idles gracefully outside configured market hours via the new aggregator pipeline.【F:src/analytics_engine.py†L35-L445】
 - **Signal pipeline**: `SignalGenerator` now injects strategy handlers/feature readers, adds loop backoff, and delegates idempotency to `SignalDeduplication`; DTE and MOC strategies share typed feature normalization, contradiction gating, and contract hysteresis.【F:src/signal_generator.py†L48-L209】【F:src/dte_strategies.py†L13-L218】【F:src/moc_strategy.py†L61-L304】
 - **Execution & risk controls**: `ExecutionManager` caches a shared `RiskManager`, reconciles live IBKR positions, strips signal metadata from persisted orders, and escalates partial fills/timeouts while `PositionManager` enforces trailing-stop/EOD rules and `EmergencyManager` drains queues with async Redis primitives.【F:src/execution_manager.py†L59-L755】【F:src/position_manager.py†L70-L372】【F:src/emergency_manager.py†L80-L260】
 - **Distribution & telemetry**: `SignalDistributor` enforces validator guardrails, persistent tier scheduling, and dead-letter handling while `PerformanceTracker` captures equity curves, profit factor, Sharpe, and daily PnL for reviews.【F:src/signal_distributor.py†L27-L236】【F:src/signal_performance.py†L25-L181】
-- **Testing coverage**: Async suites now cover analytics cadence, signal flow, and consolidated execution/position/risk/emergency scenarios with a lightweight Redis stub validating risk-manager caching, sanitized orders, Greek aggregation, and mass-cancel flows.【F:tests/test_analytics_engine.py†L1-L216】【F:tests/test_signal_generation_enhancements.py†L1-L120】【F:tests/test_managers.py†L1-L253】
+- **Testing coverage**: Async suites now cover analytics cadence, signal flow, and consolidated execution/position/risk/emergency scenarios with a lightweight Redis stub validating risk-manager caching, sanitized orders, Greek aggregation, and mass-cancel flows; these suites import the new helper functions so coverage exercises the functional Redis interface end-to-end.【F:tests/test_analytics_engine.py†L1-L216】【F:tests/test_signal_generation_enhancements.py†L1-L120】【F:tests/test_managers.py†L1-L253】
 - **Focus areas**: Market ingestion, analytics, signal generation, and risk/execution are production-grade; social, dashboard, and morning-automation services remain scaffolding pending API integrations.
 
 ## Module Completion Matrix
@@ -43,6 +43,11 @@
 |  | `news_analyzer.py` | 318 | 30% | Scheduler blueprint awaiting real news pipelines and archival plumbing.【F:src/news_analyzer.py†L65-L254】 |
 |  | `report_generator.py` | 97 | 50% | Data archival routines largely implemented; reporting templates can be expanded.【F:src/report_generator.py†L25-L189】 |
 
+## Recent Deliverables – Redis Schema Alignment
+- Replaced the monolithic `Keys` helper with `redis_keys.py` function exports so ingestion, analytics, and signal modules build Redis namespaces through validated helpers, eliminating runtime `AttributeError`s and keeping pipelines aligned with the refactored schema.【F:src/redis_keys.py†L25-L304】【F:src/ibkr_ingestion.py†L560-L748】【F:src/gex_dex_calculator.py†L29-L520】【F:src/signal_generator.py†L520-L606】
+- Updated ingestion, analytics, and signal pipelines to call the new helpers when persisting market data, analytics outputs, monitoring heartbeats, and deduped payloads so key construction is centralized and easier to audit.【F:src/ibkr_ingestion.py†L560-L748】【F:src/analytics_engine.py†L35-L205】【F:src/signal_generator.py†L520-L606】
+- Refreshed analytics and signal test suites to import the helper functions directly, exercising the functional interface end-to-end without depending on the removed class API.【F:tests/test_analytics_engine.py†L1-L216】【F:tests/test_signal_generation_enhancements.py†L1-L120】
+
 ## Recent Deliverables – Execution & Risk Hardening
 - Cached `RiskManager` instances behind an async factory in `ExecutionManager`, reconciled live IBKR positions on startup, sanitized Redis order snapshots, and expanded partial-fill plus timeout telemetry for operational visibility.【F:src/execution_manager.py†L59-L755】
 - Upgraded `PositionManager` with injected contract resolvers, startup reconciliation, strategy-aware trailing stops, and configurable end-of-day reduction/close rules persisted in Redis.【F:src/position_manager.py†L47-L372】
@@ -59,7 +64,7 @@
 - **Surface performance telemetry** – Expose `PerformanceTracker` outputs (profit factor, Sharpe, drawdown, daily PnL) via dashboards or reporting once UX scaffolding is ready.【F:src/signal_performance.py†L143-L181】【F:src/dashboard_server.py†L83-L223】
 
 ## Architecture & Redis Conventions
-- **Redis-only messaging** keeps modules isolated; new features must register keys through `redis_keys.py` to maintain a single schema source of truth.【F:src/redis_keys.py†L1-L205】
+- **Redis-only messaging** keeps modules isolated; new features must register keys through the `redis_keys.py` function exports to maintain a single schema source of truth and leverage the validation baked into the helpers.【F:src/redis_keys.py†L1-L304】
 - **Configuration-first toggles**: `config/config.yaml` enables/disables module groups and encodes strategy thresholds, allowing staged rollouts without code changes.【F:config/config.yaml†L58-L240】
 - **Logging uniformity**: `main.py` configures rotating file and console handlers; modules should continue using `logging.getLogger(__name__)` for consistent traceability.【F:src/main.py†L27-L66】【F:src/signal_generator.py†L49-L65】
 
