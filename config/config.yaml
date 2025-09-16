@@ -85,6 +85,34 @@ modules:
     enabled: true
     cadence_hz: 2
     analytics_rth_only: false
+    store_ttls:
+      analytics: 60
+      portfolio: 60
+      sector: 120
+      correlation: 900
+      heartbeat: 15
+    update_intervals:
+      vpin: 5
+      gex_dex: 30
+      flow_toxicity: 60
+      order_book: 1
+      sweep_detection: 2
+      portfolio: 15
+      sectors: 30
+      correlation: 300
+    sector_map:
+      SPY: INDEX
+      QQQ: TECH
+      IWM: SMALLCAP
+      AAPL: TECH
+      TSLA: AUTO
+      NVDA: TECH
+      AMD: SEMI
+      GOOGL: TECH
+      META: TECH
+      AMZN: CONSUMER
+      MSFT: TECH
+      VXX: VOLATILITY
   
   signals:
     enabled: true

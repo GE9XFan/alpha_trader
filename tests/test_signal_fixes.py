@@ -42,7 +42,7 @@ async def test_fixes():
         # Test 2: Check OBI format
         print("\n2. Checking OBI format...")
         for symbol in ['SPY', 'QQQ', 'IWM']:
-            obi_data = await redis.get(f'metrics:{symbol}:obi')
+            obi_data = await redis.get(f'analytics:{symbol}:obi')
             if obi_data:
                 try:
                     if obi_data.startswith('{'):
@@ -59,7 +59,7 @@ async def test_fixes():
         # Test 3: Check hidden orders format
         print("\n3. Checking hidden orders format...")
         for symbol in ['SPY', 'QQQ', 'IWM']:
-            hidden_data = await redis.get(f'metrics:{symbol}:hidden')
+            hidden_data = await redis.get(f'analytics:{symbol}:hidden')
             if hidden_data:
                 try:
                     if hidden_data.startswith('{'):

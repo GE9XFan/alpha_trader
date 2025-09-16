@@ -140,9 +140,9 @@ async def verify_fixes():
     # Check metrics freshness
     print("\n• Metrics Freshness:")
     for symbol in ['SPY', 'QQQ', 'IWM']:
-        vpin = await r.get(f'metrics:{symbol}:vpin')
+        vpin = await r.get(f'analytics:{symbol}:vpin')
         if vpin:
-            vpin_ttl = await r.ttl(f'metrics:{symbol}:vpin')
+            vpin_ttl = await r.ttl(f'analytics:{symbol}:vpin')
             print(f"  {symbol}: VPIN={float(vpin):.3f}, TTL={vpin_ttl}s")
     
     print("\n" + "=" * 80)

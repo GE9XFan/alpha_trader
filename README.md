@@ -17,16 +17,16 @@ The original monolith has been reorganized into 29 focused modules grouped by re
 ### Analytics
 | Module | Lines | Primary Classes | Responsibilities | Redis Touchpoints |
 | --- | --- | --- | --- | --- |
-| `analytics_engine.py` | 344 | `AnalyticsEngine`, `MetricsAggregator` | Coordinates analytics cadence, seeds calculators, and publishes portfolio metrics and heartbeats.【F:src/analytics_engine.py†L185-L341】 | `metrics:{symbol}:*`, `discovered:*`, `heartbeat:analytics`【F:src/analytics_engine.py†L2-L13】 |
-| `vpin_calculator.py` | 317 | `VPINCalculator` | Performs volume-synchronized toxicity calculations using legacy bucket logic now encapsulated here.【F:src/vpin_calculator.py†L31-L116】 | `market:{symbol}:trades`, `metrics:{symbol}:vpin`, `discovered:vpin_bucket_size`【F:src/vpin_calculator.py†L2-L12】 |
-| `gex_dex_calculator.py` | 482 | `GEXDEXCalculator` | Computes gamma and delta exposure from option greeks and publishes exposures per symbol.【F:src/gex_dex_calculator.py†L29-L140】 | `options:{symbol}:*:greeks`, `metrics:{symbol}:gex`, `metrics:{symbol}:dex`【F:src/gex_dex_calculator.py†L2-L12】 |
-| `pattern_analyzer.py` | 477 | `PatternAnalyzer` | Detects sweep activity, hidden orders, and order-book imbalance for toxicity scoring.【F:src/pattern_analyzer.py†L32-L186】 | `market:{symbol}:book`, `market:{symbol}:trades`, `metrics:{symbol}:obi`, `metrics:{symbol}:hidden`【F:src/pattern_analyzer.py†L2-L14】 |
+| `analytics_engine.py` | 585 | `AnalyticsEngine`, `MetricsAggregator` | Coordinates analytics cadence, seeds calculators, and publishes portfolio metrics and heartbeats.【F:src/analytics_engine.py†L35-L584】 | `analytics:{symbol}:*`, `analytics:portfolio:*`, `discovered:*`, `module:heartbeat:analytics`【F:src/analytics_engine.py†L2-L13】 |
+| `vpin_calculator.py` | 317 | `VPINCalculator` | Performs volume-synchronized toxicity calculations using legacy bucket logic now encapsulated here.【F:src/vpin_calculator.py†L31-L116】 | `market:{symbol}:trades`, `analytics:{symbol}:vpin`, `discovered:vpin_bucket_size`【F:src/vpin_calculator.py†L2-L12】 |
+| `gex_dex_calculator.py` | 482 | `GEXDEXCalculator` | Computes gamma and delta exposure from option greeks and publishes exposures per symbol.【F:src/gex_dex_calculator.py†L29-L140】 | `options:{symbol}:*:greeks`, `analytics:{symbol}:gex`, `analytics:{symbol}:dex`【F:src/gex_dex_calculator.py†L2-L12】 |
+| `pattern_analyzer.py` | 477 | `PatternAnalyzer` | Detects sweep activity, hidden orders, and order-book imbalance for toxicity scoring.【F:src/pattern_analyzer.py†L32-L186】 | `market:{symbol}:book`, `market:{symbol}:trades`, `analytics:{symbol}:obi`, `analytics:{symbol}:hidden`【F:src/pattern_analyzer.py†L2-L14】 |
 | `parameter_discovery.py` | 828 | `ParameterDiscovery` | Automates VPIN bucket tuning, temporal lookbacks, and correlation matrix generation using configurable schedules.【F:src/parameter_discovery.py†L31-L246】 | `market:{symbol}:*`, `discovered:*`【F:src/parameter_discovery.py†L2-L15】 |
 
 ### Signal Generation
 | Module | Lines | Primary Classes | Responsibilities | Redis Touchpoints |
 | --- | --- | --- | --- | --- |
-| `signal_generator.py` | 512 | `SignalGenerator` | Applies guardrails, requests strategy evaluations, enqueues signals, and records audits.【F:src/signal_generator.py†L33-L420】 | `metrics:{symbol}:*`, `signals:pending:{symbol}`, `signals:latest:{symbol}`, `health:signals:heartbeat`【F:src/signal_generator.py†L2-L17】 |
+| `signal_generator.py` | 512 | `SignalGenerator` | Applies guardrails, requests strategy evaluations, enqueues signals, and records audits.【F:src/signal_generator.py†L33-L420】 | `analytics:{symbol}:*`, `signals:pending:{symbol}`, `signals:latest:{symbol}`, `health:signals:heartbeat`【F:src/signal_generator.py†L2-L17】 |
 | `dte_strategies.py` | 822 | `DTEStrategies` | Encapsulates 0DTE/1DTE/14DTE decision rules and contract selection routines formerly embedded in the monolith.【F:src/dte_strategies.py†L30-L300】 | Consumes analytics metrics; writes strategy notes through the generator. |
 | `moc_strategy.py` | 321 | `MOCStrategy` | Implements market-on-close signal logic with hysteresis memory keyed per DTE band.【F:src/moc_strategy.py†L25-L223】 | `signals:last_contract:{symbol}:moc:{side}:{dte_band}`【F:src/moc_strategy.py†L2-L19】 |
 | `signal_deduplication.py` | 322 | `SignalDeduplication` | Provides contract fingerprints, trading-day buckets, and atomic Lua dedupe/cooldown enforcement.【F:src/signal_deduplication.py†L21-L133】 | `signals:emitted:{signal_id}`, `signals:cooldown:{contract_fp}`, `signals:audit:{contract_fp}`, `metrics:signals:*`【F:src/signal_deduplication.py†L1-L74】 |
@@ -65,7 +65,7 @@ These modules are scaffolding-heavy and require additional API credentials.
 | `report_generator.py` | 97 | `DataArchiver` | Archives historical data sets and produces daily reports using Redis snapshots.【F:src/report_generator.py†L25-L189】 |
 
 ## Redis Architecture & Data Flow
-All modules share a single Redis schema defined in `redis_keys.py`, which standardizes market data, analytics metrics, order/position keys, and TTL policies.【F:src/redis_keys.py†L1-L141】 Key helpers like `get_signal_key`, `get_position_key`, and the legacy `Keys` compatibility class maintain backward compatibility with earlier naming conventions.【F:src/redis_keys.py†L143-L205】
+All modules share a single Redis schema defined in `redis_keys.py`, which standardizes market data, analytics metrics, portfolio/sector summaries, order/position keys, and TTL policies.【F:src/redis_keys.py†L25-L205】 The expanded `Keys` helpers cover canonical `analytics:{symbol}:*` namespaces alongside portfolio rollups while preserving compatibility with legacy naming patterns.【F:src/redis_keys.py†L203-L304】
 
 ```
            +---------------------+       +-----------------------+
@@ -99,6 +99,12 @@ All modules share a single Redis schema defined in `redis_keys.py`, which standa
 
 Each box consumes and publishes Redis keys only; orchestration (`main.py`) wires modules together by passing shared Redis connections, keeping runtime coupling minimal.【F:src/main.py†L97-L192】
 
+## Analytics Cadence & Aggregation
+- **Cadence-aware scheduler** – `AnalyticsEngine` coordinates VPIN, GEX/DEX, and pattern analyzers on configurable intervals, gating execution outside RTH windows and surfacing idle/running state via module heartbeats.【F:src/analytics_engine.py†L400-L556】
+- **Portfolio & sector rollups** – `MetricsAggregator` composes symbol snapshots into `analytics:portfolio:summary`, `analytics:sector:{sector}`, and correlation matrices with TTLs enforced through the schema helpers.【F:src/analytics_engine.py†L35-L205】【F:src/redis_keys.py†L25-L304】
+- **Config-driven controls** – `config/config.yaml` exposes analytics TTLs, update cadences, and sector mappings so operators can tune schedules without code changes.【F:config/config.yaml†L84-L115】
+- **Canonical calculator outputs** – VPIN, GEX/DEX, and pattern analyzers now publish into the canonical `analytics:{symbol}:*` keys via the shared helper layer, aligning all downstream consumers.【F:src/vpin_calculator.py†L31-L144】【F:src/gex_dex_calculator.py†L1-L514】【F:src/pattern_analyzer.py†L1-L460】
+
 ## Contract-Centric Deduplication
 Signal deduplication was hardened to guarantee idempotency and multi-worker safety:
 - **Stable fingerprints**: `contract_fingerprint` hashes symbol, strategy, expiry, strike, multiplier, and venue into a deterministic key (`sigfp:<hash>`).【F:src/signal_deduplication.py†L21-L47】
@@ -131,13 +137,13 @@ Because IBKR does not expose market-maker identities, toxicity detection blends 
 - `events:options:chain` – Optional pub/sub broadcast for consumers that want to react immediately to refreshed chains; override `alpha_vantage.options_pubsub_channel` to use an alternate topic.【F:src/av_ingestion.py†L125-L210】【F:config/config.yaml†L41-L97】
 
 ## Development Workflow
-- **Redis schema** – Use the helpers in `redis_keys.py` when adding new keys to guarantee consistency and TTL discipline.【F:src/redis_keys.py†L143-L205】
+- **Redis schema** – Use the helpers in `redis_keys.py` when adding new keys to guarantee consistency and TTL discipline, including the new analytics and portfolio helpers consumed by calculators and aggregators.【F:src/redis_keys.py†L25-L304】
 - **Modular testing** – Each major service exposes async `start()` and `stop()` methods (or synchronous equivalents) to support targeted integration tests and rehearsal in isolation.【F:src/analytics_engine.py†L228-L341】【F:src/signal_generator.py†L121-L199】
 - **Configuration-first design** – Module toggles and thresholds live under `config/config.yaml` (`modules`, `signals.strategies`, `risk_management`, etc.), making it straightforward to stage or disable features during development.【F:config/config.yaml†L58-L288】
 - **Optional services** – Social, dashboard, and morning-analysis modules contain extensive TODO markers describing pending work; treat them as blueprints until the required APIs and dependencies are provisioned.【F:src/twitter_bot.py†L35-L133】【F:src/dashboard_server.py†L83-L223】【F:src/morning_scanner.py†L85-L206】
 
 ## Testing & Validation
-Targeted regression tests now accompany the market-data helpers. `tests/test_ibkr_processor.py` exercises depth normalization, aggregated top-of-book generation, and trade/ticker payload shaping; run it with `pytest tests/test_ibkr_processor.py` after altering ingestion code to guarantee deterministic math.【F:tests/test_ibkr_processor.py†L1-L68】 Legacy integration suites (`tests/test_day6.py`, `tests/test_day8.py`) remain in place while the refactor migrates coverage to the new module boundaries, and Redis-based smoke tests such as `tests/verify_signals.py` still validate end-to-end data flows.【F:tests/test_day6.py†L21-L39】【F:tests/test_day8.py†L18-L30】【F:tests/verify_signals.py†L1-L60】 Use `pytest` with `pytest-asyncio` for async modules.【F:requirements.txt†L22-L28】
+Targeted regression tests now accompany the market-data helpers and analytics scheduler. `tests/test_ibkr_processor.py` exercises depth normalization, aggregated top-of-book generation, and trade/ticker payload shaping; `tests/test_analytics_engine.py` verifies aggregator math, TTLs, correlation fallbacks, and market-hours gating across the refreshed scheduler.【F:tests/test_ibkr_processor.py†L1-L68】【F:tests/test_analytics_engine.py†L1-L216】 Legacy integration suites (`tests/test_day6.py`, `tests/test_day8.py`) remain in place while the refactor migrates coverage to the new module boundaries, and Redis-based smoke tests such as `tests/verify_signals.py` still validate end-to-end data flows.【F:tests/test_day6.py†L21-L39】【F:tests/test_day8.py†L18-L30】【F:tests/verify_signals.py†L1-L60】 Use `pytest` with `pytest-asyncio` for async modules.【F:requirements.txt†L22-L28】
 
 ## Roadmap Snapshot
 Implementation priorities are tracked in `implementation_plan.md`, including module completion percentages, outstanding TODO counts, and integration milestones across execution, social, and dashboard pillars.【F:implementation_plan.md†L1-L40】 Refer to that document before beginning new work to understand dependencies and sequencing.

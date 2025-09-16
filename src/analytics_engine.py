@@ -8,172 +8,344 @@ Redis keys used:
 - market:{symbol}:ticker: Market data
 - market:{symbol}:trades: Trade data
 - market:{symbol}:book: Order book data
-- metrics:{symbol}:*: All calculated metrics
+- analytics:{symbol}:*: Symbol analytics outputs
+- analytics:portfolio:*: Portfolio and correlation artifacts
 - discovered:*: Discovered parameters
-- heartbeat:analytics: Heartbeat status
+- module:heartbeat:analytics: Heartbeat status
 """
 
-import numpy as np
 import pandas as pd
 import json
 import redis.asyncio as aioredis
 import time
 import asyncio
 import pytz
-import math
 from datetime import datetime, time as datetime_time
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Optional
+from collections import defaultdict
 import logging
 import traceback
 
+from redis_keys import Keys, get_ttl
+from vpin_calculator import VPINCalculator
+from gex_dex_calculator import GEXDEXCalculator
+from pattern_analyzer import PatternAnalyzer
+
 
 class MetricsAggregator:
-    """
-    Aggregates metrics across symbols for portfolio-level analysis.
-    """
+    """Aggregate symbol analytics into portfolio, sector, and correlation views."""
 
-    def __init__(self, config: Dict[str, Any], redis_conn):
-        """Initialize metrics aggregator."""
+    def __init__(self, config: Dict[str, Any], redis_conn: aioredis.Redis):
         self.config = config
         self.redis = redis_conn
         self.logger = logging.getLogger(__name__)
 
-        # Load symbols from config
-        syms = config.get('symbols', {})
-        self.symbols = list({*syms.get('standard', []), *syms.get('level2', [])})
+        symbols_cfg = config.get('symbols', {})
+        self.symbols = sorted({*symbols_cfg.get('standard', []), *symbols_cfg.get('level2', [])})
 
-        # Sectors mapping (could be enhanced with more symbols)
-        self.sectors = {
-            'SPY': 'INDEX',
-            'QQQ': 'TECH',
-            'IWM': 'SMALLCAP',
-            'AAPL': 'TECH',
-            'MSFT': 'TECH',
-            'GOOGL': 'TECH',
-            'AMZN': 'CONSUMER',
-            'TSLA': 'AUTO',
-            'NVDA': 'TECH',
-            'META': 'TECH',
-            'JPM': 'FINANCE',
-            'GS': 'FINANCE'
+        analytics_cfg = config.get('modules', {}).get('analytics', {})
+        store_ttls = analytics_cfg.get('store_ttls', {})
+        self.ttls = {
+            'symbol': store_ttls.get('analytics', get_ttl('analytics')),
+            'portfolio': store_ttls.get('portfolio', get_ttl('analytics_portfolio')),
+            'sector': store_ttls.get('sector', get_ttl('analytics_sector')),
+            'correlation': store_ttls.get('correlation', get_ttl('analytics_correlation')),
         }
 
-    async def calculate_portfolio_metrics(self) -> dict:
-        """
-        Calculate portfolio-wide metrics from all symbols.
-        """
-        metrics = {
-            'avg_vpin': 0,
-            'max_vpin': 0,
-            'min_vpin': 1,
-            'toxic_count': 0,
-            'total_gex': 0,
-            'total_dex': 0,
-            'most_toxic': None,
+        sector_map_cfg = analytics_cfg.get('sector_map', {})
+        self.sector_map = {symbol: sector_map_cfg.get(symbol, 'OTHER') for symbol in self.symbols}
+
+        tox_cfg = config.get('parameter_discovery', {}).get('toxicity_detection', {}).get('vpin_thresholds', {})
+        self.toxic_threshold = float(tox_cfg.get('toxic', 0.7))
+
+        corr_cfg = config.get('parameter_discovery', {}).get('correlation', {})
+        self.correlation_window = int(corr_cfg.get('calculation_window', 500))
+        self.min_correlation_symbols = int(corr_cfg.get('min_correlation_symbols', 3))
+        risk_cfg = config.get('risk_management', {})
+        self.correlation_threshold = float(risk_cfg.get('correlation_limit', 0.7))
+
+        self._last_snapshots: Dict[str, Dict[str, Any]] = {}
+
+    async def calculate_portfolio_metrics(self) -> Dict[str, Any]:
+        """Compute and persist portfolio-wide analytics aggregates."""
+        snapshots = await self._gather_symbol_snapshots()
+        self._last_snapshots = {snap['symbol']: snap for snap in snapshots}
+
+        vpins = [snap['vpin'] for snap in snapshots if snap.get('vpin') is not None]
+        max_symbol = None
+        max_vpin = 0.0
+        min_vpin = 1.0 if vpins else 0.0
+
+        for snap in snapshots:
+            vpin_value = snap.get('vpin')
+            if vpin_value is None:
+                continue
+            if vpin_value > max_vpin:
+                max_vpin = vpin_value
+                max_symbol = snap['symbol']
+            if vpin_value < min_vpin:
+                min_vpin = vpin_value
+
+        metrics: Dict[str, Any] = {
+            'timestamp': time.time(),
+            'symbol_count': len(snapshots),
+            'avg_vpin': round(sum(vpins) / len(vpins), 4) if vpins else None,
+            'max_vpin': round(max_vpin, 4) if vpins else None,
+            'min_vpin': round(min_vpin, 4) if vpins else None,
+            'max_vpin_symbol': max_symbol,
+            'toxic_count': sum(1 for snap in snapshots if (snap.get('vpin') or 0) >= self.toxic_threshold),
+            'total_gex': float(sum(snap.get('gex', 0.0) for snap in snapshots)),
+            'total_dex': float(sum(snap.get('dex', 0.0) for snap in snapshots)),
             'sector_flows': {},
-            'timestamp': time.time()
         }
 
-        vpins = []
-        gex_total = 0
-        dex_total = 0
+        metrics['sector_flows'] = self._build_sector_summary(snapshots)
 
-        for symbol in self.symbols:
-            # Get VPIN
-            vpin_json = await self.redis.get(f'metrics:{symbol}:vpin')
-            if vpin_json:
-                vpin_data = json.loads(vpin_json)
-                vpin = vpin_data.get('value', 0.5)
-                vpins.append(vpin)
-
-                if vpin > 0.7:
-                    metrics['toxic_count'] += 1
-                    if not metrics['most_toxic'] or vpin > metrics['max_vpin']:
-                        metrics['most_toxic'] = symbol
-                        metrics['max_vpin'] = vpin
-
-                metrics['min_vpin'] = min(metrics['min_vpin'], vpin)
-
-            # Get GEX
-            gex_json = await self.redis.get(f'metrics:{symbol}:gex')
-            if gex_json:
-                gex_data = json.loads(gex_json)
-                gex_total += gex_data.get('total_gex', 0)
-
-            # Get DEX
-            dex_json = await self.redis.get(f'metrics:{symbol}:dex')
-            if dex_json:
-                dex_data = json.loads(dex_json)
-                dex_total += dex_data.get('total_dex', 0)
-
-        # Calculate averages
-        if vpins:
-            metrics['avg_vpin'] = sum(vpins) / len(vpins)
-
-        metrics['total_gex'] = gex_total
-        metrics['total_dex'] = dex_total
-
-        # Store portfolio metrics
         await self.redis.setex(
-            'metrics:portfolio',
-            60,
+            Keys.analytics_portfolio_summary(),
+            self.ttls['portfolio'],
             json.dumps(metrics)
         )
 
         return metrics
 
-    async def calculate_cross_asset_correlations(self) -> dict:
-        """
-        Calculate correlations between symbols.
-        """
-        # This would require historical price data
-        # For now, return placeholder
-        return {
-            'status': 'placeholder',
-            'message': 'Requires historical data collection'
+    async def calculate_sector_flows(self) -> Dict[str, Any]:
+        """Persist sector-level aggregates derived from the most recent snapshots."""
+        snapshots = list(self._last_snapshots.values()) or await self._gather_symbol_snapshots()
+        summary = self._build_sector_summary(snapshots)
+        ttl = self.ttls['sector']
+
+        for sector, payload in summary.items():
+            await self.redis.setex(Keys.analytics_sector(sector), ttl, json.dumps(payload))
+
+        return summary
+
+    async def calculate_cross_asset_correlations(self) -> Dict[str, Any]:
+        """Publish a correlation matrix using discovered data or on-the-fly calculations."""
+        payload: Dict[str, Any] = {
+            'timestamp': time.time(),
+            'source': None,
+            'matrix': {},
+            'pair_count': 0,
+            'high_pairs': [],
         }
 
-    async def calculate_sector_flows(self) -> dict:
-        """
-        Calculate sector-level flow metrics.
-        """
-        sector_metrics = {}
+        discovered = await self._fetch_json('discovered:correlation_matrix')
+        matrix: Optional[Dict[str, Dict[str, float]]] = None
+
+        if discovered:
+            payload['source'] = 'discovered'
+            matrix = self._sanitize_correlation_matrix(discovered)
+        else:
+            payload['source'] = 'computed'
+            matrix = await self._compute_correlation_from_bars()
+
+        if not matrix:
+            payload['source'] = payload['source'] or 'unavailable'
+        else:
+            payload['matrix'] = matrix
+            symbols = sorted(matrix.keys())
+            seen_pairs = set()
+            for base in symbols:
+                for peer, value in matrix.get(base, {}).items():
+                    if base == peer:
+                        continue
+                    pair = tuple(sorted((base, peer)))
+                    if pair in seen_pairs:
+                        continue
+                    seen_pairs.add(pair)
+                    payload['pair_count'] += 1
+                    if abs(value) >= self.correlation_threshold:
+                        payload['high_pairs'].append({
+                            'pair': list(pair),
+                            'correlation': value,
+                        })
+
+        await self.redis.setex(
+            Keys.analytics_portfolio_correlation(),
+            self.ttls['correlation'],
+            json.dumps(payload)
+        )
+
+        return payload
+
+    async def _gather_symbol_snapshots(self) -> List[Dict[str, Any]]:
+        snapshots: List[Dict[str, Any]] = []
 
         for symbol in self.symbols:
-            sector = self.sectors.get(symbol, 'OTHER')
+            snapshot: Dict[str, Any] = {
+                'symbol': symbol,
+                'sector': self.sector_map.get(symbol, 'OTHER'),
+                'timestamp': time.time(),
+                'vpin': None,
+                'gex': 0.0,
+                'dex': 0.0,
+                'call_dex': 0.0,
+                'put_dex': 0.0,
+                'volume': 0.0,
+            }
 
-            if sector not in sector_metrics:
-                sector_metrics[sector] = {
-                    'symbols': [],
-                    'avg_vpin': [],
-                    'total_volume': 0,
-                    'net_flow': 0
-                }
+            vpin_data = await self._fetch_json(Keys.analytics_vpin(symbol))
+            if vpin_data:
+                try:
+                    snapshot['vpin'] = float(vpin_data.get('value'))
+                except (TypeError, ValueError):
+                    snapshot['vpin'] = None
 
-            sector_metrics[sector]['symbols'].append(symbol)
+            gex_data = await self._fetch_json(Keys.analytics_gex(symbol))
+            if gex_data:
+                snapshot['gex'] = float(gex_data.get('total_gex', 0.0))
 
-            # Get VPIN
-            vpin_json = await self.redis.get(f'metrics:{symbol}:vpin')
-            if vpin_json:
-                vpin_data = json.loads(vpin_json)
-                sector_metrics[sector]['avg_vpin'].append(vpin_data.get('value', 0.5))
+            dex_data = await self._fetch_json(Keys.analytics_dex(symbol))
+            if dex_data:
+                snapshot['dex'] = float(dex_data.get('total_dex', 0.0))
+                snapshot['call_dex'] = float(dex_data.get('call_dex', 0.0))
+                snapshot['put_dex'] = float(dex_data.get('put_dex', 0.0))
 
-            # Get volume (from ticker)
-            ticker_json = await self.redis.get(f'market:{symbol}:ticker')
-            if ticker_json:
-                ticker = json.loads(ticker_json)
-                volume = ticker.get('volume', 0)
-                sector_metrics[sector]['total_volume'] += volume
+            ticker = await self._fetch_json(Keys.market_ticker(symbol))
+            if ticker:
+                try:
+                    snapshot['volume'] = float(ticker.get('volume') or ticker.get('vol') or 0.0)
+                except (TypeError, ValueError):
+                    snapshot['volume'] = 0.0
 
-        # Calculate sector averages
-        for sector in sector_metrics:
-            vpins = sector_metrics[sector]['avg_vpin']
-            if vpins:
-                sector_metrics[sector]['avg_vpin'] = sum(vpins) / len(vpins)
-            else:
-                sector_metrics[sector]['avg_vpin'] = 0.5
+            snapshots.append(snapshot)
 
-        return sector_metrics
+        return snapshots
+
+    def _build_sector_summary(self, snapshots: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        summary: Dict[str, Dict[str, Any]] = {}
+
+        for snap in snapshots:
+            sector = snap.get('sector', 'OTHER')
+            data = summary.setdefault(sector, {
+                'symbols': [],
+                'avg_vpin': [],
+                'total_volume': 0.0,
+                'total_gex': 0.0,
+                'total_dex': 0.0,
+                'call_dex': 0.0,
+                'put_dex': 0.0,
+                'toxic_symbols': [],
+                'timestamp': time.time(),
+            })
+
+            data['symbols'].append(snap['symbol'])
+            data['total_volume'] += snap.get('volume', 0.0) or 0.0
+            data['total_gex'] += snap.get('gex', 0.0) or 0.0
+            data['total_dex'] += snap.get('dex', 0.0) or 0.0
+            data['call_dex'] += snap.get('call_dex', 0.0) or 0.0
+            data['put_dex'] += snap.get('put_dex', 0.0) or 0.0
+
+            vpin_value = snap.get('vpin')
+            if vpin_value is not None:
+                data['avg_vpin'].append(vpin_value)
+                if vpin_value >= self.toxic_threshold:
+                    data['toxic_symbols'].append(snap['symbol'])
+
+        for sector, data in summary.items():
+            vpins = data.pop('avg_vpin')
+            avg_vpin = sum(vpins) / len(vpins) if vpins else None
+            data['avg_vpin'] = round(avg_vpin, 4) if avg_vpin is not None else None
+            data['symbol_count'] = len(data['symbols'])
+            data['total_volume'] = float(data['total_volume'])
+            data['total_gex'] = float(data['total_gex'])
+            data['total_dex'] = float(data['total_dex'])
+            data['call_dex'] = float(data['call_dex'])
+            data['put_dex'] = float(data['put_dex'])
+            data['net_flow'] = float(data['total_dex'])
+            data['toxic_symbols'] = sorted(set(data['toxic_symbols']))
+
+        return summary
+
+    async def _fetch_json(self, key: str) -> Optional[Dict[str, Any]]:
+        try:
+            raw = await self.redis.get(key)
+        except Exception as exc:
+            self.logger.error(f"Failed to fetch {key}: {exc}")
+            return None
+
+        if not raw:
+            return None
+
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            self.logger.warning(f"Invalid JSON payload for {key}")
+            return None
+
+    def _sanitize_correlation_matrix(self, matrix: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
+        sanitized: Dict[str, Dict[str, float]] = {}
+
+        for symbol, row in matrix.items():
+            if not isinstance(row, dict):
+                continue
+            sanitized[symbol] = {}
+            for peer, value in row.items():
+                try:
+                    sanitized[symbol][peer] = round(float(value), 3)
+                except (TypeError, ValueError):
+                    sanitized[symbol][peer] = 0.0
+
+        return sanitized
+
+    async def _compute_correlation_from_bars(self) -> Optional[Dict[str, Dict[str, float]]]:
+        price_returns: Dict[str, pd.Series] = {}
+
+        for symbol in self.symbols:
+            bars_raw = await self.redis.get(Keys.market_bars(symbol))
+            if not bars_raw:
+                continue
+
+            try:
+                bars = json.loads(bars_raw)
+            except json.JSONDecodeError:
+                self.logger.debug(f"Failed to parse bars for {symbol}")
+                continue
+
+            closes: List[float] = []
+            if isinstance(bars, list):
+                for entry in bars[-self.correlation_window:]:
+                    close = None
+                    if isinstance(entry, dict):
+                        close = entry.get('close') or entry.get('c')
+                    elif isinstance(entry, (list, tuple)):
+                        close = entry[4] if len(entry) >= 5 else None
+                    if close is None:
+                        continue
+                    try:
+                        closes.append(float(close))
+                    except (TypeError, ValueError):
+                        continue
+
+            if len(closes) < 2:
+                continue
+
+            series = pd.Series(closes).pct_change().dropna()
+            if series.empty:
+                continue
+
+            price_returns[symbol] = series
+
+        if len(price_returns) < self.min_correlation_symbols:
+            return None
+
+        frame = pd.DataFrame(price_returns).dropna()
+        if frame.shape[0] < 2:
+            return None
+
+        corr = frame.corr()
+        matrix: Dict[str, Dict[str, float]] = {}
+
+        for symbol in corr.columns:
+            matrix[symbol] = {}
+            for peer in corr.columns:
+                value = corr.at[symbol, peer]
+                if pd.isna(value):
+                    continue
+                matrix[symbol][peer] = round(float(value), 3)
+
+        return matrix if matrix else None
 
 
 class AnalyticsEngine:
@@ -193,133 +365,191 @@ class AnalyticsEngine:
 
         # Load symbols from config - combine standard and level2
         syms = config.get('symbols', {})
-        self.symbols = list({*syms.get('standard', []), *syms.get('level2', [])})
+        self.symbols = sorted({*syms.get('standard', []), *syms.get('level2', [])})
 
-        # TTLs for storing metrics
-        self.ttls = config.get('modules', {}).get('analytics', {}).get('store_ttls', {
-            'metrics': 60,
-            'alerts': 3600,
-            'heartbeat': 15
-        })
+        analytics_cfg = config.get('modules', {}).get('analytics', {})
 
-        # Update intervals for different calculations
-        self.update_intervals = config.get('modules', {}).get('analytics', {}).get('update_intervals', {
+        default_ttls = {
+            'analytics': get_ttl('analytics'),
+            'portfolio': get_ttl('analytics_portfolio'),
+            'sector': get_ttl('analytics_sector'),
+            'correlation': get_ttl('analytics_correlation'),
+            'heartbeat': get_ttl('heartbeat'),
+        }
+        store_ttls = analytics_cfg.get('store_ttls', {})
+        self.ttls = {**default_ttls, **store_ttls}
+
+        default_intervals = {
             'vpin': 5,
             'gex_dex': 30,
             'flow_toxicity': 60,
             'order_book': 1,
-            'sweep_detection': 2
-        })
+            'sweep_detection': 2,
+            'portfolio': 15,
+            'sectors': 30,
+            'correlation': 300,
+        }
+        configured_intervals = analytics_cfg.get('update_intervals', {})
+        self.update_intervals = {**default_intervals, **configured_intervals}
 
-        # Track last update times
-        self.last_updates = {}
+        # Track last update times and error counts
+        self.last_updates: Dict[str, float] = defaultdict(float)
+        self.error_counts: Dict[str, int] = defaultdict(int)
+
+        # Scheduler cadence and runtime behaviour
+        self.cadence_hz = max(float(analytics_cfg.get('cadence_hz', 2) or 0), 0.0)
+        self.analytics_rth_only = bool(analytics_cfg.get('analytics_rth_only', False))
+        self._sleep_interval = (1.0 / self.cadence_hz) if self.cadence_hz > 0 else 0.5
+        self._running = False
+        self._loop_task: Optional[asyncio.Task] = None
+
+        self.market_extended_hours = bool(config.get('market', {}).get('extended_hours', False))
 
         # Market hours
         self.market_tz = pytz.timezone('US/Eastern')
 
         # Initialize calculator instances (will be imported from separate modules)
-        self.vpin_calculator = None
-        self.gex_dex_calculator = None
-        self.pattern_analyzer = None
+        self.vpin_calculator: Optional[VPINCalculator] = None
+        self.gex_dex_calculator: Optional[GEXDEXCalculator] = None
+        self.pattern_analyzer: Optional[PatternAnalyzer] = None
         self.aggregator = MetricsAggregator(config, redis_conn)
 
         self.logger.info(f"AnalyticsEngine initialized for {len(self.symbols)} symbols")
 
     async def start(self):
         """Start the analytics engine."""
+        if self._running:
+            self.logger.warning("Analytics engine already running")
+            return
+
         self.logger.info("Starting analytics engine...")
 
         try:
-            # Import and initialize calculators
-            from vpin_calculator import VPINCalculator
-            from gex_dex_calculator import GEXDEXCalculator
-            from pattern_analyzer import PatternAnalyzer
-
             self.vpin_calculator = VPINCalculator(self.config, self.redis)
             self.gex_dex_calculator = GEXDEXCalculator(self.config, self.redis)
             self.pattern_analyzer = PatternAnalyzer(self.config, self.redis)
 
-            # Start main calculation loop
-            await self._calculation_loop()
+            self._running = True
+            self._loop_task = asyncio.create_task(self._calculation_loop(), name="analytics_calculation_loop")
+            await self._loop_task
 
-        except Exception as e:
-            self.logger.error(f"Error starting analytics engine: {e}")
+        except asyncio.CancelledError:
+            self.logger.info("Analytics engine start cancelled")
+            raise
+        except Exception as exc:
+            self.logger.error(f"Error starting analytics engine: {exc}")
             self.logger.error(traceback.format_exc())
+        finally:
+            self._running = False
+            self._loop_task = None
 
     async def _calculation_loop(self):
-        """Main loop that triggers calculations based on intervals."""
-        while True:
-            try:
-                current_time = time.time()
+        """Main loop that triggers calculations based on configured intervals."""
+        self.logger.info("Analytics calculation loop started")
 
-                # Check each calculation type
-                for calc_type, interval in self.update_intervals.items():
-                    last_update = self.last_updates.get(calc_type, 0)
+        try:
+            while self._running:
+                try:
+                    current_time = time.time()
 
-                    if current_time - last_update >= interval:
-                        await self._run_calculation(calc_type)
-                        self.last_updates[calc_type] = current_time
+                    if self.analytics_rth_only and not self.is_market_hours(self.market_extended_hours):
+                        await self._update_heartbeat(idle=True)
+                        await asyncio.sleep(self._sleep_interval)
+                        continue
 
-                # Update heartbeat
-                await self._update_heartbeat()
+                    for calc_type, interval in self.update_intervals.items():
+                        last_update = self.last_updates[calc_type]
+                        if current_time - last_update >= interval:
+                            executed = await self._run_calculation(calc_type)
+                            if executed:
+                                self.last_updates[calc_type] = current_time
 
-                # Sleep briefly
-                await asyncio.sleep(0.5)
+                    await self._update_heartbeat()
+                    await asyncio.sleep(self._sleep_interval)
 
-            except Exception as e:
-                self.logger.error(f"Error in calculation loop: {e}")
-                await asyncio.sleep(1)
+                except Exception as exc:
+                    self.logger.error(f"Error in calculation loop: {exc}")
+                    self.logger.error(traceback.format_exc())
+                    await asyncio.sleep(1.0)
 
-    async def _run_calculation(self, calc_type: str):
+        except asyncio.CancelledError:
+            self.logger.info("Analytics calculation loop cancelled")
+            raise
+        finally:
+            await self._update_heartbeat(idle=True)
+
+    async def _run_calculation(self, calc_type: str) -> bool:
         """Run specific calculation type for all symbols."""
         tasks = []
 
-        for symbol in self.symbols:
-            if calc_type == 'vpin':
-                if self.vpin_calculator:
-                    tasks.append(self.vpin_calculator.calculate_vpin(symbol))
+        try:
+            if calc_type == 'vpin' and self.vpin_calculator:
+                tasks = [self.vpin_calculator.calculate_vpin(symbol) for symbol in self.symbols]
 
-            elif calc_type == 'gex_dex':
-                if self.gex_dex_calculator:
+            elif calc_type == 'gex_dex' and self.gex_dex_calculator:
+                for symbol in self.symbols:
                     tasks.append(self.gex_dex_calculator.calculate_gex(symbol))
                     tasks.append(self.gex_dex_calculator.calculate_dex(symbol))
 
-            elif calc_type == 'flow_toxicity':
-                if self.pattern_analyzer:
-                    tasks.append(self.pattern_analyzer.analyze_flow_toxicity(symbol))
+            elif calc_type == 'flow_toxicity' and self.pattern_analyzer:
+                tasks = [self.pattern_analyzer.analyze_flow_toxicity(symbol) for symbol in self.symbols]
 
-            elif calc_type == 'order_book':
-                if self.pattern_analyzer:
-                    tasks.append(self.pattern_analyzer.calculate_order_book_imbalance(symbol))
+            elif calc_type == 'order_book' and self.pattern_analyzer:
+                tasks = [self.pattern_analyzer.calculate_order_book_imbalance(symbol) for symbol in self.symbols]
 
-            elif calc_type == 'sweep_detection':
-                if self.pattern_analyzer:
-                    tasks.append(self.pattern_analyzer.detect_sweeps(symbol))
+            elif calc_type == 'sweep_detection' and self.pattern_analyzer:
+                tasks = [self.pattern_analyzer.detect_sweeps(symbol) for symbol in self.symbols]
 
-        if tasks:
-            # Run all calculations in parallel
+            elif calc_type == 'portfolio':
+                await self.aggregator.calculate_portfolio_metrics()
+                return True
+
+            elif calc_type == 'sectors':
+                await self.aggregator.calculate_sector_flows()
+                return True
+
+            elif calc_type == 'correlation':
+                await self.aggregator.calculate_cross_asset_correlations()
+                return True
+
+            if not tasks:
+                return True
+
             results = await asyncio.gather(*tasks, return_exceptions=True)
+            success = True
 
-            # Log any errors
-            for i, result in enumerate(results):
+            for result in results:
                 if isinstance(result, Exception):
-                    self.logger.error(f"Calculation error: {result}")
+                    success = False
+                    self.error_counts[calc_type] += 1
+                    self.logger.error(f"Calculation error for {calc_type}: {result}")
 
-        # After individual calculations, update portfolio metrics
-        if calc_type in ['vpin', 'gex_dex']:
-            await self.aggregator.calculate_portfolio_metrics()
+            return success
 
-    async def _update_heartbeat(self):
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.error_counts[calc_type] += 1
+            self.logger.error(f"Failed to execute {calc_type}: {exc}")
+            self.logger.error(traceback.format_exc())
+            return False
+
+    async def _update_heartbeat(self, idle: bool = False):
         """Update heartbeat in Redis."""
         heartbeat = {
             'ts': int(datetime.now().timestamp() * 1000),
             'symbols': len(self.symbols),
-            'calculations': list(self.last_updates.keys())
+            'cadence_hz': self.cadence_hz,
+            'running': self._running,
+            'idle': idle,
+            'update_intervals': self.update_intervals,
+            'last_updates': {k: self.last_updates[k] for k in self.update_intervals},
+            'error_counts': dict(self.error_counts),
         }
 
         await self.redis.setex(
-            'heartbeat:analytics',
-            self.ttls.get('heartbeat', 15),
+            Keys.heartbeat('analytics'),
+            self.ttls.get('heartbeat', get_ttl('heartbeat')),
             json.dumps(heartbeat)
         )
 
@@ -341,4 +571,14 @@ class AnalyticsEngine:
     async def stop(self):
         """Stop the analytics engine."""
         self.logger.info("Stopping analytics engine...")
-        # Any cleanup needed
+        self._running = False
+
+        if self._loop_task and not self._loop_task.done():
+            self._loop_task.cancel()
+            try:
+                await self._loop_task
+            except asyncio.CancelledError:
+                pass
+
+        self._loop_task = None
+        await self._update_heartbeat(idle=True)

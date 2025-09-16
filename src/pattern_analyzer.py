@@ -7,9 +7,9 @@ This module operates independently and communicates only via Redis.
 Redis keys used:
 - market:{symbol}:book: Order book data
 - market:{symbol}:trades: Trade data
-- metrics:{symbol}:obi: Order book imbalance metrics
-- metrics:{symbol}:hidden: Hidden order detection
-- metrics:{symbol}:sweep: Sweep detection
+- analytics:{symbol}:obi: Order book imbalance metrics
+- analytics:{symbol}:hidden: Hidden order detection
+- analytics:{symbol}:sweep: Sweep detection
 - discovered:flow_toxicity: Flow toxicity patterns
 """
 
@@ -20,6 +20,8 @@ import time
 from typing import Dict, List, Any, Optional
 import logging
 import traceback
+
+from redis_keys import Keys
 
 
 class PatternAnalyzer:
@@ -47,7 +49,7 @@ class PatternAnalyzer:
         """
         try:
             # Get VPIN data as primary toxicity indicator
-            vpin_json = await self.redis.get(f'metrics:{symbol}:vpin')
+            vpin_json = await self.redis.get(Keys.analytics_vpin(symbol))
             if not vpin_json:
                 return {'error': 'No VPIN data available'}
 
@@ -75,8 +77,8 @@ class PatternAnalyzer:
 
             # Store result
             await self.redis.setex(
-                f'metrics:{symbol}:toxicity',
-                self.ttls.get('metrics', 60),
+                Keys.analytics_toxicity(symbol),
+                self.ttls.get('analytics', self.ttls.get('metrics', 60)),
                 json.dumps(result)
             )
 
@@ -103,7 +105,7 @@ class PatternAnalyzer:
         """
         try:
             # 1. Fetch current order book
-            book_json = await self.redis.get(f'market:{symbol}:book')
+            book_json = await self.redis.get(Keys.market_book(symbol))
             if not book_json:
                 return {'error': 'No order book data'}
 
@@ -148,7 +150,7 @@ class PatternAnalyzer:
                     book_velocity = (new_l5 - old_l5) / time_diff
 
             # Store history for next calculation (short TTL for velocity tracking)
-            velocity_ttl = min(30, self.ttls.get('metrics', 60))  # Use shorter of 30s or config
+            velocity_ttl = min(30, self.ttls.get('analytics', self.ttls.get('metrics', 60)))  # Use shorter of 30s or config
             await self.redis.setex(velocity_key, velocity_ttl, json.dumps(history))
 
             # 4. Determine market state based on metrics
@@ -171,9 +173,9 @@ class PatternAnalyzer:
             }
 
             # 6. Store in Redis
-            ttl = self.ttls.get('metrics', 60)
+            ttl = self.ttls.get('analytics', self.ttls.get('metrics', 60))
             await self.redis.setex(
-                f'metrics:{symbol}:obi',
+                Keys.analytics_obi(symbol),
                 ttl,
                 json.dumps(result)
             )
@@ -344,7 +346,7 @@ class PatternAnalyzer:
 
             # Store result
             sweep_value = 1.0 if is_sweep else 0.0
-            await self.redis.setex(f'metrics:{symbol}:sweep', 5, str(sweep_value))
+            await self.redis.setex(Keys.analytics_metric(symbol, 'sweep'), 5, str(sweep_value))
 
             if is_sweep:
                 self.logger.info(f"SWEEP detected for {symbol}: {unique_prices} levels, {total_size} shares")
@@ -458,9 +460,9 @@ class PatternAnalyzer:
             }
 
             # 7. Store in Redis
-            ttl = self.ttls.get('metrics', 60)
+            ttl = self.ttls.get('analytics', self.ttls.get('metrics', 60))
             await self.redis.setex(
-                f'metrics:{symbol}:hidden',
+                Keys.analytics_metric(symbol, 'hidden'),
                 ttl,
                 json.dumps(result)
             )

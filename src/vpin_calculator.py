@@ -7,7 +7,7 @@ This module operates independently and communicates only via Redis.
 Redis keys used:
 - market:{symbol}:ticker: Market data for midpoint
 - market:{symbol}:trades: Trade data
-- metrics:{symbol}:vpin: VPIN metrics output
+- analytics:{symbol}:vpin: VPIN metrics output
 - discovered:vpin_bucket_size: Discovered optimal bucket size
 """
 
@@ -18,6 +18,8 @@ import time
 from typing import Dict, List, Any
 import logging
 import traceback
+
+from redis_keys import Keys
 
 
 class VPINCalculator:
@@ -62,7 +64,7 @@ class VPINCalculator:
                 self.logger.warning(f"No discovered bucket size, using default: {bucket_size}")
 
             # 2. Fetch recent trades from Redis (last 1000 trades)
-            trades_json = await self.redis.lrange(f'market:{symbol}:trades', -1000, -1)
+            trades_json = await self.redis.lrange(Keys.market_trades(symbol), -1000, -1)
 
             # Check minimum trades requirement
             min_trades = self.config.get('parameter_discovery', {}).get('vpin', {}).get('min_trades_required', 100)
@@ -92,7 +94,7 @@ class VPINCalculator:
             vpin = self._calculate_vpin_from_buckets(buckets)
 
             # 7. Store in Redis with configured TTL
-            ttl = self.ttls.get('metrics', 60)
+            ttl = self.ttls.get('analytics', self.ttls.get('metrics', 60))
             vpin_data = {
                 'value': round(float(vpin), 4),
                 'buckets': len(buckets),
@@ -102,7 +104,7 @@ class VPINCalculator:
             }
 
             await self.redis.setex(
-                f'metrics:{symbol}:vpin',
+                Keys.analytics_vpin(symbol),
                 ttl,
                 json.dumps(vpin_data)
             )
@@ -142,7 +144,7 @@ class VPINCalculator:
         prev_side = 'buy'  # Default assumption
 
         # Get current bid/ask for midpoint calculation
-        ticker_json = await self.redis.get(f'market:{symbol}:ticker')
+        ticker_json = await self.redis.get(Keys.market_ticker(symbol))
         if ticker_json:
             ticker = json.loads(ticker_json)
             bid = ticker.get('bid', 0)

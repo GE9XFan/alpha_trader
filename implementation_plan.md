@@ -2,7 +2,9 @@
 
 ## Refactor Snapshot
 - **Architecture**: 29 production modules now sit behind a Redis-centric message fabric while `main.py` orchestrates configuration, logging, and shared connection pools.【F:src/main.py†L27-L192】
-- **Data integrity**: The canonical Redis schema (`redis_keys.py`) governs market, analytics, signal, risk, and system namespaces, preserving consistent TTL policies after the split.【F:src/redis_keys.py†L1-L141】
+- **Data integrity**: The canonical Redis schema now enumerates the `analytics:*` portfolio/sector keys and TTL helpers that calculators use when persisting outputs, keeping Redis namespaces and expirations consistent across modules.【F:src/redis_keys.py†L25-L205】
+- **Analytics coordination**: `AnalyticsEngine` seeds calculators on cadence, publishes sector/portfolio snapshots, and idles gracefully outside configured market hours via the new aggregator pipeline.【F:src/analytics_engine.py†L35-L445】
+- **Testing coverage**: Async unit tests validate the aggregator TTLs, correlation sourcing, and the RTH scheduler guardrails to prevent regressions as cadence rules evolve.【F:tests/test_analytics_engine.py†L1-L216】
 - **Focus areas**: Market ingestion, analytics, signal generation, and risk/execution are production-grade; social, dashboard, and morning-automation services remain scaffolding pending API integrations.
 
 ## Module Completion Matrix
@@ -13,7 +15,7 @@
 |  | `av_ingestion.py` | 365 | 100% | Long-lived processors, circuit-breaker retries, and telemetry-rich metrics publishing in place.【F:src/av_ingestion.py†L33-L458】 |
 |  | `av_options.py` | 185 | 100% | Chain callbacks, monitoring metrics, and schema-documented payloads delivered.【F:src/av_options.py†L1-L223】 |
 |  | `av_sentiment.py` | 365 | 100% | Configurable ETF exclusions, sentiment quality metrics, and enriched technical metadata stored.【F:src/av_sentiment.py†L1-L365】 |
-| Analytics | `analytics_engine.py` | 344 | 90% | Orchestrator operational; relies on runtime imports of calculators (target for future decoupling).【F:src/analytics_engine.py†L185-L341】 |
+| Analytics | `analytics_engine.py` | 585 | 100% | Cadence-aware scheduler drives calculators, honors market hours, and publishes portfolio/sector/correlation artifacts via the shared Redis schema.【F:src/analytics_engine.py†L35-L584】 |
 |  | `vpin_calculator.py` | 317 | 100% | VPIN logic migrated intact with async Redis use.【F:src/vpin_calculator.py†L31-L116】 |
 |  | `gex_dex_calculator.py` | 482 | 95% | Exposure calculations complete; uses Redis solely for inputs/outputs.【F:src/gex_dex_calculator.py†L29-L140】 |
 |  | `pattern_analyzer.py` | 477 | 95% | Sweep/hidden order detection finalized with Redis metrics writes.【F:src/pattern_analyzer.py†L32-L186】 |
@@ -38,8 +40,14 @@
 |  | `news_analyzer.py` | 318 | 30% | Scheduler blueprint awaiting real news pipelines and archival plumbing.【F:src/news_analyzer.py†L65-L254】 |
 |  | `report_generator.py` | 97 | 50% | Data archival routines largely implemented; reporting templates can be expanded.【F:src/report_generator.py†L25-L189】 |
 
+## Recent Deliverables – Analytics Refresh
+- Completed the cadence-aware scheduler and aggregator in `AnalyticsEngine`, emitting symbol, sector, and portfolio payloads solely through the canonical Redis helpers while respecting RTH gating and graceful shutdowns.【F:src/analytics_engine.py†L35-L445】
+- Extended `redis_keys.py` with dedicated helpers for portfolio analytics keys plus differentiated TTL configuration so calculators, aggregators, and downstream consumers share one schema source of truth.【F:src/redis_keys.py†L25-L205】
+- Promoted configuration-driven cadences and sector mappings under `config.yaml`, enabling operations to tune TTLs, refresh intervals, and sector groupings without code edits.【F:config/config.yaml†L84-L115】
+- Backfilled async unit coverage for aggregator math, correlation sourcing, and market-hours gating to prevent regressions as additional calculators come online.【F:tests/test_analytics_engine.py†L1-L216】
+
 ## Key Backlog Items by Domain
-- **Eliminate runtime imports** – Refine analytics, signal generation, and execution managers to consume results via Redis rather than importing peer modules during runtime.【F:src/analytics_engine.py†L220-L244】【F:src/signal_generator.py†L132-L196】
+- **Eliminate runtime imports** – Continue refactoring signal generation and execution managers to consume results via Redis rather than importing peer modules during runtime.【F:src/signal_generator.py†L132-L196】【F:src/execution_manager.py†L33-L120】
 - **Complete social channels** – Implement API clients, subscription management, and Redis lookups for Twitter, Telegram, and Discord bots to move them from scaffolding to production-ready modules.【F:src/twitter_bot.py†L35-L133】【F:src/telegram_bot.py†L43-L214】【F:src/discord_bot.py†L25-L140】
 - **Finish dashboard UX** – Build out FastAPI routes, WebSocket streaming, and front-end assets to surface analytics, risk, and alert feeds.【F:src/dashboard_server.py†L83-L223】【F:src/dashboard_routes.py†L25-L200】
 - **Harden emergency controls** – Address TODOs in `EmergencyManager` around alert integrations and circuit-breaker analytics before enabling auto-halt pathways.【F:src/emergency_manager.py†L208-L424】
@@ -56,13 +64,14 @@
    - Update automated tests to import `analytics_engine`, `signal_generator`, `execution_manager`, etc., directly instead of the legacy aggregate files.【F:tests/test_day6.py†L21-L39】【F:tests/test_day8.py†L18-L30】
 2. **Q2 – Deliver customer-facing features**
    - Implement social channel messaging, subscription tiers, and metrics dashboards.
-   - Build dashboard APIs and WebSocket streams to visualize `metrics:*`, `risk:*`, and `alerts:*` feeds.【F:src/dashboard_server.py†L83-L223】
+   - Build dashboard APIs and WebSocket streams to visualize `analytics:*`, `risk:*`, and `alerts:*` feeds.【F:src/dashboard_server.py†L83-L223】
 3. **Q3 – Automation & reporting**
    - Integrate GPT/OpenAI workflows for morning analysis and automated report generation once credentials are provisioned.【F:src/morning_scanner.py†L85-L206】【F:src/report_generator.py†L25-L189】
 4. **Ongoing – Risk & compliance**
    - Tune correlation gates, VaR windows, and circuit-breaker telemetry based on live trading feedback.【F:src/risk_manager.py†L200-L401】【F:src/emergency_manager.py†L208-L424】
 
 ## Testing Strategy
+- **Analytics cadence tests**: `tests/test_analytics_engine.py` covers aggregator TTLs, correlation fallbacks, and market-hours gating to guard the refreshed scheduler contract.【F:tests/test_analytics_engine.py†L1-L216】【F:src/analytics_engine.py†L35-L445】
 - **Module-level tests**: Expand async unit tests around `signal_deduplication`, `dte_strategies`, and `execution_manager` to validate Redis interactions without the monolithic shim.【F:src/signal_deduplication.py†L21-L133】【F:src/dte_strategies.py†L30-L300】【F:src/execution_manager.py†L232-L533】
 - **Integration suites**: Migrate existing day-based regression tests to the modular imports once analytics/execution decoupling is complete.【F:tests/test_day6.py†L21-L39】【F:tests/test_day8.py†L18-L30】
 - **Operational smoke tests**: Continue using scripts like `tests/verify_signals.py` to monitor live Redis keys, heartbeats, and signal freshness during deployments.【F:tests/verify_signals.py†L1-L60】

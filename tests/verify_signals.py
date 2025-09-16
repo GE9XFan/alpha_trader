@@ -105,10 +105,10 @@ async def verify_signals():
         print(f"\nFeature Data Status:")
         for symbol in ['SPY', 'QQQ']:
             # Check VPIN
-            vpin = await redis.get(f'metrics:{symbol}:vpin')
-            obi = await redis.get(f'metrics:{symbol}:obi')
-            gex = await redis.get(f'metrics:{symbol}:gex')
-            dex = await redis.get(f'metrics:{symbol}:dex')
+            vpin = await redis.get(f'analytics:{symbol}:vpin')
+            obi = await redis.get(f'analytics:{symbol}:obi')
+            gex = await redis.get(f'analytics:{symbol}:gex')
+            dex = await redis.get(f'analytics:{symbol}:dex')
             
             print(f"\n  {symbol}:")
             if vpin:

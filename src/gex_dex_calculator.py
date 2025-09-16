@@ -7,8 +7,8 @@ This module operates independently and communicates only via Redis.
 Redis keys used:
 - market:{symbol}:ticker: Spot price data
 - options:{symbol}:*:greeks: Options Greeks data
-- metrics:{symbol}:gex: Gamma exposure output
-- metrics:{symbol}:dex: Delta exposure output
+- analytics:{symbol}:gex: Gamma exposure output
+- analytics:{symbol}:dex: Delta exposure output
 """
 
 import json
@@ -92,7 +92,7 @@ class GEXDEXCalculator:
         """
         try:
             # 1. Get current spot price
-            ticker_json = await self.redis.get(f'market:{symbol}:ticker')
+            ticker_json = await self.redis.get(Keys.market_ticker(symbol))
             if not ticker_json:
                 self.logger.warning(f"No ticker data for {symbol}")
                 return {'error': 'No spot price'}
@@ -318,9 +318,9 @@ class GEXDEXCalculator:
             }
 
             # 6. Store in Redis with configured TTL
-            ttl = self.ttls.get('metrics', 60)
+            ttl = self.ttls.get('analytics', self.ttls.get('metrics', 60))
             await self.redis.setex(
-                f'metrics:{symbol}:gex',
+                Keys.analytics_gex(symbol),
                 ttl,
                 json.dumps(result)
             )
@@ -348,7 +348,7 @@ class GEXDEXCalculator:
         """
         try:
             # 1. Get current spot price
-            ticker_json = await self.redis.get(f'market:{symbol}:ticker')
+            ticker_json = await self.redis.get(Keys.market_ticker(symbol))
             if not ticker_json:
                 self.logger.warning(f"No ticker data for {symbol}")
                 return {'error': 'No spot price'}
@@ -514,9 +514,9 @@ class GEXDEXCalculator:
             }
 
             # 9. Store in Redis
-            ttl = self.ttls.get('metrics', 60)
+            ttl = self.ttls.get('analytics', self.ttls.get('metrics', 60))
             await self.redis.setex(
-                f'metrics:{symbol}:dex',
+                Keys.analytics_dex(symbol),
                 ttl,
                 json.dumps(result)
             )

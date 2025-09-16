@@ -24,11 +24,21 @@ OPTIONS_KEYS = {
 
 # Analytics Keys
 ANALYTICS_KEYS = {
-    'vpin': 'analytics:{symbol}:vpin',       # VPIN score
-    'obi': 'analytics:{symbol}:obi',         # Order book imbalance
-    'regime': 'analytics:{symbol}:regime',   # Market regime
-    'hidden': 'analytics:{symbol}:hidden',   # Hidden order detection
-    'trend': 'analytics:{symbol}:trend',     # Trend metrics
+    'vpin': 'analytics:{symbol}:vpin',        # VPIN score
+    'obi': 'analytics:{symbol}:obi',          # Order book imbalance
+    'regime': 'analytics:{symbol}:regime',    # Market regime
+    'hidden': 'analytics:{symbol}:hidden',    # Hidden order detection
+    'trend': 'analytics:{symbol}:trend',      # Trend metrics
+    'gex': 'analytics:{symbol}:gex',          # Gamma exposure snapshot
+    'dex': 'analytics:{symbol}:dex',          # Delta exposure snapshot
+    'toxicity': 'analytics:{symbol}:toxicity' # Flow toxicity summary
+}
+
+# Portfolio/Sector Analytics Keys
+PORTFOLIO_ANALYTICS_KEYS = {
+    'summary': 'analytics:portfolio:summary',             # Portfolio level aggregates
+    'correlation': 'analytics:portfolio:correlation',     # Cross-asset correlation view
+    'sector': 'analytics:sector:{sector}',                # Sector level aggregates
 }
 
 # Signal Keys
@@ -124,7 +134,10 @@ TTL_CONFIG = {
     'options_exposures': 60,   # GEX/DEX for 1 minute
     
     # Analytics - moderate TTLs
-    'analytics': 60,           # Analytics data for 1 minute
+    'analytics': 60,               # Symbol-level analytics data
+    'analytics_portfolio': 60,     # Portfolio summary cadence
+    'analytics_sector': 120,       # Sector aggregates decay slower
+    'analytics_correlation': 900,  # Correlation matrices update less often
     
     # Signals - longer TTLs for audit
     'signal_out': 3600,        # Keep published signals 1 hour
@@ -176,6 +189,12 @@ def get_system_key(key_type: str, **kwargs) -> str:
     if key_type not in SYSTEM_KEYS:
         raise ValueError(f"Unknown system key type: {key_type}")
     return SYSTEM_KEYS[key_type].format(**kwargs)
+
+def get_portfolio_key(key_type: str, **kwargs) -> str:
+    """Get portfolio/sector analytics Redis key."""
+    if key_type not in PORTFOLIO_ANALYTICS_KEYS:
+        raise ValueError(f"Unknown portfolio analytics key type: {key_type}")
+    return PORTFOLIO_ANALYTICS_KEYS[key_type].format(**kwargs)
 
 def get_ttl(data_type: str) -> int:
     """Get TTL for data type in seconds."""
@@ -237,17 +256,52 @@ class Keys:
     def options_greeks(symbol: str) -> str:
         """Get options greeks key."""
         return f'options:{symbol}:greeks'
-    
+
     @staticmethod
     def analytics_vpin(symbol: str) -> str:
         """Get VPIN key."""
-        return f'analytics:{symbol}:vpin'
-    
+        return ANALYTICS_KEYS['vpin'].format(symbol=symbol)
+
+    @staticmethod
+    def analytics_gex(symbol: str) -> str:
+        """Get GEX key."""
+        return ANALYTICS_KEYS['gex'].format(symbol=symbol)
+
+    @staticmethod
+    def analytics_dex(symbol: str) -> str:
+        """Get DEX key."""
+        return ANALYTICS_KEYS['dex'].format(symbol=symbol)
+
+    @staticmethod
+    def analytics_toxicity(symbol: str) -> str:
+        """Get toxicity summary key."""
+        return ANALYTICS_KEYS['toxicity'].format(symbol=symbol)
+
     @staticmethod
     def analytics_obi(symbol: str) -> str:
         """Get OBI key."""
-        return f'analytics:{symbol}:obi'
-    
+        return ANALYTICS_KEYS['obi'].format(symbol=symbol)
+
+    @staticmethod
+    def analytics_metric(symbol: str, metric: str) -> str:
+        """Generic helper for symbol analytics metric."""
+        return f'analytics:{symbol}:{metric}'
+
+    @staticmethod
+    def analytics_portfolio_summary() -> str:
+        """Get portfolio summary key."""
+        return PORTFOLIO_ANALYTICS_KEYS['summary']
+
+    @staticmethod
+    def analytics_portfolio_correlation() -> str:
+        """Get portfolio correlation key."""
+        return PORTFOLIO_ANALYTICS_KEYS['correlation']
+
+    @staticmethod
+    def analytics_sector(sector: str) -> str:
+        """Get sector analytics key."""
+        return PORTFOLIO_ANALYTICS_KEYS['sector'].format(sector=sector)
+
     @staticmethod
     def heartbeat(module: str) -> str:
         """Get heartbeat key."""
