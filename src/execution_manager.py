@@ -33,13 +33,14 @@ Version: 3.0.0
 """
 
 import asyncio
+import inspect
 import json
 import time
 import uuid
 import re
 import logging
 from datetime import datetime
-from typing import Dict, List, Any, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 import redis.asyncio as aioredis
 from ib_insync import IB, Stock, Option, MarketOrder, LimitOrder, StopOrder
 
@@ -55,7 +56,13 @@ class ExecutionManager:
     Handles order placement, monitoring, and fills.
     """
 
-    def __init__(self, config: Dict[str, Any], redis_conn: aioredis.Redis):
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        redis_conn: aioredis.Redis,
+        risk_manager: Optional["RiskManager"] = None,
+        risk_manager_factory: Optional[Callable[[], Awaitable["RiskManager"]]] = None,
+    ):
         """
         Initialize execution manager with configuration.
         Uses separate IBKR connection for execution (different from data connection).
@@ -63,6 +70,11 @@ class ExecutionManager:
         self.config = config
         self.redis = redis_conn
         self.ib = IB()
+
+        # Risk manager injection/caching
+        self._risk_manager: Optional["RiskManager"] = risk_manager
+        self._risk_manager_factory = risk_manager_factory
+        self._risk_manager_lock = asyncio.Lock()
 
         # IBKR configuration for execution
         self.ibkr_config = config.get('ibkr', {})
@@ -77,8 +89,9 @@ class ExecutionManager:
         self.max_other_contracts = config.get('trading', {}).get('max_other_contracts', 100)
 
         # Order management
-        self.pending_orders = {}  # order_id -> order details
-        self.active_stops = {}    # position_id -> stop order
+        self.pending_orders: Dict[int, Dict[str, Any]] = {}  # order_id -> order details
+        self.stop_orders: Dict[str, Any] = {}  # position_id -> stop trade/order
+        self.active_trades: Dict[int, Dict[str, Any]] = {}  # order_id -> {'trade': trade, 'signal': signal}
 
         # Connection state
         self.connected = False
@@ -96,6 +109,9 @@ class ExecutionManager:
 
         # Connect to IBKR
         await self.connect_ibkr()
+
+        # Ensure Redis state reflects live IB positions
+        await self.reconcile_positions()
 
         # Set up event handlers (ib_insync specific events)
         self.ib.orderStatusEvent += self.on_order_status
@@ -168,6 +184,74 @@ class ExecutionManager:
         await self.redis.set('execution:connection:status', 'failed')
         return False
 
+    async def reconcile_positions(self):
+        """Backfill Redis with any live IB positions that are missing locally."""
+        if not self.ib.isConnected():
+            return
+
+        try:
+            positions = await self.ib.reqPositionsAsync()
+        except Exception as exc:  # pragma: no cover - IB call guard
+            self.logger.warning(f"Unable to reconcile positions from IB: {exc}")
+            return
+
+        for account, contract, size, avg_cost in positions:
+            try:
+                symbol = contract.symbol
+                position_id = f"{account}:{contract.conId}"
+                redis_key = f'positions:open:{symbol}:{position_id}'
+
+                if await self.redis.exists(redis_key):
+                    continue
+
+                contract_payload = {
+                    'symbol': contract.symbol,
+                    'secType': contract.secType,
+                    'exchange': contract.exchange,
+                    'currency': contract.currency,
+                }
+                if getattr(contract, 'lastTradeDateOrContractMonth', None):
+                    contract_payload['expiry'] = contract.lastTradeDateOrContractMonth
+                if getattr(contract, 'strike', None) is not None:
+                    contract_payload['strike'] = contract.strike
+                    contract_payload['right'] = getattr(contract, 'right', None)
+                    contract_payload['type'] = 'option'
+                else:
+                    contract_payload['type'] = contract_payload.get('secType', 'STK').lower()
+
+                quantity = abs(size)
+                side = 'LONG' if size >= 0 else 'SHORT'
+
+                position_snapshot = {
+                    'id': position_id,
+                    'symbol': symbol,
+                    'contract': contract_payload,
+                    'side': side,
+                    'strategy': 'RECONCILED',
+                    'quantity': quantity,
+                    'entry_price': avg_cost,
+                    'entry_time': datetime.utcnow().isoformat(),
+                    'commission': 0.0,
+                    'stop_loss': None,
+                    'targets': [],
+                    'current_price': avg_cost,
+                    'unrealized_pnl': 0.0,
+                    'realized_pnl': 0.0,
+                    'stop_order_id': None,
+                    'status': 'OPEN',
+                    'order_id': None,
+                    'signal_id': None,
+                    'reconciled': True,
+                }
+
+                await self.redis.set(redis_key, json.dumps(position_snapshot))
+                await self.redis.sadd(f'positions:by_symbol:{symbol}', position_id)
+                self.logger.info(f"Reconciled live IB position for {symbol} ({position_id})")
+            except Exception as snapshot_error:  # pragma: no cover - defensive per-position
+                self.logger.error(
+                    f"Failed to reconcile position for {getattr(contract, 'symbol', 'UNKNOWN')}: {snapshot_error}"
+                )
+
     async def process_pending_signals(self):
         """
         Process signals from the pending queue.
@@ -208,6 +292,25 @@ class ExecutionManager:
             except json.JSONDecodeError as e:
                 self.logger.error(f"Invalid signal JSON: {e}")
 
+    async def _get_risk_manager(self) -> Optional["RiskManager"]:
+        """Return the shared RiskManager instance, creating it if needed."""
+        async with self._risk_manager_lock:
+            if self._risk_manager is None:
+                try:
+                    if self._risk_manager_factory:
+                        candidate = self._risk_manager_factory()
+                        if inspect.isawaitable(candidate):
+                            candidate = await candidate
+                        self._risk_manager = candidate
+                    else:
+                        from risk_manager import RiskManager  # Avoid circular import
+
+                        self._risk_manager = RiskManager(self.config, self.redis)
+                except Exception as exc:  # pragma: no cover - defensive
+                    self.logger.error(f"Failed to initialize RiskManager: {exc}")
+                    self._risk_manager = None
+            return self._risk_manager
+
     async def passes_risk_checks(self, signal: dict) -> bool:
         """
         Perform pre-trade risk checks.
@@ -240,10 +343,8 @@ class ExecutionManager:
             symbol = signal.get('symbol')
             side = signal.get('side')
 
-            # Import RiskManager here to avoid circular import
-            from risk_manager import RiskManager
-            risk_manager = RiskManager(self.config, self.redis)
-            if not await risk_manager.check_correlations(symbol, side):
+            risk_manager = await self._get_risk_manager()
+            if risk_manager and not await risk_manager.check_correlations(symbol, side):
                 self.logger.warning(f"Correlation limit exceeded for {symbol} {side}")
                 return False
 
@@ -335,19 +436,22 @@ class ExecutionManager:
                 'stop_loss': signal.get('stop'),
                 'targets': signal.get('targets', []),
                 'placed_at': time.time(),
-                'status': 'PENDING'
+                'status': 'PENDING',
+                'signal': signal,
             }
-
-            await self.redis.setex(
-                f'orders:pending:{order_id}',
-                300,  # 5 minute TTL
-                json.dumps(order_data)
-            )
 
             self.pending_orders[order_id] = order_data
 
-            # Monitor order
-            await self.monitor_order(trade, signal)
+            await self._persist_pending_order(order_id)
+
+            # Track trade for reconciliation/updates
+            self.active_trades[order_id] = {'trade': trade, 'signal': signal}
+
+            try:
+                # Monitor order
+                await self.monitor_order(trade, signal)
+            finally:
+                self.active_trades.pop(order_id, None)
 
             self.logger.info(f"Order {order_id} placed: {action} {order_size} {symbol} @ {order_type}")
 
@@ -512,59 +616,175 @@ class ExecutionManager:
             self.logger.error(f"Error calculating order size: {e}")
             return 1  # Conservative default
 
+    async def _persist_pending_order(self, order_id: int, ttl: int = 300) -> None:
+        """Persist a pending order snapshot back to Redis without internal metadata."""
+        order_record = self.pending_orders.get(order_id)
+        if not order_record:
+            return
+
+        payload = {k: v for k, v in order_record.items() if k != 'signal'}
+        await self.redis.setex(
+            f'orders:pending:{order_id}',
+            ttl,
+            json.dumps(payload)
+        )
+
+    async def _sync_trade_state(self, order_id: int, trade, signal: dict) -> Dict[str, Any]:
+        """Synchronise in-memory/Redis snapshots with the latest IB trade state."""
+        status = trade.orderStatus.status or 'PendingSubmit'
+        total_quantity = getattr(trade.order, 'totalQuantity', 0) or 0
+        try:
+            total_quantity = int(total_quantity)
+        except (TypeError, ValueError):
+            total_quantity = int(self.pending_orders.get(order_id, {}).get('size', 0))
+
+        filled = trade.orderStatus.filled or 0
+        remaining = trade.orderStatus.remaining if trade.orderStatus.remaining is not None else 0
+
+        if trade.fills:
+            fill_qty = sum(abs(getattr(fill.execution, 'shares', 0)) for fill in trade.fills)
+            if fill_qty:
+                filled = max(filled, fill_qty)
+                remaining = max(total_quantity - fill_qty, 0)
+
+        if total_quantity and not remaining:
+            remaining = max(total_quantity - filled, 0)
+
+        avg_price = None
+        if trade.fills:
+            qty_sum = sum(abs(getattr(fill.execution, 'shares', 0)) for fill in trade.fills)
+            if qty_sum:
+                avg_price = sum(
+                    abs(getattr(fill.execution, 'shares', 0)) * getattr(fill.execution, 'price', 0)
+                    for fill in trade.fills
+                ) / qty_sum
+
+        order_record = self.pending_orders.get(order_id)
+        if order_record is not None:
+            order_record['status'] = status
+            order_record['filled'] = filled
+            order_record['remaining'] = remaining
+            order_record['avg_fill_price'] = avg_price
+            order_record['last_update'] = time.time()
+
+            if filled and remaining and not order_record.get('partial_alerted'):
+                self.logger.info(
+                    f"Order {order_id} partially filled: {filled}/{total_quantity} "
+                    f"{order_record.get('symbol')}"
+                )
+                order_record['partial_alerted'] = True
+
+            await self._persist_pending_order(order_id)
+
+        return {
+            'status': status,
+            'filled': filled,
+            'remaining': remaining,
+            'avg_price': avg_price,
+            'total': total_quantity,
+        }
+
+    async def _escalate_timeout(self, order_id: int, trade, signal: dict, filled: float, timeout_seconds: int) -> None:
+        """Alert and cancel an order that exceeded its monitoring window."""
+        symbol = signal.get('symbol')
+        side = signal.get('side')
+
+        self.logger.warning(
+            f"Order {order_id} timed out after {timeout_seconds}s (filled={filled})"
+        )
+
+        await self.redis.incr('execution:timeouts:total')
+        alert = {
+            'type': 'execution_timeout',
+            'order_id': order_id,
+            'symbol': symbol,
+            'side': side,
+            'filled': filled,
+            'timeout_seconds': timeout_seconds,
+            'timestamp': time.time(),
+        }
+        await self.redis.publish('alerts:critical', json.dumps(alert))
+
+        try:
+            self.ib.cancelOrder(trade.order)
+        except Exception as cancel_error:
+            self.logger.error(f"Failed to cancel order {order_id} after timeout: {cancel_error}")
+
+        order_snapshot = self.pending_orders.get(order_id)
+
+        await self.redis.delete(f'orders:pending:{order_id}')
+        if order_id in self.pending_orders:
+            del self.pending_orders[order_id]
+
+        await self.handle_order_rejection(trade.order, 'Timeout', order_snapshot)
+
     async def monitor_order(self, trade, signal: dict):
         """
         Monitor order until completion.
         """
         order_id = trade.order.orderId
-        max_wait_time = 60 if trade.order.orderType == 'LMT' else 30
+        base_timeout = 60 if trade.order.orderType == 'LMT' else 30
         start_time = time.time()
 
-        while time.time() - start_time < max_wait_time:
+        while True:
             await asyncio.sleep(0.2)
 
-            if trade.isDone():
-                if trade.orderStatus.status == 'Filled':
-                    # Order filled - create position
-                    await self.handle_fill(trade, signal)
-                    break
-                elif trade.orderStatus.status in ['Cancelled', 'ApiCancelled']:
-                    self.logger.warning(f"Order {order_id} cancelled")
-                    await self.redis.delete(f'orders:pending:{order_id}')
-                    break
-                elif trade.orderStatus.status == 'Inactive':
-                    # Order rejected
-                    self.logger.error(f"Order {order_id} rejected")
-                    await self.handle_order_rejection(trade.order, 'Inactive')
-                    break
+            snapshot = await self._sync_trade_state(order_id, trade, signal)
+            status = snapshot['status']
+            filled = snapshot['filled']
+            remaining = snapshot['remaining']
 
-            # Update order status in Redis
-            if order_id in self.pending_orders:
-                self.pending_orders[order_id]['status'] = trade.orderStatus.status
-                await self.redis.setex(
-                    f'orders:pending:{order_id}',
-                    300,
-                    json.dumps(self.pending_orders[order_id])
-                )
+            if status == 'Filled':
+                await self.handle_fill(trade, signal)
+                break
 
-        # Timeout - cancel order
-        if not trade.isDone():
-            self.logger.warning(f"Order {order_id} timed out after {max_wait_time}s")
-            self.ib.cancelOrder(trade.order)
-            await self.redis.delete(f'orders:pending:{order_id}')
+            if status in {'Cancelled', 'ApiCancelled'}:
+                self.logger.warning(f"Order {order_id} cancelled ({status})")
+                await self.redis.delete(f'orders:pending:{order_id}')
+                if order_id in self.pending_orders:
+                    del self.pending_orders[order_id]
+                break
+
+            if status in {'Inactive', 'Rejected'}:
+                await self.handle_order_rejection(trade.order, status)
+                break
+
+            timeout_window = base_timeout * (2 if filled else 1)
+            if time.time() - start_time >= timeout_window:
+                await self._escalate_timeout(order_id, trade, signal, filled, timeout_window)
+                break
 
     async def handle_fill(self, trade, signal: dict):
         """
         Process filled orders and create position.
         """
         try:
-            fill = trade.fills[-1] if trade.fills else None
-            if not fill:
+            fills = trade.fills or []
+            if not fills:
                 self.logger.error("No fill data available")
                 return
 
             order_id = trade.order.orderId
             symbol = signal.get('symbol')
+
+            total_quantity = sum(abs(getattr(fill.execution, 'shares', 0)) for fill in fills)
+            if total_quantity == 0:
+                self.logger.error(f"No filled quantity for order {order_id}")
+                return
+
+            total_cost = sum(
+                abs(getattr(fill.execution, 'shares', 0)) * getattr(fill.execution, 'price', 0)
+                for fill in fills
+            )
+            avg_price = total_cost / total_quantity
+
+            total_commission = sum(
+                getattr(fill.commissionReport, 'commission', 0) if fill.commissionReport else 0
+                for fill in fills
+            )
+
+            last_fill_time = max((getattr(fill, 'time', None) for fill in fills if getattr(fill, 'time', None)), default=None)
+            entry_time = last_fill_time.isoformat() if last_fill_time else datetime.utcnow().isoformat()
 
             # Create position record
             position_id = str(uuid.uuid4())
@@ -574,13 +794,13 @@ class ExecutionManager:
                 'contract': signal.get('contract'),
                 'side': signal.get('side'),
                 'strategy': signal.get('strategy'),
-                'quantity': fill.execution.shares,
-                'entry_price': fill.execution.price,
-                'entry_time': fill.time.isoformat(),
-                'commission': fill.commissionReport.commission if fill.commissionReport else 0,
+                'quantity': total_quantity,
+                'entry_price': avg_price,
+                'entry_time': entry_time,
+                'commission': total_commission,
                 'stop_loss': signal.get('stop'),
                 'targets': signal.get('targets', []),
-                'current_price': fill.execution.price,
+                'current_price': avg_price,
                 'unrealized_pnl': 0,
                 'realized_pnl': 0,
                 'stop_order_id': None,
@@ -590,11 +810,7 @@ class ExecutionManager:
             }
 
             # Store position in Redis
-            await self.redis.setex(
-                f'positions:open:{symbol}:{position_id}',
-                86400,  # 24 hour TTL
-                json.dumps(position)
-            )
+            await self.redis.set(f'positions:open:{symbol}:{position_id}', json.dumps(position))
 
             # Add to symbol index
             await self.redis.sadd(f'positions:by_symbol:{symbol}', position_id)
@@ -604,8 +820,7 @@ class ExecutionManager:
             await self.redis.incr('execution:fills:daily')
 
             # Calculate and store commission
-            commission = fill.commissionReport.commission if fill.commissionReport else 0
-            await self.redis.incrbyfloat('execution:commission:total', commission)
+            await self.redis.incrbyfloat('execution:commission:total', total_commission)
 
             # Place stop loss order
             await self.place_stop_loss(position)
@@ -619,7 +834,7 @@ class ExecutionManager:
             self.logger.info(
                 f"Position created: {symbol} {position['side']} "
                 f"{position['quantity']} @ ${position['entry_price']:.2f} "
-                f"(commission=${commission:.2f})"
+                f"(commission=${total_commission:.2f})"
             )
 
             # Store fill record
@@ -628,10 +843,10 @@ class ExecutionManager:
                 'position_id': position_id,
                 'symbol': symbol,
                 'side': signal.get('side'),
-                'quantity': fill.execution.shares,
-                'price': fill.execution.price,
-                'commission': commission,
-                'time': fill.time.isoformat()
+                'quantity': total_quantity,
+                'price': avg_price,
+                'commission': total_commission,
+                'time': entry_time
             }
 
             await self.redis.lpush(
@@ -691,14 +906,10 @@ class ExecutionManager:
             position_id = position.get('id')
             symbol = position.get('symbol')
 
-            await self.redis.setex(
-                f'positions:open:{symbol}:{position_id}',
-                86400,
-                json.dumps(position)
-            )
+            await self.redis.set(f'positions:open:{symbol}:{position_id}', json.dumps(position))
 
             # Track active stop
-            self.active_stops[position_id] = stop_trade
+            self.stop_orders[position_id] = stop_trade
 
             self.logger.info(
                 f"Stop loss placed: {stop_action} {quantity} @ ${stop_price:.2f} "
@@ -708,12 +919,23 @@ class ExecutionManager:
         except Exception as e:
             self.logger.error(f"Error placing stop loss: {e}")
 
-    async def handle_order_rejection(self, order, reason: str):
+    async def handle_order_rejection(
+        self,
+        order,
+        reason: str,
+        order_snapshot: Optional[Dict[str, Any]] = None,
+    ):
         """
         Handle rejected orders.
         """
         try:
-            order_id = order.orderId
+            order_id = getattr(order, 'orderId', None)
+            if order_id is None and order_snapshot:
+                order_id = order_snapshot.get('order_id') or order_snapshot.get('orderId')
+
+            if order_id is None:
+                self.logger.error(f"Unable to determine order ID for rejection ({reason})")
+                return
 
             # Log rejection
             self.logger.error(f"Order {order_id} rejected: {reason}")
@@ -727,7 +949,7 @@ class ExecutionManager:
                 'order_id': order_id,
                 'reason': reason,
                 'time': time.time(),
-                'order_details': self.pending_orders.get(order_id, {})
+                'order_details': order_snapshot or self.pending_orders.get(order_id, {})
             }
 
             await self.redis.lpush(
@@ -753,6 +975,7 @@ class ExecutionManager:
             await self.redis.delete(f'orders:pending:{order_id}')
             if order_id in self.pending_orders:
                 del self.pending_orders[order_id]
+            self.active_trades.pop(order_id, None)
 
         except Exception as e:
             self.logger.error(f"Error handling rejection: {e}")
@@ -854,17 +1077,43 @@ class ExecutionManager:
         """
         Handle order rejection by order ID.
         """
-        if order_id in self.pending_orders:
-            order_data = self.pending_orders[order_id]
-            await self.handle_order_rejection(None, reason)
+        order_data = self.pending_orders.get(order_id)
+        if not order_data:
+            payload = await self.redis.get(f'orders:pending:{order_id}')
+            if payload:
+                try:
+                    order_data = json.loads(payload)
+                except json.JSONDecodeError:
+                    order_data = None
+
+        await self.handle_order_rejection(None, reason, order_data)
 
     async def update_order_status(self):
         """
         Update status of all pending orders.
         """
+        trades_by_id = {trade.order.orderId: trade for trade in self.ib.trades()}
+
         for order_id, order_data in list(self.pending_orders.items()):
-            # Check if order is stale
-            if time.time() - order_data.get('placed_at', 0) > 300:  # 5 minutes
-                self.logger.warning(f"Removing stale order {order_id}")
-                del self.pending_orders[order_id]
-                await self.redis.delete(f'orders:pending:{order_id}')
+            trade = trades_by_id.get(order_id)
+            signal = order_data.get('signal', {}) if isinstance(order_data, dict) else {}
+
+            if trade:
+                snapshot = await self._sync_trade_state(order_id, trade, signal)
+                status = snapshot['status']
+
+                if status == 'Filled':
+                    await self.handle_fill(trade, signal)
+                    self.active_trades.pop(order_id, None)
+                elif status in {'Cancelled', 'ApiCancelled'}:
+                    self.logger.warning(f"Order {order_id} cancelled during status reconciliation")
+                    await self.redis.delete(f'orders:pending:{order_id}')
+                    del self.pending_orders[order_id]
+                    self.active_trades.pop(order_id, None)
+                elif status in {'Inactive', 'Rejected'}:
+                    await self.handle_order_rejection(trade.order, status, order_data)
+            else:
+                if time.time() - order_data.get('placed_at', 0) > 300:
+                    self.logger.warning(f"Removing stale order {order_id}")
+                    del self.pending_orders[order_id]
+                    await self.redis.delete(f'orders:pending:{order_id}')

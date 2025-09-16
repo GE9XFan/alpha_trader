@@ -58,8 +58,9 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Any, Optional
-import redis
+from typing import Any, Dict, List, Optional
+import redis.asyncio as aioredis
+from ib_insync import IB
 
 
 class EmergencyManager:
@@ -67,17 +68,13 @@ class EmergencyManager:
     Handle emergency situations and provide close-all capabilities.
     """
 
-    def __init__(self, config: Dict[str, Any], redis_conn: redis.Redis):
+    def __init__(self, config: Dict[str, Any], redis_conn: aioredis.Redis, ib_connection: Optional[IB] = None):
         """
         Initialize emergency manager with configuration.
-
-        TODO: Load configuration from config.yaml
-        TODO: Set up Redis connection
-        TODO: Initialize IBKR connection
         """
         self.config = config  # Loaded from config.yaml
         self.redis = redis_conn
-        self.ib = None  # Would initialize IB() here
+        self.ib = ib_connection
         self.logger = logging.getLogger(__name__)
 
     async def emergency_close_all(self):
@@ -145,22 +142,32 @@ class EmergencyManager:
         """
         try:
             symbol = position.get('symbol')
-            side = position.get('side')
+            side = (position.get('side') or '').upper()
             quantity = position.get('quantity', 0)
-            position_id = position.get('position_id')
+            position_id = position.get('id') or position.get('position_id')
 
-            if not all([symbol, side, quantity]):
+            if not all([symbol, position_id]):
                 self.logger.error(f"Invalid position data for emergency close: {position}")
                 return
 
             # Determine close direction (opposite of position)
-            close_side = 'SELL' if side == 'BUY' else 'BUY'
+            if side in ('LONG', 'BUY'):
+                close_side = 'SELL'
+            elif side in ('SHORT', 'SELL'):
+                close_side = 'BUY'
+            else:
+                close_side = 'SELL' if quantity >= 0 else 'BUY'
+
+            abs_quantity = abs(quantity)
+            if abs_quantity == 0:
+                self.logger.warning(f"Skipping emergency close for {symbol} - zero quantity")
+                return
 
             # Create emergency close order
             close_order = {
                 'symbol': symbol,
                 'side': close_side,
-                'quantity': abs(quantity),
+                'quantity': abs_quantity,
                 'order_type': 'MARKET',
                 'time_in_force': 'IOC',  # Immediate or cancel
                 'emergency': True,
@@ -189,7 +196,9 @@ class EmergencyManager:
             )
 
             # Remove from open positions
-            await self.redis.delete(f'positions:open:{position_id}')
+            redis_key = f'positions:open:{symbol}:{position_id}'
+            await self.redis.delete(redis_key)
+            await self.redis.srem(f'positions:by_symbol:{symbol}', position_id)
 
             self.logger.warning(f"Emergency close initiated for {symbol} {side} x{quantity}")
 
@@ -249,12 +258,19 @@ class EmergencyManager:
 
             # Clear order queues
             await self.redis.delete('orders:queue')
+
+            # Clear signal queues per symbol
+            pending_signal_keys = await self.redis.keys('signals:pending:*')
+            for signal_key in pending_signal_keys:
+                await self.redis.delete(signal_key)
+
             await self.redis.delete('signals:pending')
 
             self.logger.warning(f"Cancelled {cancelled_count} orders")
 
             # Update metrics
-            await self.redis.incr('metrics:orders:cancelled:total', cancelled_count)
+            if cancelled_count:
+                await self.redis.incrby('metrics:orders:cancelled:total', cancelled_count)
             await self.redis.setex('metrics:orders:last_mass_cancel', 3600, time.time())
 
         except Exception as e:
@@ -363,7 +379,7 @@ class CircuitBreakers:
     Automated circuit breakers for risk control.
     """
 
-    def __init__(self, config: Dict[str, Any], redis_conn: redis.Redis):
+    def __init__(self, config: Dict[str, Any], redis_conn: aioredis.Redis):
         """
         Initialize circuit breakers with configuration.
         """

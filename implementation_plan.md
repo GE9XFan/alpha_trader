@@ -5,8 +5,9 @@
 - **Data integrity**: The canonical Redis schema now enumerates the `analytics:*` portfolio/sector keys and TTL helpers that calculators use when persisting outputs, keeping Redis namespaces and expirations consistent across modules.【F:src/redis_keys.py†L25-L205】
 - **Analytics coordination**: `AnalyticsEngine` seeds calculators on cadence, publishes sector/portfolio snapshots, and idles gracefully outside configured market hours via the new aggregator pipeline.【F:src/analytics_engine.py†L35-L445】
 - **Signal pipeline**: `SignalGenerator` now injects strategy handlers/feature readers, adds loop backoff, and delegates idempotency to `SignalDeduplication`; DTE and MOC strategies share typed feature normalization, contradiction gating, and contract hysteresis.【F:src/signal_generator.py†L48-L209】【F:src/dte_strategies.py†L13-L218】【F:src/moc_strategy.py†L61-L304】
+- **Execution & risk controls**: `ExecutionManager` caches a shared `RiskManager`, reconciles live IBKR positions, strips signal metadata from persisted orders, and escalates partial fills/timeouts while `PositionManager` enforces trailing-stop/EOD rules and `EmergencyManager` drains queues with async Redis primitives.【F:src/execution_manager.py†L59-L755】【F:src/position_manager.py†L70-L372】【F:src/emergency_manager.py†L80-L260】
 - **Distribution & telemetry**: `SignalDistributor` enforces validator guardrails, persistent tier scheduling, and dead-letter handling while `PerformanceTracker` captures equity curves, profit factor, Sharpe, and daily PnL for reviews.【F:src/signal_distributor.py†L27-L236】【F:src/signal_performance.py†L25-L181】
-- **Testing coverage**: Async unit suites cover analytics cadence plus the new signal flow—TTL rollover, DTE hysteresis, MOC contradiction handling, and validator scaling—using lightweight Redis doubles.【F:tests/test_analytics_engine.py†L1-L216】【F:tests/test_signal_generation_enhancements.py†L1-L120】
+- **Testing coverage**: Async suites now cover analytics cadence, signal flow, and consolidated execution/position/risk/emergency scenarios with a lightweight Redis stub validating risk-manager caching, sanitized orders, Greek aggregation, and mass-cancel flows.【F:tests/test_analytics_engine.py†L1-L216】【F:tests/test_signal_generation_enhancements.py†L1-L120】【F:tests/test_managers.py†L1-L253】
 - **Focus areas**: Market ingestion, analytics, signal generation, and risk/execution are production-grade; social, dashboard, and morning-automation services remain scaffolding pending API integrations.
 
 ## Module Completion Matrix
@@ -28,10 +29,10 @@
 |  | `signal_deduplication.py` | 321 | 100% | Contract-centric dedupe reused by generator/distributor with metrics instrumentation.【F:src/signal_deduplication.py†L21-L133】 |
 |  | `signal_distributor.py` | 410 | 90% | Validator guardrails, persistent tier scheduling, and dead-letter/backoff metrics ready; downstream connectors still TODO.【F:src/signal_distributor.py†L27-L236】【F:src/signal_distributor.py†L289-L400】 |
 |  | `signal_performance.py` | 201 | 90% | Tracks profit factor, Sharpe, drawdown, and daily PnL; pending integration with reporting/dashboard flows.【F:src/signal_performance.py†L25-L181】 |
-| Execution & Risk | `execution_manager.py` | 870 | 90% | Order lifecycle, fills, and telemetry implemented; relies on dynamic risk import for now.【F:src/execution_manager.py†L33-L533】 |
-|  | `position_manager.py` | 780 | 90% | Manages P&L, scaling, and stop logic with Redis persistence.【F:src/position_manager.py†L30-L459】 |
-|  | `risk_manager.py` | 803 | 90% | VaR, drawdown, and breaker gates active; future correlation tuning planned.【F:src/risk_manager.py†L31-L401】 |
-|  | `emergency_manager.py` | 698 | 80% | Emergency pathways coded with TODOs for alert integrations and breaker analytics.【F:src/emergency_manager.py†L35-L424】 |
+| Execution & Risk | `execution_manager.py` | 1,118 | 95% | Shared risk-manager cache, IBKR reconciliation, sanitized Redis order snapshots, and partial-fill/timeout telemetry ready; remaining work focuses on expanding automated cancel paths.【F:src/execution_manager.py†L59-L755】 |
+|  | `position_manager.py` | 1,049 | 95% | Injects contract resolvers, mirrors live IBKR positions at startup, enforces strategy-aware trailing stops, and applies configurable EOD reductions via Redis state.【F:src/position_manager.py†L47-L372】 |
+|  | `risk_manager.py` | 921 | 95% | Dataclass-backed VaR/drawdown snapshots with portfolio Greek aggregation and correlation breaker enforcement; future tuning targets real-market calibration.【F:src/risk_manager.py†L57-L350】 |
+|  | `emergency_manager.py` | 713 | 85% | Async Redis pipeline drains signal/order queues, archives cancel metadata, and toggles breaker state; alert/webhook integrations remain outstanding.【F:src/emergency_manager.py†L80-L260】 |
 | Social & Customer | `twitter_bot.py` | 290 | 25% | Async skeleton with extensive TODO blocks for API wiring and content logic.【F:src/twitter_bot.py†L35-L133】 |
 |  | `telegram_bot.py` | 272 | 25% | Subscription tiers and billing placeholders pending implementation.【F:src/telegram_bot.py†L43-L214】 |
 |  | `discord_bot.py` | 144 | 30% | Basic message routing scaffold; real channel workflows not yet added.【F:src/discord_bot.py†L25-L140】 |
@@ -42,11 +43,12 @@
 |  | `news_analyzer.py` | 318 | 30% | Scheduler blueprint awaiting real news pipelines and archival plumbing.【F:src/news_analyzer.py†L65-L254】 |
 |  | `report_generator.py` | 97 | 50% | Data archival routines largely implemented; reporting templates can be expanded.【F:src/report_generator.py†L25-L189】 |
 
-## Recent Deliverables – Analytics Refresh
-- Completed the cadence-aware scheduler and aggregator in `AnalyticsEngine`, emitting symbol, sector, and portfolio payloads solely through the canonical Redis helpers while respecting RTH gating and graceful shutdowns.【F:src/analytics_engine.py†L35-L445】
-- Extended `redis_keys.py` with dedicated helpers for portfolio analytics keys plus differentiated TTL configuration so calculators, aggregators, and downstream consumers share one schema source of truth.【F:src/redis_keys.py†L25-L205】
-- Promoted configuration-driven cadences and sector mappings under `config.yaml`, enabling operations to tune TTLs, refresh intervals, and sector groupings without code edits.【F:config/config.yaml†L84-L115】
-- Backfilled async unit coverage for aggregator math, correlation sourcing, and market-hours gating to prevent regressions as additional calculators come online.【F:tests/test_analytics_engine.py†L1-L216】
+## Recent Deliverables – Execution & Risk Hardening
+- Cached `RiskManager` instances behind an async factory in `ExecutionManager`, reconciled live IBKR positions on startup, sanitized Redis order snapshots, and expanded partial-fill plus timeout telemetry for operational visibility.【F:src/execution_manager.py†L59-L755】
+- Upgraded `PositionManager` with injected contract resolvers, startup reconciliation, strategy-aware trailing stops, and configurable end-of-day reduction/close rules persisted in Redis.【F:src/position_manager.py†L47-L372】
+- Structured VaR and drawdown reporting through dataclass-backed snapshots while aggregating portfolio Greeks and correlation breakers in `RiskManager`.【F:src/risk_manager.py†L57-L350】
+- Modernized `EmergencyManager` to use async Redis, drain signal queues alongside orders, archive cancellations, and flip breaker state before broadcasting emergency alerts.【F:src/emergency_manager.py†L80-L260】
+- Added `tests/test_managers.py` to validate execution, position, risk, and emergency workflows end-to-end with a FakeRedis stub, covering risk-manager caching, sanitized orders, Greek aggregation, and mass-cancel logic.【F:tests/test_managers.py†L1-L253】
 
 ## Key Backlog Items by Domain
 - **Eliminate runtime imports** – With strategy handlers injected into `SignalGenerator`, focus on execution/risk modules to consume Redis artifacts instead of runtime imports before scaling workers.【F:src/signal_generator.py†L48-L209】【F:src/execution_manager.py†L33-L120】
@@ -76,7 +78,7 @@
 ## Testing Strategy
 - **Analytics cadence tests**: `tests/test_analytics_engine.py` covers aggregator TTLs, correlation fallbacks, and market-hours gating to guard the refreshed scheduler contract.【F:tests/test_analytics_engine.py†L1-L216】【F:src/analytics_engine.py†L35-L445】
 - **Signal pipeline tests**: `tests/test_signal_generation_enhancements.py` verifies TTL rollover, DTE contract hysteresis, contradiction-aware MOC direction, and validator guardrails using lightweight Redis doubles; expand toward distribution/backoff scenarios next.【F:tests/test_signal_generation_enhancements.py†L1-L135】【F:src/signal_distributor.py†L27-L236】
-- **Module-level tests**: Continue building async coverage around `signal_deduplication`, `signal_distributor`, and `execution_manager` to validate Redis interactions without the monolithic shim.【F:src/signal_deduplication.py†L21-L133】【F:src/signal_distributor.py†L27-L236】【F:src/execution_manager.py†L232-L533】
+- **Module-level tests**: Grow the consolidated manager suite alongside targeted coverage for `signal_deduplication` and `signal_distributor`, expanding FakeRedis-backed checks for execution edge cases, partial fills, and emergency drains.【F:tests/test_managers.py†L1-L253】【F:src/signal_deduplication.py†L21-L133】【F:src/signal_distributor.py†L27-L236】
 - **Integration suites**: Migrate existing day-based regression tests to the modular imports once analytics/execution decoupling is complete.【F:tests/test_day6.py†L21-L39】【F:tests/test_day8.py†L18-L30】
 - **Operational smoke tests**: Continue using scripts like `tests/verify_signals.py` to monitor live Redis keys, heartbeats, and signal freshness during deployments.【F:tests/verify_signals.py†L1-L60】
 - **Dependency validation**: Optional modules require extra packages (`tweepy`, `stripe`, `fastapi`, `openai`, etc.); document and install these before enabling their services to avoid import failures.【510fcf†L1-L27】【F:requirements.txt†L40-L64】

@@ -27,19 +27,16 @@ Version: 3.0.0
 """
 
 import asyncio
+import inspect
 import json
 import time
 import logging
 from datetime import datetime
-from typing import Dict, List, Any, Optional
+import re
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 import pytz
 import redis.asyncio as aioredis
 from ib_insync import IB, Stock, Option, MarketOrder, StopOrder
-
-
-class ExecutionManager:
-    """Forward declaration for ExecutionManager - imported at runtime to avoid circular imports."""
-    pass
 
 
 class PositionManager:
@@ -47,7 +44,13 @@ class PositionManager:
     Manage position lifecycle including P&L tracking and exit management.
     """
 
-    def __init__(self, config: Dict[str, Any], redis_conn: aioredis.Redis, ib_connection=None):
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        redis_conn: aioredis.Redis,
+        ib_connection=None,
+        contract_resolver: Optional[Callable[[Dict[str, Any]], Awaitable[Any]]] = None,
+    ):
         """
         Initialize position manager with configuration.
         Can share IBKR connection with ExecutionManager or create its own.
@@ -58,6 +61,7 @@ class PositionManager:
 
         # Can share IB connection or create new one
         self.ib = ib_connection if ib_connection else IB()
+        self._contract_resolver = contract_resolver
 
         # Position tracking
         self.positions = {}  # position_id -> position data
@@ -78,6 +82,14 @@ class PositionManager:
             'default': {'profit_trigger': 0.3, 'trail_percent': 0.5}
         }
 
+        risk_config = self.config.get('risk_management', {})
+        default_eod_rules = risk_config.get('eod_rules') or [
+            {'strategy': '0DTE', 'max_dte': 0, 'action': 'close', 'reason': 'EOD expiry avoidance'},
+            {'strategy': '1DTE', 'max_dte': 1, 'action': 'reduce', 'reduction': 0.5, 'reason': 'EOD risk trim'},
+        ]
+        # Copy rules to avoid mutating shared config structures
+        self.eod_rules = [dict(rule) for rule in default_eod_rules]
+
     async def start(self):
         """
         Main position management loop.
@@ -88,6 +100,8 @@ class PositionManager:
         # Ensure IBKR connection if not shared
         if not self.ib.isConnected():
             await self.connect_ibkr()
+
+        await self.reconcile_positions()
 
         last_pnl_update = 0
 
@@ -139,6 +153,74 @@ class PositionManager:
         except Exception as e:
             self.logger.error(f"Failed to connect to IBKR: {e}")
 
+    async def reconcile_positions(self):
+        """Ensure Redis mirrors the live IBKR positions on startup."""
+        if not self.ib.isConnected():
+            return
+
+        try:
+            positions = await self.ib.reqPositionsAsync()
+        except Exception as exc:  # pragma: no cover - network guard
+            self.logger.warning(f"Unable to reconcile IB positions: {exc}")
+            return
+
+        for account, contract, size, avg_cost in positions:
+            try:
+                symbol = contract.symbol
+                position_id = f"{account}:{contract.conId}"
+                redis_key = f'positions:open:{symbol}:{position_id}'
+
+                if await self.redis.exists(redis_key):
+                    continue
+
+                contract_payload = {
+                    'symbol': contract.symbol,
+                    'secType': contract.secType,
+                    'exchange': contract.exchange,
+                    'currency': contract.currency,
+                }
+                if getattr(contract, 'lastTradeDateOrContractMonth', None):
+                    contract_payload['expiry'] = contract.lastTradeDateOrContractMonth
+                if getattr(contract, 'strike', None) is not None:
+                    contract_payload['strike'] = contract.strike
+                    contract_payload['right'] = getattr(contract, 'right', None)
+                    contract_payload['type'] = 'option'
+                else:
+                    contract_payload['type'] = contract_payload.get('secType', 'STK').lower()
+
+                quantity = abs(size)
+                side = 'LONG' if size >= 0 else 'SHORT'
+
+                position_snapshot = {
+                    'id': position_id,
+                    'symbol': symbol,
+                    'contract': contract_payload,
+                    'side': side,
+                    'strategy': 'RECONCILED',
+                    'quantity': quantity,
+                    'entry_price': avg_cost,
+                    'entry_time': datetime.utcnow().isoformat(),
+                    'commission': 0.0,
+                    'stop_loss': None,
+                    'targets': [],
+                    'current_price': avg_cost,
+                    'unrealized_pnl': 0.0,
+                    'realized_pnl': 0.0,
+                    'stop_order_id': None,
+                    'status': 'OPEN',
+                    'order_id': None,
+                    'signal_id': None,
+                    'reconciled': True,
+                }
+
+                await self.redis.set(redis_key, json.dumps(position_snapshot))
+                await self.redis.sadd(f'positions:by_symbol:{symbol}', position_id)
+                self.positions[position_id] = position_snapshot
+            except Exception as snapshot_error:  # pragma: no cover - per-position guard
+                self.logger.error(
+                    f"Failed to reconcile position for {getattr(contract, 'symbol', 'UNKNOWN')}: {snapshot_error}"
+                )
+
     async def load_positions(self):
         """
         Load all open positions from Redis.
@@ -168,11 +250,7 @@ class PositionManager:
         Subscribe to market data for position tracking.
         """
         try:
-            # Import ExecutionManager here to avoid circular import
-            from execution_manager import ExecutionManager
-            # Create IB contract
-            exec_mgr = ExecutionManager(self.config, self.redis)
-            ib_contract = await exec_mgr.create_ib_contract(contract_info)
+            ib_contract = await self._resolve_contract(contract_info)
 
             if ib_contract:
                 ticker = self.ib.reqMktData(ib_contract, '', False, False)
@@ -180,6 +258,61 @@ class PositionManager:
                 self.logger.debug(f"Subscribed to market data for {symbol}")
         except Exception as e:
             self.logger.error(f"Error subscribing to market data: {e}")
+
+    async def _resolve_contract(self, contract_info: Optional[Dict[str, Any]]):
+        """Resolve an IB contract using an injected resolver or local builder."""
+        if not contract_info:
+            return None
+
+        if self._contract_resolver:
+            try:
+                contract = self._contract_resolver(contract_info)
+                if inspect.isawaitable(contract):
+                    contract = await contract
+                if contract:
+                    return contract
+            except Exception as exc:  # pragma: no cover - defensive guard
+                self.logger.error(f"Injected contract resolver failed: {exc}")
+
+        return await self._build_contract(contract_info)
+
+    async def _build_contract(self, contract_info: Dict[str, Any]):
+        """Build and qualify an IB contract directly from contract metadata."""
+        try:
+            contract_type = contract_info.get('type', 'stock')
+            symbol = contract_info.get('symbol')
+
+            if contract_type == 'option':
+                occ_symbol = contract_info.get('occ_symbol')
+                if occ_symbol:
+                    occ_re = re.compile(r'^(?P<root>[A-Z]{1,6})(?P<date>\d{6})(?P<cp>[CP])(?P<strike>\d{8})$')
+                    match = occ_re.match(occ_symbol)
+                    if match:
+                        root = match.group('root')
+                        date_str = match.group('date')
+                        right = 'C' if match.group('cp') == 'C' else 'P'
+                        strike = float(match.group('strike')) / 1000
+                        expiry = f"20{date_str}"
+                        symbol = root
+                    else:
+                        expiry = contract_info.get('expiry')
+                        strike = contract_info.get('strike')
+                        right = contract_info.get('right', 'C')
+                else:
+                    expiry = contract_info.get('expiry') or contract_info.get('lastTradeDateOrContractMonth')
+                    strike = contract_info.get('strike')
+                    right = contract_info.get('right', 'C')
+
+                contract = Option(symbol, expiry, strike, right, 'SMART', currency='USD')
+                contract.multiplier = '100'
+            else:
+                contract = Stock(symbol, 'SMART', 'USD')
+
+            qualified = await self.ib.qualifyContractsAsync(contract)
+            return qualified[0] if qualified else None
+        except Exception as exc:
+            self.logger.error(f"Failed to resolve contract for {contract_info.get('symbol')}: {exc}")
+            return None
 
     async def update_all_positions_pnl(self):
         """
@@ -220,9 +353,8 @@ class PositionManager:
                             position['greeks'] = greeks
 
                     # Update in Redis
-                    await self.redis.setex(
+                    await self.redis.set(
                         f'positions:open:{symbol}:{position_id}',
-                        86400,
                         json.dumps(position)
                     )
 
@@ -404,7 +536,11 @@ class PositionManager:
                 trail_percent = trail_config['trail_percent']
 
                 # Calculate profit percentage
-                profit_pct = unrealized_pnl / (entry_price * position.get('quantity', 1) * 100)
+                notional = self._calculate_notional(position)
+                if notional == 0:
+                    continue
+
+                profit_pct = unrealized_pnl / notional
 
                 if profit_pct >= profit_trigger:
                     # Calculate new stop price
@@ -440,6 +576,17 @@ class PositionManager:
             except Exception as e:
                 self.logger.error(f"Error managing trailing stop for {position_id}: {e}")
 
+    def _calculate_notional(self, position: Dict[str, Any]) -> float:
+        """Calculate the absolute notional exposure of a position."""
+        try:
+            contract_type = position.get('contract', {}).get('type', 'stock')
+            quantity = position.get('quantity', 0)
+            entry_price = position.get('entry_price', 0)
+            multiplier = 100 if contract_type == 'option' else 1
+            return abs(entry_price * quantity * multiplier)
+        except Exception:
+            return 0.0
+
     async def update_stop_loss(self, position: dict, new_stop: float):
         """
         Update stop loss order with IBKR.
@@ -449,17 +596,20 @@ class PositionManager:
             stop_order_id = position.get('stop_order_id')
 
             if stop_order_id and self.ib.isConnected():
-                # Cancel old stop order
-                old_order = self.stop_orders.get(position_id)
-                if old_order:
-                    self.ib.cancelOrder(old_order.order)
+                existing_trade = self.stop_orders.get(position_id)
+                if not existing_trade:
+                    existing_trade = next(
+                        (trade for trade in self.ib.trades() if trade.order.orderId == stop_order_id),
+                        None
+                    )
 
-                # Import ExecutionManager here to avoid circular import
-                from execution_manager import ExecutionManager
-                # Place new stop order
-                exec_mgr = ExecutionManager(self.config, self.redis)
-                contract_info = position.get('contract')
-                ib_contract = await exec_mgr.create_ib_contract(contract_info)
+                if existing_trade and not existing_trade.isDone():
+                    try:
+                        self.ib.cancelOrder(existing_trade.order)
+                    except Exception as cancel_error:
+                        self.logger.error(f"Failed to cancel old stop for {position_id}: {cancel_error}")
+
+                ib_contract = await self._resolve_contract(position.get('contract'))
 
                 if ib_contract:
                     side = position.get('side')
@@ -476,9 +626,8 @@ class PositionManager:
 
                     # Update in Redis
                     symbol = position.get('symbol')
-                    await self.redis.setex(
+                    await self.redis.set(
                         f'positions:open:{symbol}:{position_id}',
-                        86400,
                         json.dumps(position)
                     )
 
@@ -551,11 +700,7 @@ class PositionManager:
                 else:
                     return  # Skip scaling
 
-            # Import ExecutionManager here to avoid circular import
-            from execution_manager import ExecutionManager
-            # Create closing order
-            exec_mgr = ExecutionManager(self.config, self.redis)
-            ib_contract = await exec_mgr.create_ib_contract(position.get('contract'))
+            ib_contract = await self._resolve_contract(position.get('contract'))
 
             if ib_contract and self.ib.isConnected():
                 action = 'SELL' if side == 'LONG' else 'BUY'
@@ -568,40 +713,13 @@ class PositionManager:
                 if trade.isDone() and trade.orderStatus.status == 'Filled':
                     fill_price = trade.fills[-1].execution.price if trade.fills else target_price
 
-                    # Calculate realized P&L for this portion
-                    entry_price = position.get('entry_price', 0)
-                    if contract_type == 'option':
-                        if side == 'LONG':
-                            realized_pnl = (fill_price - entry_price) * close_quantity * 100
-                        else:
-                            realized_pnl = (entry_price - fill_price) * close_quantity * 100
-                    else:
-                        if side == 'LONG':
-                            realized_pnl = (fill_price - entry_price) * close_quantity
-                        else:
-                            realized_pnl = (entry_price - fill_price) * close_quantity
-
-                    # Update position
-                    position['quantity'] = current_quantity - close_quantity
-                    position['realized_pnl'] = position.get('realized_pnl', 0) + realized_pnl
                     position['current_target_index'] = target_index + 1
-
-                    # Log scale out
-                    self.logger.info(
-                        f"Scaled out {close_quantity} {symbol} @ ${fill_price:.2f} "
-                        f"(target {target_index + 1}, P&L: ${realized_pnl:.2f})"
+                    await self._register_partial_close(
+                        position,
+                        close_quantity,
+                        fill_price,
+                        f'Target {target_index + 1}'
                     )
-
-                    # Check if fully closed
-                    if position['quantity'] <= 0:
-                        await self.close_position(position, fill_price, 'All targets hit')
-                    else:
-                        # Update in Redis
-                        await self.redis.setex(
-                            f'positions:open:{symbol}:{position_id}',
-                            86400,
-                            json.dumps(position)
-                        )
 
         except Exception as e:
             self.logger.error(f"Error scaling out position: {e}")
@@ -708,6 +826,99 @@ class PositionManager:
             except Exception as e:
                 self.logger.error(f"Error checking exit conditions: {e}")
 
+    def _calculate_dte(self, position: Dict[str, Any]) -> Optional[int]:
+        """Compute days-to-expiry for option positions."""
+        contract = position.get('contract', {})
+        expiry = contract.get('expiry') or contract.get('lastTradeDateOrContractMonth')
+        if not expiry:
+            return None
+
+        expiry_dt = None
+        for fmt in ('%Y%m%d', '%y%m%d'):
+            try:
+                expiry_dt = datetime.strptime(expiry, fmt)
+                break
+            except ValueError:
+                continue
+
+        if expiry_dt is None:
+            try:
+                expiry_dt = datetime.fromisoformat(expiry)
+            except ValueError:
+                return None
+
+        eastern_today = datetime.now(pytz.timezone('US/Eastern')).date()
+        return max((expiry_dt.date() - eastern_today).days, 0)
+
+    async def _register_partial_close(
+        self,
+        position: dict,
+        close_quantity: int,
+        fill_price: float,
+        reason: str,
+    ):
+        """Record a partial close, updating state, Redis, and metrics."""
+        position_id = position.get('id')
+        symbol = position.get('symbol')
+        side = position.get('side')
+        contract_type = position.get('contract', {}).get('type', 'stock')
+        entry_price = position.get('entry_price', 0)
+        multiplier = 100 if contract_type == 'option' else 1
+
+        if side == 'LONG':
+            realized_pnl = (fill_price - entry_price) * close_quantity * multiplier
+        else:
+            realized_pnl = (entry_price - fill_price) * close_quantity * multiplier
+
+        position['quantity'] = max(position.get('quantity', 0) - close_quantity, 0)
+        position['realized_pnl'] = position.get('realized_pnl', 0) + realized_pnl
+
+        reductions = position.setdefault('reductions', [])
+        reductions.append({
+            'quantity': close_quantity,
+            'price': fill_price,
+            'reason': reason,
+            'timestamp': datetime.now().isoformat(),
+        })
+
+        self.logger.info(
+            f"Reduced {symbol} by {close_quantity} @ ${fill_price:.2f} ({reason})"
+        )
+
+        if position['quantity'] <= 0:
+            await self.close_position(position, fill_price, reason)
+        else:
+            await self.redis.set(
+                f'positions:open:{symbol}:{position_id}',
+                json.dumps(position)
+            )
+
+    async def _reduce_position(self, position: dict, reduction: float, reason: str):
+        """Reduce a position by a percentage at market."""
+        current_qty = position.get('quantity', 0)
+        if current_qty <= 0:
+            return
+
+        reduction = max(0.0, min(reduction, 1.0))
+        close_quantity = int(max(1, current_qty * reduction))
+
+        if close_quantity >= current_qty:
+            await self.close_position(position, position.get('current_price', 0), reason)
+            return
+
+        ib_contract = await self._resolve_contract(position.get('contract'))
+        if not (ib_contract and self.ib.isConnected()):
+            return
+
+        action = 'SELL' if position.get('side') == 'LONG' else 'BUY'
+        order = MarketOrder(action, close_quantity)
+        trade = self.ib.placeOrder(ib_contract, order)
+        await asyncio.sleep(0.5)
+
+        if trade.isDone() and trade.orderStatus.status == 'Filled':
+            fill_price = trade.fills[-1].execution.price if trade.fills else position.get('current_price', 0)
+            await self._register_partial_close(position, close_quantity, fill_price, reason)
+
     async def handle_eod_positions(self):
         """
         Handle end-of-day position management.
@@ -715,16 +926,48 @@ class PositionManager:
         try:
             current_time = datetime.now(pytz.timezone('US/Eastern'))
 
-            # Check if near market close (3:45 PM ET)
-            if current_time.hour == 15 and current_time.minute >= 45:
-                for position_id, position in list(self.positions.items()):
-                    strategy = position.get('strategy')
+            if current_time.hour < 15 or (current_time.hour == 15 and current_time.minute < 45):
+                return
 
-                    # Close all 0DTE positions before expiry
-                    if strategy == '0DTE':
+            for position_id, position in list(self.positions.items()):
+                strategy = position.get('strategy')
+                dte = self._calculate_dte(position)
+                risk_level = position.get('risk_level', 'standard')
+
+                for rule in self.eod_rules:
+                    if rule.get('strategy') and rule['strategy'] != strategy:
+                        continue
+
+                    max_dte = rule.get('max_dte')
+                    if max_dte is not None and dte is not None and dte > max_dte:
+                        continue
+
+                    allowed_risk = rule.get('risk_levels')
+                    if allowed_risk and risk_level not in allowed_risk:
+                        continue
+
+                    action = rule.get('action', 'close')
+                    reason = rule.get('reason', 'EOD risk rule')
+
+                    if action == 'close':
                         current_price = position.get('current_price', 0)
-                        await self.close_position(position, current_price, 'EOD 0DTE expiry avoidance')
-                        self.logger.info(f"Closing 0DTE position {position_id[:8]} before expiry")
+                        await self.close_position(position, current_price, reason)
+                        self.logger.info(f"Closing {strategy} position {position_id[:8]} for EOD rule")
+                        break
+                    elif action == 'reduce':
+                        reduction = rule.get('reduction', 0.5)
+                        await self._reduce_position(position, reduction, reason)
+                        break
+                    elif action == 'hedge':
+                        alert = {
+                            'type': 'hedge_request',
+                            'symbol': position.get('symbol'),
+                            'strategy': strategy,
+                            'reason': reason,
+                            'timestamp': time.time(),
+                        }
+                        await self.redis.publish('alerts:critical', json.dumps(alert))
+                        break
 
         except Exception as e:
             self.logger.error(f"Error handling EOD positions: {e}")

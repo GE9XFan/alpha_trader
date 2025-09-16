@@ -48,9 +48,96 @@ import json
 import time
 import logging
 import numpy as np
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 import redis.asyncio as aioredis
+
+
+@dataclass
+class VaRSnapshot:
+    var_95: float
+    confidence: float
+    timestamp: float
+    historical_var: Optional[float] = None
+    parametric_var: Optional[float] = None
+    mean_return: Optional[float] = None
+    std_return: Optional[float] = None
+    data_points: Optional[int] = None
+
+    def to_dict(self, include_details: bool = False) -> Dict[str, Any]:
+        base = {
+            'var_95': self.var_95,
+            'confidence': self.confidence,
+            'timestamp': self.timestamp,
+        }
+        if include_details:
+            if self.historical_var is not None:
+                base['historical_var'] = self.historical_var
+            if self.parametric_var is not None:
+                base['parametric_var'] = self.parametric_var
+            if self.mean_return is not None:
+                base['mean_return'] = self.mean_return
+            if self.std_return is not None:
+                base['std_return'] = self.std_return
+            if self.data_points is not None:
+                base['data_points'] = self.data_points
+        return base
+
+    def to_json(self, include_details: bool = False) -> str:
+        return json.dumps(self.to_dict(include_details=include_details))
+
+    @classmethod
+    def from_redis(cls, payload: Any) -> Optional['VaRSnapshot']:
+        if not payload:
+            return None
+        if isinstance(payload, bytes):
+            payload = payload.decode('utf-8')
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError:
+            try:
+                value = float(payload)
+            except ValueError:
+                return None
+            return cls(var_95=value, confidence=0.95, timestamp=time.time())
+
+        return cls(
+            var_95=float(data.get('var_95', 0)),
+            confidence=float(data.get('confidence', 0.95)),
+            timestamp=float(data.get('timestamp', time.time())),
+            historical_var=data.get('historical_var'),
+            parametric_var=data.get('parametric_var'),
+            mean_return=data.get('mean_return'),
+            std_return=data.get('std_return'),
+            data_points=data.get('data_points'),
+        )
+
+
+@dataclass
+class DrawdownSnapshot:
+    drawdown_pct: float
+    high_water_mark: Optional[float] = None
+    timestamp: Optional[float] = None
+
+    @classmethod
+    def from_redis(cls, payload: Any) -> Optional['DrawdownSnapshot']:
+        if not payload:
+            return None
+        if isinstance(payload, bytes):
+            payload = payload.decode('utf-8')
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError:
+            try:
+                return cls(drawdown_pct=float(payload))
+            except ValueError:
+                return None
+        return cls(
+            drawdown_pct=float(data.get('drawdown_pct', 0)),
+            high_water_mark=data.get('high_water_mark'),
+            timestamp=data.get('timestamp'),
+        )
 
 
 class RiskManager:
@@ -119,13 +206,13 @@ class RiskManager:
                 await self.update_risk_metrics()
 
                 # Calculate and store VaR
-                var_95 = await self.calculate_var()
-                if var_95:
-                    await self.redis.setex('risk:var:portfolio', 300, json.dumps({
-                        'var_95': var_95,
-                        'confidence': self.var_confidence,
-                        'timestamp': current_time
-                    }))
+                var_snapshot = await self.calculate_var()
+                if var_snapshot:
+                    await self.redis.setex(
+                        'risk:var:portfolio',
+                        300,
+                        var_snapshot.to_json()
+                    )
 
                 await asyncio.sleep(1)
 
@@ -561,7 +648,7 @@ class RiskManager:
             # On error, be conservative
             await self.redis.set('risk:new_positions_allowed', 'false')
 
-    async def calculate_var(self, confidence: float = 0.95) -> float:
+    async def calculate_var(self, confidence: float = 0.95) -> Optional[VaRSnapshot]:
         """
         Calculate Value at Risk using historical simulation method.
         More accurate than parametric VaR for non-normal distributions.
@@ -577,7 +664,10 @@ class RiskManager:
                 # Not enough data for meaningful VaR
                 self.logger.warning("Insufficient data for VaR calculation")
                 # Fallback to position-based estimate
-                return await self._calculate_position_based_var()
+                fallback = await self._calculate_position_based_var()
+                snapshot = VaRSnapshot(var_95=fallback, confidence=confidence, timestamp=time.time())
+                await self.redis.setex('risk:var:detailed', 300, snapshot.to_json(include_details=True))
+                return snapshot
 
             # Parse P&L values
             pnl_values = []
@@ -589,7 +679,10 @@ class RiskManager:
                     continue
 
             if len(pnl_values) < 20:
-                return await self._calculate_position_based_var()
+                fallback = await self._calculate_position_based_var()
+                snapshot = VaRSnapshot(var_95=fallback, confidence=confidence, timestamp=time.time())
+                await self.redis.setex('risk:var:detailed', 300, snapshot.to_json(include_details=True))
+                return snapshot
 
             # Calculate returns (changes in P&L)
             returns = []
@@ -614,17 +707,19 @@ class RiskManager:
             # Use the more conservative estimate
             final_var = max(var_value, parametric_var)
 
+            snapshot = VaRSnapshot(
+                var_95=final_var,
+                confidence=confidence,
+                timestamp=time.time(),
+                historical_var=var_value,
+                parametric_var=parametric_var,
+                mean_return=float(mean_return),
+                std_return=float(std_return),
+                data_points=len(returns),
+            )
+
             # Store VaR metrics
-            await self.redis.setex('risk:var:detailed', 300, json.dumps({
-                'var_95': final_var,
-                'historical_var': var_value,
-                'parametric_var': parametric_var,
-                'mean_return': mean_return,
-                'std_return': std_return,
-                'confidence': confidence,
-                'data_points': len(returns),
-                'timestamp': time.time()
-            }))
+            await self.redis.setex('risk:var:detailed', 300, snapshot.to_json(include_details=True))
 
             # Check VaR against limits
             account_value = float(await self.redis.get('account:value') or 100000)
@@ -637,12 +732,15 @@ class RiskManager:
             else:
                 await self.redis.set('risk:high_var_flag', 'false')
 
-            return final_var
+            return snapshot
 
         except Exception as e:
             self.logger.error(f"Error calculating VaR: {e}")
             # Fallback to position-based estimate
-            return await self._calculate_position_based_var()
+            fallback = await self._calculate_position_based_var()
+            snapshot = VaRSnapshot(var_95=fallback, confidence=confidence, timestamp=time.time())
+            await self.redis.setex('risk:var:detailed', 300, snapshot.to_json(include_details=True))
+            return snapshot
 
     async def _calculate_position_based_var(self) -> float:
         """
@@ -685,6 +783,14 @@ class RiskManager:
             account_value = float(await self.redis.get('account:value') or 100000)
             return account_value * 0.02
 
+    async def _load_var_snapshot(self) -> Optional[VaRSnapshot]:
+        payload = await self.redis.get('risk:var:portfolio')
+        return VaRSnapshot.from_redis(payload)
+
+    async def _load_drawdown_snapshot(self) -> Optional[DrawdownSnapshot]:
+        payload = await self.redis.get('risk:current_drawdown')
+        return DrawdownSnapshot.from_redis(payload)
+
     async def update_risk_metrics(self):
         """
         Update comprehensive risk metrics for monitoring and decision-making.
@@ -709,6 +815,7 @@ class RiskManager:
                     total_exposure += value
 
             # Calculate concentration metrics
+            max_concentration = 0
             if total_exposure > 0:
                 max_concentration = max(symbol_exposure.values()) / total_exposure if symbol_exposure else 0
                 metrics['concentration'] = {
@@ -730,11 +837,22 @@ class RiskManager:
                 pos_data = await self.redis.get(key)
                 if pos_data:
                     pos = json.loads(pos_data)
-                    if pos.get('type') == 'option':
-                        total_delta += pos.get('delta', 0) * pos.get('quantity', 0) * 100
-                        total_gamma += pos.get('gamma', 0) * pos.get('quantity', 0) * 100
-                        total_theta += pos.get('theta', 0) * pos.get('quantity', 0) * 100
-                        total_vega += pos.get('vega', 0) * pos.get('quantity', 0) * 100
+                    contract_type = pos.get('contract', {}).get('type', pos.get('type'))
+                    if contract_type == 'option':
+                        greeks_data = await self.redis.get(f"positions:greeks:{pos.get('id')}")
+                        greeks = {}
+                        if greeks_data:
+                            try:
+                                greeks = json.loads(greeks_data)
+                            except json.JSONDecodeError:
+                                greeks = {}
+                        if not greeks:
+                            greeks = pos.get('greeks', {})
+
+                        total_delta += float(greeks.get('delta', 0))
+                        total_gamma += float(greeks.get('gamma', 0))
+                        total_theta += float(greeks.get('theta', 0))
+                        total_vega += float(greeks.get('vega', 0))
 
             metrics['greeks'] = {
                 'delta': total_delta,
@@ -745,9 +863,10 @@ class RiskManager:
 
             # 3. Risk scores
             account_value = float(await self.redis.get('account:value') or 100000)
-            var_95 = float(await self.redis.get('risk:var:portfolio') or 0)
-            drawdown = float((await self.redis.get('risk:current_drawdown') or '{}') and
-                           json.loads(await self.redis.get('risk:current_drawdown') or '{}').get('drawdown_pct', 0))
+            var_snapshot = await self._load_var_snapshot()
+            var_95 = var_snapshot.var_95 if var_snapshot else 0.0
+            drawdown_snapshot = await self._load_drawdown_snapshot()
+            drawdown = drawdown_snapshot.drawdown_pct if drawdown_snapshot else 0.0
 
             # Calculate composite risk score (0-100)
             risk_score = 0
