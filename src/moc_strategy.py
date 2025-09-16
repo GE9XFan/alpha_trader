@@ -19,9 +19,10 @@ Version: 3.0.0
 
 import logging
 from typing import Dict, Any, List, Optional, Tuple
-from datetime import datetime, time as datetime_time
+from datetime import datetime
 import pytz
 
+from option_utils import compute_expiry_from_dte, normalize_expiry
 from signal_deduplication import SignalDeduplication
 
 
@@ -228,10 +229,12 @@ class MOCStrategy:
 
         spot_price = float(spot or 0)
         right = 'C' if side == 'LONG' else 'P'
+        fallback_expiry = compute_expiry_from_dte(0)
         contract: Dict[str, Any] = {
-            'type': 'OPT',
+            'type': 'option',
             'right': right,
-            'expiry': '0DTE',
+            'expiry': fallback_expiry,
+            'expiry_label': '0DTE',
             'dte_band': '0',
             'multiplier': 100,
             'exchange': 'SMART',
@@ -249,6 +252,8 @@ class MOCStrategy:
         refined = self._select_chain_contract(options_chain or [], right, target_strike)
         if refined:
             contract.update(refined)
+
+        self._finalize_contract(contract, fallback_expiry, target_strike, right)
 
         last_contract = await self._deduper.get_contract_hysteresis(symbol, 'moc', side, '0')
         if last_contract and not self._should_roll_contract(last_contract, contract, spot_price, side):
@@ -361,6 +366,42 @@ class MOCStrategy:
                 best_score = score
 
         return best
+
+    def _finalize_contract(
+        self,
+        contract: Dict[str, Any],
+        fallback_expiry: str,
+        fallback_strike: float,
+        desired_right: str,
+    ) -> None:
+        """Normalize contract payload to align with execution requirements."""
+
+        raw_expiry = contract.get('expiry') or contract.get('expiration') or contract.get('expiration_date')
+        normalized_expiry = normalize_expiry(raw_expiry, fallback=fallback_expiry)
+        contract['expiry'] = normalized_expiry or fallback_expiry
+        contract['expiry_label'] = '0DTE'
+        contract['dte_band'] = '0'
+        contract['type'] = 'option'
+        contract['exchange'] = contract.get('exchange') or 'SMART'
+
+        right = str(contract.get('right', desired_right) or desired_right).upper()
+        contract['right'] = 'C' if right.startswith('C') else 'P'
+
+        try:
+            strike_val = float(contract.get('strike', fallback_strike))
+        except (TypeError, ValueError):
+            strike_val = fallback_strike
+        contract['strike'] = round(strike_val, 2)
+
+        multiplier = contract.get('multiplier', 100)
+        try:
+            contract['multiplier'] = int(multiplier)
+        except (TypeError, ValueError):
+            contract['multiplier'] = 100
+
+        occ_symbol = contract.get('occ_symbol') or contract.get('contract_id') or contract.get('contractID')
+        if occ_symbol:
+            contract['occ_symbol'] = occ_symbol
 
     def _should_roll_contract(
         self,

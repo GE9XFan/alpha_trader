@@ -44,6 +44,8 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 import redis.asyncio as aioredis
 from ib_insync import IB, Stock, Option, MarketOrder, LimitOrder, StopOrder
 
+from option_utils import normalize_expiry
+
 
 class RiskManager:
     """Forward declaration for RiskManager - imported at runtime to avoid circular imports."""
@@ -468,10 +470,11 @@ class ExecutionManager:
             IB Contract object
         """
         try:
-            contract_type = signal_contract.get('type', 'stock')
+            raw_type = signal_contract.get('type') or 'option'
+            contract_type = str(raw_type).strip().lower()
             symbol = signal_contract.get('symbol')
 
-            if contract_type == 'option':
+            if contract_type in {'option', 'options', 'opt'}:
                 # Parse OCC symbol if provided
                 occ_symbol = signal_contract.get('occ_symbol')
                 if occ_symbol:
@@ -501,13 +504,47 @@ class ExecutionManager:
                     strike = signal_contract.get('strike')
                     right = signal_contract.get('right', 'C')
 
+                expiry = normalize_expiry(expiry)
+                if not expiry:
+                    self.logger.error(f"Invalid or missing expiry for option contract: {signal_contract}")
+                    return None
+
+                try:
+                    strike = float(strike)
+                except (TypeError, ValueError):
+                    self.logger.error(f"Invalid strike for option contract: {signal_contract}")
+                    return None
+
+                right = str(right or 'C').upper()
+                right = 'C' if right.startswith('C') else 'P'
+
                 # Create Option contract
                 contract = Option(root, expiry, strike, right, 'SMART', currency='USD')
                 contract.multiplier = '100'
 
-            else:
+            elif contract_type in {'stock', 'equity'}:
                 # Stock contract
                 contract = Stock(symbol, 'SMART', 'USD')
+
+            else:
+                self.logger.warning(
+                    "Unknown contract type '%s'; defaulting to option", raw_type
+                )
+                expiry = normalize_expiry(signal_contract.get('expiry'))
+                if not expiry:
+                    self.logger.error(f"Invalid or missing expiry for option contract: {signal_contract}")
+                    return None
+                strike = signal_contract.get('strike')
+                try:
+                    strike = float(strike)
+                except (TypeError, ValueError):
+                    self.logger.error(f"Invalid strike for option contract: {signal_contract}")
+                    return None
+                right = signal_contract.get('right', 'C')
+                right = str(right or 'C').upper()
+                right = 'C' if right.startswith('C') else 'P'
+                contract = Option(symbol, expiry, strike, right, 'SMART', currency='USD')
+                contract.multiplier = '100'
 
             # Qualify contract to ensure it's valid (use async method)
             qualified = await self.ib.qualifyContractsAsync(contract)
@@ -555,7 +592,9 @@ class ExecutionManager:
 
             confidence = signal.get('confidence', 60) / 100.0
             strategy = signal.get('strategy')
-            contract_type = signal.get('contract', {}).get('type', 'stock')
+            contract_payload = signal.get('contract', {})
+            raw_type = contract_payload.get('type') or 'option'
+            contract_type = str(raw_type).strip().lower()
 
             # Base position size: 2-5% of account based on confidence
             base_position_size = account_value * (0.02 + 0.03 * confidence) * risk_multiplier
@@ -564,7 +603,7 @@ class ExecutionManager:
             max_position_size = buying_power * 0.25
             position_size = min(base_position_size, max_position_size)
 
-            if contract_type == 'option':
+            if contract_type in {'option', 'options', 'opt'}:
                 # For options, calculate number of contracts
                 # Use mid price or last price
                 if ticker.bid and ticker.ask:
@@ -596,7 +635,7 @@ class ExecutionManager:
                 else:
                     return 1  # Default to 1 contract
 
-            else:
+            elif contract_type in {'stock', 'equity'}:
                 # For stocks, calculate number of shares
                 if ticker.last:
                     stock_price = ticker.last
@@ -612,6 +651,21 @@ class ExecutionManager:
                     return shares
                 else:
                     return 100  # Default to 100 shares
+            else:
+                self.logger.warning(
+                    "Unknown contract type '%s'; defaulting to option sizing", raw_type
+                )
+                if ticker.bid and ticker.ask:
+                    option_price = (ticker.bid + ticker.ask) / 2
+                elif ticker.last:
+                    option_price = ticker.last
+                else:
+                    option_price = signal.get('entry', 1.0)
+
+                if option_price > 0:
+                    contracts = int(position_size / (option_price * 100))
+                    return max(1, contracts)
+                return 1
 
         except Exception as e:
             self.logger.error(f"Error calculating order size: {e}")

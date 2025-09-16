@@ -17,6 +17,7 @@ import redis.asyncio as aioredis
 
 from dte_strategies import DTEStrategies
 from moc_strategy import MOCStrategy
+from option_utils import normalize_expiry
 import redis_keys as rkeys
 from signal_deduplication import SignalDeduplication, contract_fingerprint
 
@@ -468,13 +469,27 @@ class SignalGenerator:
         # Calculate time to market close
         time_to_close = (market_close - now).total_seconds()
 
-        # Set TTL based on contract type
-        if contract.get('expiry') == '0DTE':
-            ttl = min(time_to_close, self.ttl_seconds)
-        elif contract.get('expiry') == '1DTE':
-            ttl = min(time_to_close + 86400, self.ttl_seconds)
+        ttl = self.ttl_seconds
+        expiry_str = normalize_expiry(contract.get('expiry'))
+        expiry_dt = None
+        if expiry_str:
+            try:
+                expiry_dt = datetime.strptime(expiry_str, "%Y%m%d").date()
+            except ValueError:
+                expiry_dt = None
+
+        if expiry_dt:
+            dte = (expiry_dt - now.date()).days
+            if dte <= 0:
+                ttl = min(time_to_close, self.ttl_seconds)
+            elif dte == 1:
+                ttl = min(time_to_close + 86400, self.ttl_seconds)
         else:
-            ttl = self.ttl_seconds
+            dte_band = str(contract.get('dte_band') or '').strip()
+            if dte_band == '0':
+                ttl = min(time_to_close, self.ttl_seconds)
+            elif dte_band == '1':
+                ttl = min(time_to_close + 86400, self.ttl_seconds)
 
         return max(60, int(ttl))
 

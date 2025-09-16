@@ -6,13 +6,14 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass, field
-from datetime import datetime, time as datetime_time
+from datetime import datetime
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 import numpy as np
 import pytz
 import redis.asyncio as aioredis
 
+from option_utils import compute_expiry_from_dte, normalize_expiry
 from signal_deduplication import SignalDeduplication
 
 
@@ -865,21 +866,28 @@ class DTEStrategies:
 
         spot_price = float(spot or 0)
         right = 'C' if side == 'LONG' else 'P'
+
+        dte_band, expiry_label, expiry_dte, target_strike = self._determine_contract_targets(
+            strategy, side, spot_price
+        )
+        fallback_expiry = compute_expiry_from_dte(expiry_dte)
+
         contract: Dict[str, Any] = {
-            'type': 'OPT',
+            'type': 'option',
             'right': right,
             'multiplier': 100,
             'exchange': 'SMART',
+            'dte_band': dte_band,
+            'expiry_label': expiry_label,
+            'expiry': fallback_expiry,
+            'strike': target_strike,
         }
-
-        dte_band, expiry_label, target_strike = self._determine_contract_targets(strategy, side, spot_price)
-        contract['expiry'] = expiry_label
-        contract['dte_band'] = dte_band
-        contract['strike'] = target_strike
 
         refined = self._select_from_chain(options_chain or [], side, target_strike)
         if refined:
             contract.update(refined)
+
+        self._finalize_contract(contract, fallback_expiry, expiry_label, target_strike)
 
         last_contract = await self._deduper.get_contract_hysteresis(symbol, strategy, side, dte_band)
         if last_contract and not self._should_roll_contract(last_contract, contract, spot_price, side):
@@ -888,34 +896,42 @@ class DTEStrategies:
         await self._deduper.set_contract_hysteresis(symbol, strategy, side, contract, dte_band)
         return contract
 
-    def _determine_contract_targets(self, strategy: str, side: str, spot: float) -> Tuple[str, str, float]:
-        """Return (dte_band, expiry_label, strike) for the desired contract."""
+    def _determine_contract_targets(self, strategy: str, side: str, spot: float) -> Tuple[str, str, int, float]:
+        """Return (dte_band, expiry_label, expiry_dte, strike) for the desired contract."""
 
         spot = spot if math.isfinite(spot) and spot > 0 else 0.0
         expiry_label = strategy.upper()
         dte_band = strategy.replace('dte', '') if 'dte' in strategy else 'NA'
+        expiry_dte = 0
 
         if strategy == '0dte':
             expiry_label = '0DTE'
             dte_band = '0'
+            expiry_dte = 0
             strike = math.ceil(spot) if side == 'LONG' else math.floor(spot)
         elif strategy == '1dte':
             expiry_label = '1DTE'
             dte_band = '1'
+            expiry_dte = 1
             offset = 0.01 if spot else 1
             strike = spot * (1 + offset) if side == 'LONG' else spot * (1 - offset)
         elif strategy == '14dte':
             expiry_label = '14DTE'
             dte_band = '14'
+            expiry_dte = 14
             offset = 0.02 if spot else 1
             strike = spot * (1 + offset) if side == 'LONG' else spot * (1 - offset)
         else:
             strike = spot
+            try:
+                expiry_dte = max(int(dte_band), 0)
+            except (TypeError, ValueError):
+                expiry_dte = 0
 
         if strike <= 0:
             strike = max(1.0, spot)
 
-        return dte_band, expiry_label, round(strike, 2)
+        return dte_band, expiry_label, expiry_dte, round(strike, 2)
 
     def _select_from_chain(
         self,
@@ -958,6 +974,43 @@ class DTEStrategies:
                 best_score = score
 
         return best
+
+    def _finalize_contract(
+        self,
+        contract: Dict[str, Any],
+        fallback_expiry: str,
+        expiry_label: str,
+        fallback_strike: float,
+    ) -> None:
+        """Normalize contract payload to the fields expected downstream."""
+
+        raw_expiry = contract.get('expiry') or contract.get('expiration') or contract.get('expiration_date')
+        normalized_expiry = normalize_expiry(raw_expiry, fallback=fallback_expiry)
+        contract['expiry'] = normalized_expiry or fallback_expiry
+        contract['expiry_label'] = expiry_label
+        contract['type'] = 'option'
+        contract['dte_band'] = str(contract.get('dte_band', '0'))
+        contract['exchange'] = contract.get('exchange') or 'SMART'
+
+        right = str(contract.get('right', 'C') or 'C').upper()
+        contract['right'] = 'C' if right.startswith('C') else 'P'
+
+        try:
+            strike_val = float(contract.get('strike', fallback_strike))
+        except (TypeError, ValueError):
+            strike_val = fallback_strike
+        contract['strike'] = round(strike_val, 2)
+
+        multiplier = contract.get('multiplier', 100)
+        try:
+            contract['multiplier'] = int(multiplier)
+        except (TypeError, ValueError):
+            contract['multiplier'] = 100
+
+        # Preserve OCC symbol when provided for downstream contract creation
+        occ_symbol = contract.get('occ_symbol') or contract.get('contract_id') or contract.get('contractID')
+        if occ_symbol:
+            contract['occ_symbol'] = occ_symbol
 
     def _should_roll_contract(
         self,
