@@ -30,6 +30,8 @@ from typing import Dict, Any, List
 from datetime import datetime
 import pytz
 
+from redis_keys import Keys, get_system_key
+
 
 class SignalDistributor:
     """
@@ -52,6 +54,10 @@ class SignalDistributor:
         # Signal configuration
         self.signal_config = config.get('modules', {}).get('signals', {})
         self.enabled = self.signal_config.get('enabled', False)
+
+        self.validator = SignalValidator(config, redis_conn)
+        self.dead_letter_key = 'distribution:dead_letter'
+        self._consecutive_failures = 0
 
         # Distribution tiers from config
         distribution_config = self.signal_config.get('distribution', {})
@@ -90,8 +96,17 @@ class SignalDistributor:
                     result = await self.redis.brpop(pending_queues, timeout=2)
                     if result:
                         queue_name, signal_json = result
-                        signal = json.loads(signal_json)
-                        await self.distribute_signal(signal)
+                        try:
+                            signal = json.loads(signal_json)
+                            await self.distribute_signal(signal)
+                            self._consecutive_failures = 0
+                        except Exception as exc:  # pragma: no cover - defensive
+                            self._consecutive_failures += 1
+                            await self.redis.lpush(self.dead_letter_key, signal_json)
+                            backoff = min(5, 0.5 * self._consecutive_failures)
+                            self.logger.error("Failed to distribute signal", exc_info=exc)
+                            if backoff:
+                                await asyncio.sleep(backoff)
                 else:
                     # No symbols configured, sleep longer
                     await asyncio.sleep(5)
@@ -126,6 +141,7 @@ class SignalDistributor:
                     await self.redis.lpush('distribution:basic:queue', signal_json)
                     await self.redis.zrem('distribution:scheduled:basic', signal_json)
                     self.logger.debug(f"Published scheduled basic signal")
+                    await self.redis.incr('metrics:signals:distributed:basic')
 
                 # Process free tier scheduled signals
                 free_ready = await self.redis.zrangebyscore(
@@ -141,6 +157,7 @@ class SignalDistributor:
                     await self.redis.lpush('distribution:free:queue', signal_json)
                     await self.redis.zrem('distribution:scheduled:free', signal_json)
                     self.logger.debug(f"Published scheduled free signal")
+                    await self.redis.incr('metrics:signals:distributed:free')
 
                 # Check every second
                 await asyncio.sleep(1)
@@ -158,11 +175,31 @@ class SignalDistributor:
             signal: Signal to distribute
         """
         try:
+            symbol = signal.get('symbol')
+            if not symbol:
+                self.logger.warning("Signal missing symbol, skipping distribution")
+                return
+
+            if 'ts' not in signal:
+                if signal.get('timestamp'):
+                    signal['ts'] = signal['timestamp']
+                else:
+                    signal['ts'] = int(time.time() * 1000)
+
+            if not self.validator.validate_signal(signal):
+                await self.redis.incr('metrics:signals:validator_rejects')
+                return
+
+            if not await self.validator.validate_market_conditions(symbol):
+                await self.redis.incr('metrics:signals:validator_rejects')
+                return
+
             current_time = time.time()
 
             # Premium tier - immediate
             premium_signal = self.format_premium_signal(signal)
             await self.redis.lpush('distribution:premium:queue', json.dumps(premium_signal))
+            await self.redis.incr('metrics:signals:distributed:premium')
 
             # Basic tier - 60s delay (use sorted set for persistence)
             basic_signal = self.format_basic_signal(signal)
@@ -172,6 +209,7 @@ class SignalDistributor:
                 'distribution:scheduled:basic',
                 {json.dumps(basic_signal): basic_publish_time}
             )
+            await self.redis.incr('metrics:signals:scheduled:basic')
 
             # Free tier - 300s delay (use sorted set for persistence)
             free_signal = self.format_free_signal(signal)
@@ -181,6 +219,7 @@ class SignalDistributor:
                 'distribution:scheduled:free',
                 {json.dumps(free_signal): free_publish_time}
             )
+            await self.redis.incr('metrics:signals:scheduled:free')
 
             self.logger.info(f"Distributed signal {signal['id']} for {signal['symbol']}")
 
@@ -267,6 +306,9 @@ class SignalValidator:
 
         # Signal configuration
         self.signal_config = config.get('modules', {}).get('signals', {})
+        distribution_config = self.signal_config.get('distribution', {})
+        self.max_spread_bps = distribution_config.get('max_spread_bps', 50)
+        self.min_daily_volume = distribution_config.get('min_daily_volume', 200000)
 
     def validate_signal(self, signal: Dict[str, Any]) -> bool:
         """
@@ -279,8 +321,9 @@ class SignalValidator:
             True if valid, False otherwise
         """
         # Check confidence
-        min_confidence = self.signal_config.get('min_confidence', 0.60) * 100
-        if signal.get('confidence', 0) < min_confidence:
+        min_conf_raw = self.signal_config.get('min_confidence', 0.60)
+        min_confidence = min_conf_raw if min_conf_raw > 1 else min_conf_raw * 100
+        if float(signal.get('confidence', 0)) < min_confidence:
             return False
 
         # Check stop distance
@@ -328,6 +371,41 @@ class SignalValidator:
             if not self.config.get('market', {}).get('extended_hours', False):
                 return False
 
-        # TODO: Check for halts, spread, liquidity
+        # Global halt checks
+        system_halt = await self.redis.get(get_system_key('halt'))
+        system_halt_val = system_halt.decode('utf-8', errors='ignore') if isinstance(system_halt, bytes) else system_halt
+        if system_halt_val and str(system_halt_val).lower() not in ('false', '0', 'none'):
+            return False
+
+        risk_halt = await self.redis.get('risk:halt:status')
+        if risk_halt and str(risk_halt).lower() in ('true', '1'):
+            return False
+
+        ticker_raw = await self.redis.get(Keys.market_ticker(symbol))
+        if ticker_raw:
+            if isinstance(ticker_raw, bytes):
+                ticker_raw = ticker_raw.decode('utf-8', errors='ignore')
+            try:
+                ticker = json.loads(ticker_raw)
+            except json.JSONDecodeError:
+                ticker = {}
+
+            bid = ticker.get('bid')
+            ask = ticker.get('ask')
+            if bid and ask:
+                try:
+                    mid = (float(bid) + float(ask)) / 2
+                    spread_bps = abs(float(ask) - float(bid)) / max(mid, 1e-6) * 10000
+                    if spread_bps > self.max_spread_bps:
+                        return False
+                except (TypeError, ValueError):
+                    pass
+
+            volume = ticker.get('volume') or ticker.get('dayVolume')
+            try:
+                if volume is not None and float(volume) < self.min_daily_volume:
+                    return False
+            except (TypeError, ValueError):
+                pass
 
         return True

@@ -18,10 +18,11 @@ Version: 3.0.0
 """
 
 import logging
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime, time as datetime_time
 import pytz
-import json
+
+from signal_deduplication import SignalDeduplication
 
 
 class MOCStrategy:
@@ -48,6 +49,7 @@ class MOCStrategy:
         # Strategy configuration
         self.strategies = config.get('modules', {}).get('signals', {}).get('strategies', {})
         self.eastern = pytz.timezone('US/Eastern')
+        self._deduper = SignalDeduplication(config, redis_conn)
 
     def evaluate_moc_conditions(self, symbol: str, features: Dict[str, Any]) -> Tuple[int, List[str], str]:
         """
@@ -198,6 +200,9 @@ class MOCStrategy:
             confidence += int(float(weights.get('volume', 5)))
             reasons.append("High volume")
 
+        # Apply time-based quality modifier
+        confidence = int(confidence * (0.6 + 0.4 * time_score))
+
         # 6. Determine direction with sophisticated logic
         side = self._determine_moc_direction(
             features, imbalance_side, imbalance_total,
@@ -216,6 +221,41 @@ class MOCStrategy:
                 reasons.append("(final minutes)")
 
         return confidence, reasons, side
+
+    async def select_contract(self, symbol: str, strategy: str, side: str,
+                              spot: float, options_chain=None) -> Dict[str, Any]:
+        """Select an option contract tailored for MOC executions."""
+
+        spot_price = float(spot or 0)
+        right = 'C' if side == 'LONG' else 'P'
+        contract: Dict[str, Any] = {
+            'type': 'OPT',
+            'right': right,
+            'expiry': '0DTE',
+            'dte_band': '0',
+            'multiplier': 100,
+            'exchange': 'SMART',
+        }
+
+        offset = spot_price * 0.003 if spot_price > 50 else 0.5
+        if side == 'LONG':
+            target_strike = spot_price + offset
+        elif side == 'SHORT':
+            target_strike = max(0.5, spot_price - offset)
+        else:
+            target_strike = spot_price
+        contract['strike'] = round(target_strike, 2) if target_strike else 0
+
+        refined = self._select_chain_contract(options_chain or [], right, target_strike)
+        if refined:
+            contract.update(refined)
+
+        last_contract = await self._deduper.get_contract_hysteresis(symbol, 'moc', side, '0')
+        if last_contract and not self._should_roll_contract(last_contract, contract, spot_price, side):
+            return last_contract
+
+        await self._deduper.set_contract_hysteresis(symbol, 'moc', side, contract, '0')
+        return contract
 
     def _determine_moc_direction(self, features: Dict[str, Any], imbalance_side: str,
                                  imbalance_total: float, gamma_proximity: float,
@@ -277,6 +317,82 @@ class MOCStrategy:
             return base_direction
         else:
             return base_direction
+
+    def _select_chain_contract(
+        self,
+        options_chain: List[Dict[str, Any]],
+        right: str,
+        target_strike: float,
+    ) -> Optional[Dict[str, Any]]:
+        if not options_chain:
+            return None
+
+        best: Optional[Dict[str, Any]] = None
+        best_score: Optional[Tuple[float, float]] = None
+
+        for option in options_chain:
+            if not isinstance(option, dict):
+                continue
+            opt_right = str(option.get('right') or option.get('type') or '').upper()
+            if not opt_right.startswith(right):
+                continue
+
+            strike_val = option.get('strike') or option.get('strike_price')
+            try:
+                strike = float(strike_val)
+            except (TypeError, ValueError):
+                continue
+
+            expiry = option.get('expiration') or option.get('expiry')
+            oi = option.get('open_interest', 0) or 0
+            try:
+                oi_val = float(oi)
+            except (TypeError, ValueError):
+                oi_val = 0.0
+
+            score = (abs(strike - target_strike), -oi_val)
+            if best is None or score < best_score:
+                best = {
+                    'strike': round(strike, 2),
+                    'expiration': expiry,
+                    'multiplier': option.get('multiplier', option.get('contract_multiplier', 100)),
+                    'exchange': option.get('exchange', 'SMART'),
+                }
+                best_score = score
+
+        return best
+
+    def _should_roll_contract(
+        self,
+        last_contract: Dict[str, Any],
+        new_contract: Dict[str, Any],
+        spot: float,
+        side: str,
+    ) -> bool:
+        if last_contract.get('expiry') != new_contract.get('expiry'):
+            return True
+
+        try:
+            last_strike = float(last_contract.get('strike', 0))
+            new_strike = float(new_contract.get('strike', 0))
+        except (TypeError, ValueError):
+            return True
+
+        if not last_strike:
+            return True
+        if not new_strike:
+            return False
+
+        if abs(new_strike - last_strike) >= 1:
+            return True
+
+        midpoint = (last_strike + new_strike) / 2
+        tolerance = 0.2
+        if side == 'LONG':
+            return spot > midpoint + tolerance
+        if side == 'SHORT':
+            return spot < midpoint - tolerance
+        return True
 
     def _calculate_gamma_concentration(self, gex_by_strike: List[Dict],
                                       pin_strike: float, current_price: float) -> float:

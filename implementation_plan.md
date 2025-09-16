@@ -4,28 +4,30 @@
 - **Architecture**: 29 production modules now sit behind a Redis-centric message fabric while `main.py` orchestrates configuration, logging, and shared connection pools.【F:src/main.py†L27-L192】
 - **Data integrity**: The canonical Redis schema now enumerates the `analytics:*` portfolio/sector keys and TTL helpers that calculators use when persisting outputs, keeping Redis namespaces and expirations consistent across modules.【F:src/redis_keys.py†L25-L205】
 - **Analytics coordination**: `AnalyticsEngine` seeds calculators on cadence, publishes sector/portfolio snapshots, and idles gracefully outside configured market hours via the new aggregator pipeline.【F:src/analytics_engine.py†L35-L445】
-- **Testing coverage**: Async unit tests validate the aggregator TTLs, correlation sourcing, and the RTH scheduler guardrails to prevent regressions as cadence rules evolve.【F:tests/test_analytics_engine.py†L1-L216】
+- **Signal pipeline**: `SignalGenerator` now injects strategy handlers/feature readers, adds loop backoff, and delegates idempotency to `SignalDeduplication`; DTE and MOC strategies share typed feature normalization, contradiction gating, and contract hysteresis.【F:src/signal_generator.py†L48-L209】【F:src/dte_strategies.py†L13-L218】【F:src/moc_strategy.py†L61-L304】
+- **Distribution & telemetry**: `SignalDistributor` enforces validator guardrails, persistent tier scheduling, and dead-letter handling while `PerformanceTracker` captures equity curves, profit factor, Sharpe, and daily PnL for reviews.【F:src/signal_distributor.py†L27-L236】【F:src/signal_performance.py†L25-L181】
+- **Testing coverage**: Async unit suites cover analytics cadence plus the new signal flow—TTL rollover, DTE hysteresis, MOC contradiction handling, and validator scaling—using lightweight Redis doubles.【F:tests/test_analytics_engine.py†L1-L216】【F:tests/test_signal_generation_enhancements.py†L1-L120】
 - **Focus areas**: Market ingestion, analytics, signal generation, and risk/execution are production-grade; social, dashboard, and morning-automation services remain scaffolding pending API integrations.
 
 ## Module Completion Matrix
 | Group | Module | Lines | Status | Notes |
 | --- | --- | --- | --- | --- |
 | Data Ingestion | `ibkr_ingestion.py` | 1,070 | 100% | Processor-driven normalization with keyed metrics, TTL-managed monitoring, and clean shutdown handling.【F:src/ibkr_ingestion.py†L49-L920】 |
-|  | `ibkr_processor.py` | 215 | 100% | Depth aggregation, trade buffering, and quote synthesis extracted into reusable helpers.【F:src/ibkr_processor.py†L1-L247】 |
-|  | `av_ingestion.py` | 365 | 100% | Long-lived processors, circuit-breaker retries, and telemetry-rich metrics publishing in place.【F:src/av_ingestion.py†L33-L458】 |
-|  | `av_options.py` | 185 | 100% | Chain callbacks, monitoring metrics, and schema-documented payloads delivered.【F:src/av_options.py†L1-L223】 |
-|  | `av_sentiment.py` | 365 | 100% | Configurable ETF exclusions, sentiment quality metrics, and enriched technical metadata stored.【F:src/av_sentiment.py†L1-L365】 |
+|  | `ibkr_processor.py` | 303 | 100% | Depth aggregation, trade buffering, and quote synthesis extracted into reusable helpers.【F:src/ibkr_processor.py†L31-L219】 |
+|  | `av_ingestion.py` | 502 | 100% | Long-lived processors, circuit-breaker retries, and telemetry-rich metrics publishing in place.【F:src/av_ingestion.py†L45-L493】 |
+|  | `av_options.py` | 334 | 100% | Chain callbacks, monitoring metrics, and schema-documented payloads delivered.【F:src/av_options.py†L29-L322】 |
+|  | `av_sentiment.py` | 429 | 100% | Configurable ETF exclusions, sentiment quality metrics, and enriched technical metadata stored.【F:src/av_sentiment.py†L25-L335】 |
 | Analytics | `analytics_engine.py` | 585 | 100% | Cadence-aware scheduler drives calculators, honors market hours, and publishes portfolio/sector/correlation artifacts via the shared Redis schema.【F:src/analytics_engine.py†L35-L584】 |
 |  | `vpin_calculator.py` | 317 | 100% | VPIN logic migrated intact with async Redis use.【F:src/vpin_calculator.py†L31-L116】 |
 |  | `gex_dex_calculator.py` | 482 | 100% | Normalized chain support, canonical analytics writes, and TTL policies aligned with the engine.【F:src/gex_dex_calculator.py†L29-L520】 |
 |  | `pattern_analyzer.py` | 477 | 100% | Toxicity/OBI/sweep metrics publish through shared helpers with velocity tracking TTLs.【F:src/pattern_analyzer.py†L32-L360】 |
 |  | `parameter_discovery.py` | 828 | 90% | Automated tuning pipeline operational with configurable schedules.【F:src/parameter_discovery.py†L31-L246】 |
-| Signal Generation | `signal_generator.py` | 512 | 95% | Production guardrails and audits running; keep an eye on runtime imports for future cleanup.【F:src/signal_generator.py†L33-L420】 |
-|  | `dte_strategies.py` | 822 | 95% | Strategy evaluation extracted cleanly with shared interfaces.【F:src/dte_strategies.py†L30-L300】 |
-|  | `moc_strategy.py` | 321 | 90% | MOC logic functional with Redis hysteresis keys.【F:src/moc_strategy.py†L25-L223】 |
-|  | `signal_deduplication.py` | 322 | 100% | Contract-centric dedupe hardened with atomic Lua script and metrics.【F:src/signal_deduplication.py†L21-L133】 |
-|  | `signal_distributor.py` | 333 | 85% | Tiered queues implemented; contains TODOs for downstream integrations.【F:src/signal_distributor.py†L25-L274】 |
-|  | `signal_performance.py` | 122 | 85% | Metrics tracker operational; future expansion hooks noted.【F:src/signal_performance.py†L25-L219】 |
+| Signal Generation | `signal_generator.py` | 698 | 98% | Dependency-injected strategies, feature normalization, guardrails, and circuit-breaker backoff in place; consider streaming analytics to reduce Redis round-trips.【F:src/signal_generator.py†L48-L274】 |
+|  | `dte_strategies.py` | 1,016 | 98% | `DTEFeatureSet` normalizes payloads and shared hysteresis keeps strikes stable across 0/1/14DTE plays.【F:src/dte_strategies.py†L13-L218】【F:src/dte_strategies.py†L300-L498】 |
+|  | `moc_strategy.py` | 436 | 95% | Contradiction-aware scoring, contract selection, and dedupe-backed memory live; expand alt-contract heuristics next.【F:src/moc_strategy.py†L61-L304】 |
+|  | `signal_deduplication.py` | 321 | 100% | Contract-centric dedupe reused by generator/distributor with metrics instrumentation.【F:src/signal_deduplication.py†L21-L133】 |
+|  | `signal_distributor.py` | 410 | 90% | Validator guardrails, persistent tier scheduling, and dead-letter/backoff metrics ready; downstream connectors still TODO.【F:src/signal_distributor.py†L27-L236】【F:src/signal_distributor.py†L289-L400】 |
+|  | `signal_performance.py` | 201 | 90% | Tracks profit factor, Sharpe, drawdown, and daily PnL; pending integration with reporting/dashboard flows.【F:src/signal_performance.py†L25-L181】 |
 | Execution & Risk | `execution_manager.py` | 870 | 90% | Order lifecycle, fills, and telemetry implemented; relies on dynamic risk import for now.【F:src/execution_manager.py†L33-L533】 |
 |  | `position_manager.py` | 780 | 90% | Manages P&L, scaling, and stop logic with Redis persistence.【F:src/position_manager.py†L30-L459】 |
 |  | `risk_manager.py` | 803 | 90% | VaR, drawdown, and breaker gates active; future correlation tuning planned.【F:src/risk_manager.py†L31-L401】 |
@@ -47,11 +49,12 @@
 - Backfilled async unit coverage for aggregator math, correlation sourcing, and market-hours gating to prevent regressions as additional calculators come online.【F:tests/test_analytics_engine.py†L1-L216】
 
 ## Key Backlog Items by Domain
-- **Eliminate runtime imports** – Continue refactoring signal generation and execution managers to consume results via Redis rather than importing peer modules during runtime.【F:src/signal_generator.py†L132-L196】【F:src/execution_manager.py†L33-L120】
+- **Eliminate runtime imports** – With strategy handlers injected into `SignalGenerator`, focus on execution/risk modules to consume Redis artifacts instead of runtime imports before scaling workers.【F:src/signal_generator.py†L48-L209】【F:src/execution_manager.py†L33-L120】
 - **Complete social channels** – Implement API clients, subscription management, and Redis lookups for Twitter, Telegram, and Discord bots to move them from scaffolding to production-ready modules.【F:src/twitter_bot.py†L35-L133】【F:src/telegram_bot.py†L43-L214】【F:src/discord_bot.py†L25-L140】
 - **Finish dashboard UX** – Build out FastAPI routes, WebSocket streaming, and front-end assets to surface analytics, risk, and alert feeds.【F:src/dashboard_server.py†L83-L223】【F:src/dashboard_routes.py†L25-L200】
 - **Harden emergency controls** – Address TODOs in `EmergencyManager` around alert integrations and circuit-breaker analytics before enabling auto-halt pathways.【F:src/emergency_manager.py†L208-L424】
 - **Clarify ingest processor roadmap** – Determine whether `ibkr_processor.py` will host transformation pipelines or be removed after confirming inline processing is sufficient.【F:src/ibkr_processor.py†L2-L33】
+- **Surface performance telemetry** – Expose `PerformanceTracker` outputs (profit factor, Sharpe, drawdown, daily PnL) via dashboards or reporting once UX scaffolding is ready.【F:src/signal_performance.py†L143-L181】【F:src/dashboard_server.py†L83-L223】
 
 ## Architecture & Redis Conventions
 - **Redis-only messaging** keeps modules isolated; new features must register keys through `redis_keys.py` to maintain a single schema source of truth.【F:src/redis_keys.py†L1-L205】
@@ -72,7 +75,8 @@
 
 ## Testing Strategy
 - **Analytics cadence tests**: `tests/test_analytics_engine.py` covers aggregator TTLs, correlation fallbacks, and market-hours gating to guard the refreshed scheduler contract.【F:tests/test_analytics_engine.py†L1-L216】【F:src/analytics_engine.py†L35-L445】
-- **Module-level tests**: Expand async unit tests around `signal_deduplication`, `dte_strategies`, and `execution_manager` to validate Redis interactions without the monolithic shim.【F:src/signal_deduplication.py†L21-L133】【F:src/dte_strategies.py†L30-L300】【F:src/execution_manager.py†L232-L533】
+- **Signal pipeline tests**: `tests/test_signal_generation_enhancements.py` verifies TTL rollover, DTE contract hysteresis, contradiction-aware MOC direction, and validator guardrails using lightweight Redis doubles; expand toward distribution/backoff scenarios next.【F:tests/test_signal_generation_enhancements.py†L1-L135】【F:src/signal_distributor.py†L27-L236】
+- **Module-level tests**: Continue building async coverage around `signal_deduplication`, `signal_distributor`, and `execution_manager` to validate Redis interactions without the monolithic shim.【F:src/signal_deduplication.py†L21-L133】【F:src/signal_distributor.py†L27-L236】【F:src/execution_manager.py†L232-L533】
 - **Integration suites**: Migrate existing day-based regression tests to the modular imports once analytics/execution decoupling is complete.【F:tests/test_day6.py†L21-L39】【F:tests/test_day8.py†L18-L30】
 - **Operational smoke tests**: Continue using scripts like `tests/verify_signals.py` to monitor live Redis keys, heartbeats, and signal freshness during deployments.【F:tests/verify_signals.py†L1-L60】
 - **Dependency validation**: Optional modules require extra packages (`tweepy`, `stripe`, `fastapi`, `openai`, etc.); document and install these before enabling their services to avoid import failures.【510fcf†L1-L27】【F:requirements.txt†L40-L64】

@@ -1,21 +1,136 @@
 #!/usr/bin/env python3
-"""
-DTE Strategies - 0DTE, 1DTE, and 14DTE Option Strategies
-Part of AlphaTrader Pro System
+"""DTE (days-to-expiry) strategy implementations."""
 
-This module operates independently and communicates only via Redis.
-Handles all day-to-expiry based trading strategies.
-"""
+from __future__ import annotations
 
-import json
-import time
-import redis.asyncio as aioredis
+import logging
+import math
+from dataclasses import dataclass, field
+from datetime import datetime, time as datetime_time
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+
 import numpy as np
 import pytz
-import hashlib
-from datetime import datetime, time as datetime_time
-from typing import Dict, List, Any, Tuple, Optional
-import logging
+import redis.asyncio as aioredis
+
+from signal_deduplication import SignalDeduplication
+
+
+@dataclass
+class DTEFeatureSet:
+    """Normalized feature payload used by DTE strategies."""
+
+    price: float
+    timestamp: int
+    age_s: float
+    vpin: float
+    obi: float
+    bars: List[Dict[str, Any]] = field(default_factory=list)
+    gex_by_strike: List[Dict[str, Any]] = field(default_factory=list)
+    gamma_pin_proximity: float = 0.0
+    gamma_pull_dir: str = ''
+    sweep: float = 0.0
+    unusual_activity: float = 0.0
+    hidden_orders: float = 0.0
+    options_chain: List[Dict[str, Any]] = field(default_factory=list)
+    dex: float = 0.0
+    dex_z: float = 0.0
+    gex: float = 0.0
+    toxicity: float = 0.5
+    institutional_flow: float = 0.0
+    retail_flow: float = 0.0
+    volume: float = 0.0
+    avg_volume_20d: float = 0.0
+    imbalance_total: float = 0.0
+    imbalance_ratio: float = 0.0
+    imbalance_side: str = ''
+    imbalance_paired: float = 0.0
+    indicative_price: float = 0.0
+    near_close_offset_bps: float = 0.0
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, Any]) -> "DTEFeatureSet":
+        def _float(value: Any, default: float = 0.0) -> float:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return float(default)
+
+        def _list_dict(data: Any) -> List[Dict[str, Any]]:
+            if not isinstance(data, Iterable):
+                return []
+            result: List[Dict[str, Any]] = []
+            for item in data:
+                if isinstance(item, dict):
+                    result.append(item)
+            return result
+
+        price = _float(payload.get('price'))
+        timestamp = int(payload.get('timestamp') or payload.get('ts') or 0)
+        if timestamp and timestamp < 1e12:
+            timestamp = int(timestamp * 1000)
+        age_s = _float(payload.get('age_s'), default=999)
+
+        return cls(
+            price=price,
+            timestamp=timestamp,
+            age_s=age_s,
+            vpin=_float(payload.get('vpin')),
+            obi=_float(payload.get('obi'), default=0.5),
+            bars=_list_dict(payload.get('bars')),
+            gex_by_strike=_list_dict(payload.get('gex_by_strike')),
+            gamma_pin_proximity=_float(payload.get('gamma_pin_proximity')),
+            gamma_pull_dir=str(payload.get('gamma_pull_dir') or ''),
+            sweep=_float(payload.get('sweep')),
+            unusual_activity=_float(payload.get('unusual_activity')),
+            hidden_orders=_float(payload.get('hidden_orders')),
+            options_chain=_list_dict(payload.get('options_chain')),
+            dex=_float(payload.get('dex')),
+            dex_z=_float(payload.get('dex_z')),
+            gex=_float(payload.get('gex')),
+            toxicity=_float(payload.get('toxicity'), default=0.5),
+            institutional_flow=_float(payload.get('institutional_flow')),
+            retail_flow=_float(payload.get('retail_flow')),
+            volume=_float(payload.get('volume')),
+            avg_volume_20d=_float(payload.get('avg_volume_20d')),
+            imbalance_total=_float(payload.get('imbalance_total')),
+            imbalance_ratio=_float(payload.get('imbalance_ratio')),
+            imbalance_side=str(payload.get('imbalance_side') or ''),
+            imbalance_paired=_float(payload.get('imbalance_paired')),
+            indicative_price=_float(payload.get('indicative_price')),
+            near_close_offset_bps=_float(payload.get('near_close_offset_bps')),
+        )
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            'price': self.price,
+            'timestamp': self.timestamp,
+            'age_s': self.age_s,
+            'vpin': self.vpin,
+            'obi': self.obi,
+            'bars': self.bars,
+            'gex_by_strike': self.gex_by_strike,
+            'gamma_pin_proximity': self.gamma_pin_proximity,
+            'gamma_pull_dir': self.gamma_pull_dir,
+            'sweep': self.sweep,
+            'unusual_activity': self.unusual_activity,
+            'hidden_orders': self.hidden_orders,
+            'options_chain': self.options_chain,
+            'dex': self.dex,
+            'dex_z': self.dex_z,
+            'gex': self.gex,
+            'toxicity': self.toxicity,
+            'institutional_flow': self.institutional_flow,
+            'retail_flow': self.retail_flow,
+            'volume': self.volume,
+            'avg_volume_20d': self.avg_volume_20d,
+            'imbalance_total': self.imbalance_total,
+            'imbalance_ratio': self.imbalance_ratio,
+            'imbalance_side': self.imbalance_side,
+            'imbalance_paired': self.imbalance_paired,
+            'indicative_price': self.indicative_price,
+            'near_close_offset_bps': self.near_close_offset_bps,
+        }
 
 
 class DTEStrategies:
@@ -40,14 +155,24 @@ class DTEStrategies:
         # Guardrail parameters
         self.ttl_seconds = self.signal_config.get('ttl_seconds', 300)
 
+        # Shared deduplication helper for contract hysteresis
+        self._deduper = SignalDeduplication(config, redis_conn)
+
+    def _normalized_features(self, features: Dict[str, Any]) -> Dict[str, Any]:
+        """Return a sanitized feature mapping with guaranteed defaults."""
+
+        feature_set = DTEFeatureSet.from_mapping(features)
+        return feature_set.as_dict()
+
     async def evaluate(self, strategy: str, symbol: str, features: Dict[str, Any]) -> Tuple[int, List[str], str]:
         """Route to appropriate DTE strategy evaluator."""
+        normalized = self._normalized_features(features)
         if strategy == '0dte':
-            return self.evaluate_0dte_conditions(symbol, features)
+            return self.evaluate_0dte_conditions(symbol, normalized)
         elif strategy == '1dte':
-            return self.evaluate_1dte_conditions(symbol, features)
+            return self.evaluate_1dte_conditions(symbol, normalized)
         elif strategy == '14dte':
-            return self.evaluate_14dte_conditions(symbol, features)
+            return self.evaluate_14dte_conditions(symbol, normalized)
         else:
             return 0, [], "FLAT"
 
@@ -736,69 +861,139 @@ class DTEStrategies:
             return "FLAT"
 
     async def select_contract(self, symbol: str, strategy: str, side: str, spot: float, options_chain=None) -> Dict[str, Any]:
-        """
-        Select specific options contract for the signal with hysteresis to prevent strike bouncing.
-        """
-        contract = {
+        """Select specific options contract with hysteresis and optional chain refinement."""
+
+        spot_price = float(spot or 0)
+        right = 'C' if side == 'LONG' else 'P'
+        contract: Dict[str, Any] = {
             'type': 'OPT',
-            'right': 'C' if side == 'LONG' else 'P'
+            'right': right,
+            'multiplier': 100,
+            'exchange': 'SMART',
         }
 
-        # Determine DTE band for hysteresis tracking
-        dte_band = None
+        dte_band, expiry_label, target_strike = self._determine_contract_targets(strategy, side, spot_price)
+        contract['expiry'] = expiry_label
+        contract['dte_band'] = dte_band
+        contract['strike'] = target_strike
+
+        refined = self._select_from_chain(options_chain or [], side, target_strike)
+        if refined:
+            contract.update(refined)
+
+        last_contract = await self._deduper.get_contract_hysteresis(symbol, strategy, side, dte_band)
+        if last_contract and not self._should_roll_contract(last_contract, contract, spot_price, side):
+            return last_contract
+
+        await self._deduper.set_contract_hysteresis(symbol, strategy, side, contract, dte_band)
+        return contract
+
+    def _determine_contract_targets(self, strategy: str, side: str, spot: float) -> Tuple[str, str, float]:
+        """Return (dte_band, expiry_label, strike) for the desired contract."""
+
+        spot = spot if math.isfinite(spot) and spot > 0 else 0.0
+        expiry_label = strategy.upper()
+        dte_band = strategy.replace('dte', '') if 'dte' in strategy else 'NA'
 
         if strategy == '0dte':
-            # First OTM strike expiring today
-            contract['expiry'] = '0DTE'
+            expiry_label = '0DTE'
             dte_band = '0'
-            if side == 'LONG':
-                contract['strike'] = round(spot + 1, 0)  # Next dollar strike up
-            else:
-                contract['strike'] = round(spot - 1, 0)  # Next dollar strike down
-
+            strike = math.ceil(spot) if side == 'LONG' else math.floor(spot)
         elif strategy == '1dte':
-            # 1% OTM expiring tomorrow
-            contract['expiry'] = '1DTE'
+            expiry_label = '1DTE'
             dte_band = '1'
-            if side == 'LONG':
-                contract['strike'] = round(spot * 1.01, 0)
-            else:
-                contract['strike'] = round(spot * 0.99, 0)
-
+            offset = 0.01 if spot else 1
+            strike = spot * (1 + offset) if side == 'LONG' else spot * (1 - offset)
         elif strategy == '14dte':
-            # 2% OTM or follow unusual activity
-            contract['expiry'] = '14DTE'
+            expiry_label = '14DTE'
             dte_band = '14'
-            if side == 'LONG':
-                contract['strike'] = round(spot * 1.02, 0)
-            else:
-                contract['strike'] = round(spot * 0.98, 0)
+            offset = 0.02 if spot else 1
+            strike = spot * (1 + offset) if side == 'LONG' else spot * (1 - offset)
+        else:
+            strike = spot
 
-        # Add DTE band to contract for tracking
-        if dte_band:
-            contract['dte_band'] = dte_band
+        if strike <= 0:
+            strike = max(1.0, spot)
 
-        # Add hysteresis to prevent strike bouncing (keyed by DTE band)
-        fp_key = f"signals:last_contract:{symbol}:{strategy}:{side}:{dte_band or 'NA'}"
-        last_contract_str = await self.redis.get(fp_key)
+        return dte_band, expiry_label, round(strike, 2)
 
-        if last_contract_str:
+    def _select_from_chain(
+        self,
+        options_chain: Iterable[Dict[str, Any]],
+        side: str,
+        target_strike: float,
+    ) -> Optional[Dict[str, Any]]:
+        desired_right = 'C' if side == 'LONG' else 'P'
+        best: Optional[Dict[str, Any]] = None
+        best_score: Optional[Tuple[float, float]] = None
+
+        for option in options_chain:
+            if not isinstance(option, dict):
+                continue
+            right = str(option.get('right') or option.get('type') or option.get('option_type') or '').upper()
+            if not right.startswith(desired_right):
+                continue
+
+            strike_val = option.get('strike') or option.get('strike_price') or option.get('k')
             try:
-                last_contract = json.loads(last_contract_str)
-                last_strike = last_contract.get('strike', 0)
+                strike = float(strike_val)
+            except (TypeError, ValueError):
+                continue
 
-                # If we're only 1 strike away, require spot to move past midpoint before switching
-                if abs(contract['strike'] - last_strike) == 1:
-                    midpoint = (contract['strike'] + last_strike) / 2
-                    if abs(spot - midpoint) < 0.3:  # Within 30 cents of midpoint, stick with previous
-                        contract = last_contract
-            except (json.JSONDecodeError, TypeError):
-                pass
+            expiry = option.get('expiration') or option.get('expiry') or option.get('expiration_date')
+            oi = option.get('open_interest', 0) or 0
+            try:
+                oi_val = float(oi)
+            except (TypeError, ValueError):
+                oi_val = 0.0
 
-        # Remember this contract for next time (10 minute TTL)
-        await self.redis.setex(fp_key, 600, json.dumps(contract))
+            score = (abs(strike - target_strike), -oi_val)
+            if best is None or score < best_score:
+                best = {
+                    'strike': round(strike, 2),
+                    'expiration': expiry,
+                    'multiplier': option.get('multiplier', option.get('contract_multiplier', 100)),
+                    'exchange': option.get('exchange', 'SMART'),
+                }
+                best_score = score
 
-        return contract
+        return best
+
+    def _should_roll_contract(
+        self,
+        last_contract: Dict[str, Any],
+        new_contract: Dict[str, Any],
+        spot: float,
+        side: str,
+    ) -> bool:
+        """Determine whether we should roll to a new contract."""
+
+        if last_contract.get('dte_band') != new_contract.get('dte_band'):
+            return True
+        if last_contract.get('expiry') != new_contract.get('expiry'):
+            return True
+
+        try:
+            last_strike = float(last_contract.get('strike', 0))
+            new_strike = float(new_contract.get('strike', 0))
+        except (TypeError, ValueError):
+            return True
+
+        if not last_strike:
+            return True
+        if not new_strike:
+            return False
+
+        if abs(new_strike - last_strike) >= 2:
+            return True
+
+        midpoint = (last_strike + new_strike) / 2
+        buffer = 0.25
+        if side == 'LONG':
+            return spot > midpoint + buffer
+        if side == 'SHORT':
+            return spot < midpoint - buffer
+        return True
 
     def find_gamma_pin(self, features: Dict[str, Any]) -> float:
         """

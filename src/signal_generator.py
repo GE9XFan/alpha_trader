@@ -1,70 +1,62 @@
 #!/usr/bin/env python3
-"""
-Signal Generator - Main Signal Generation Coordinator
-Part of AlphaTrader Pro System
+"""Signal Generator - Main Signal Generation Coordinator."""
 
-This module operates independently and communicates only via Redis.
-Redis keys used:
-- metrics:{symbol}:*: All analytics metrics
-- signals:pending:{symbol}: Signal queue
-- signals:emitted:*: Idempotency tracking
-- signals:cooldown:*: Cooldown tracking
-- health:signals:heartbeat: Heartbeat status
-"""
+from __future__ import annotations
 
 import asyncio
 import json
-import time
-import redis
-import redis.asyncio as aioredis
-import uuid
-import hashlib
-import numpy as np
-import pytz
-from datetime import datetime, timedelta, time as datetime_time
-from typing import Dict, List, Any, Optional, Tuple
 import logging
+import random
+import time
 import traceback
+from datetime import datetime, timedelta, time as datetime_time
+from typing import Any, Callable, Dict, Iterable, List, Optional, Protocol, Tuple
+
+import pytz
+import redis.asyncio as aioredis
+
+from dte_strategies import DTEStrategies
+from moc_strategy import MOCStrategy
+from redis_keys import Keys
+from signal_deduplication import SignalDeduplication, contract_fingerprint
 
 
-def contract_fingerprint(symbol: str, strategy: str, side: str, contract: dict) -> str:
-    """
-    Stable identity for the specific option contract choice.
-    Includes multiplier and exchange to handle edge cases (minis, different venues).
-    """
-    parts = (
-        symbol,
-        strategy,
-        side,
-        str(contract.get('expiry')),
-        str(contract.get('right')),
-        str(contract.get('strike')),
-        str(contract.get('multiplier', 100)),  # Default 100 for standard equity options
-        str(contract.get('exchange', 'SMART')),  # Default SMART for IB routing
-    )
-    return "sigfp:" + hashlib.sha1(":".join(parts).encode()).hexdigest()[:20]
+class StrategyEvaluator(Protocol):
+    """Protocol describing the strategy interface used by :class:`SignalGenerator`."""
+
+    async def evaluate(self, strategy: str, symbol: str, features: Dict[str, Any]) -> Tuple[int, List[str], str]:
+        """Return ``(confidence, reasons, side)`` for the given symbol."""
+
+    async def select_contract(
+        self,
+        symbol: str,
+        strategy: str,
+        side: str,
+        spot: float,
+        options_chain: Optional[Iterable[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """Return a fully described contract for the proposed trade."""
 
 
-def trading_day_bucket(ts: float = None) -> str:
-    """
-    Return YYYYMMDD in US/Eastern; aligns with the trading session day.
-    Market day changes at 4PM ET, not midnight.
-    """
-    ET = pytz.timezone("America/New_York")
-    dt = datetime.fromtimestamp(ts or time.time(), tz=ET)
-    return dt.strftime("%Y%m%d")
+class FeatureReader(Protocol):
+    """Protocol for feature loader dependency injection."""
+
+    async def __call__(self, redis_conn: aioredis.Redis, symbol: str) -> Dict[str, Any]:
+        """Load analytics features for ``symbol`` from Redis."""
 
 
 class SignalGenerator:
-    """
-    Generate trading signals based on analytics metrics and strategy rules.
-    Coordinates all signal generation strategies.
-    """
+    """Generate trading signals based on analytics metrics and strategy rules."""
 
-    def __init__(self, config: Dict[str, Any], redis_conn):
-        """
-        Initialize signal generator with configuration.
-        """
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        redis_conn: aioredis.Redis,
+        *,
+        feature_reader: Optional[FeatureReader] = None,
+        strategy_factories: Optional[Dict[str, Callable[[Dict[str, Any], aioredis.Redis], StrategyEvaluator]]] = None,
+        stop_event: Optional[asyncio.Event] = None,
+    ) -> None:
         self.config = config
         self.redis = redis_conn
         self.logger = logging.getLogger(__name__)
@@ -78,136 +70,113 @@ class SignalGenerator:
         self.strategies = self.signal_config.get('strategies', {})
 
         # Guardrail parameters
-        self.max_staleness_s = self.signal_config.get('max_staleness_s', 5)
-        self.min_confidence = self.signal_config.get('min_confidence', 0.60)
-        self.min_refresh_s = self.signal_config.get('min_refresh_s', 2)
-        self.cooldown_s = self.signal_config.get('cooldown_s', 30)
-        self.ttl_seconds = self.signal_config.get('ttl_seconds', 300)
+        self.max_staleness_s = float(self.signal_config.get('max_staleness_s', 5))
+        self.min_confidence = float(self.signal_config.get('min_confidence', 0.60))
+        self.min_refresh_s = float(self.signal_config.get('min_refresh_s', 2))
+        self.cooldown_s = int(self.signal_config.get('cooldown_s', 30))
+        self.ttl_seconds = int(self.signal_config.get('ttl_seconds', 300))
         self.version = self.signal_config.get('version', 'D6.0.1')
 
+        # Loop configuration
+        self.loop_interval_s = float(self.signal_config.get('loop_interval_s', 0.5))
+        self.loop_jitter_s = float(self.signal_config.get('loop_jitter_s', 0.05))
+        self.max_backoff_s = float(self.signal_config.get('max_backoff_s', 5.0))
+        self._consecutive_errors = 0
+        self._circuit_open_until: Optional[float] = None
+
         # Track last evaluation time per symbol
-        self.last_eval = {}
+        self.last_eval: Dict[str, float] = {}
 
         # Eastern timezone for market hours
         self.eastern = pytz.timezone('US/Eastern')
 
-        # Strategy implementations (will be imported from separate modules)
-        self.strategy_handlers = {}
+        # Strategy implementations
+        self.strategy_handlers: Dict[str, StrategyEvaluator] = {}
+        self._strategy_factories = strategy_factories or {
+            '0dte': DTEStrategies,
+            '1dte': DTEStrategies,
+            '14dte': DTEStrategies,
+            'moc': MOCStrategy,
+        }
 
-        # Atomic Redis Lua script for idempotency + enqueue + cooldown
-        self.LUA_ATOMIC_EMIT = """
-        -- KEYS[1] = idempotency_key "signals:emitted:<emit_id>"
-        -- KEYS[2] = cooldown_key    "signals:cooldown:<contract_fp>"
-        -- KEYS[3] = queue_key       "signals:pending:<symbol>"
-        -- ARGV[1] = signal_json
-        -- ARGV[2] = idempotency_ttl_seconds
-        -- ARGV[3] = cooldown_ttl_seconds
+        # Feature reader dependency (allows deterministic tests without Redis)
+        self._feature_reader: FeatureReader = feature_reader or default_feature_reader
 
-        if redis.call('SETNX', KEYS[1], '1') == 1 then
-            redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[2]) * 1000)
-            if redis.call('EXISTS', KEYS[2]) == 0 then
-                redis.call('LPUSH', KEYS[3], ARGV[1])
-                redis.call('PEXPIRE', KEYS[2], tonumber(ARGV[3]) * 1000)
-                return 1  -- Signal enqueued
-            else
-                return -1  -- Blocked by cooldown
-            end
-        else
-            return 0  -- Duplicate signal
-        end
-        """
-        self.lua_sha = None  # Will be loaded on first use
+        # Deduplication/emission helper shared across strategies
+        self._deduper = SignalDeduplication(config, redis_conn)
 
-    async def start(self):
+        # Shutdown coordination
+        self._stop_event = stop_event or asyncio.Event()
+
+        # Lua SHA cached by SignalDeduplication; maintain for backwards compat metrics
+        self.lua_sha = None
+
+    async def start(self, stop_event: Optional[asyncio.Event] = None) -> None:
+        """Main signal generation loop.
+
+        Args:
+            stop_event: Optional external stop event. When provided the loop exits when
+                either the internal or external event is set.
         """
-        Main signal generation loop.
-        Processing frequency: Every 500ms
-        """
+
         if not self.enabled:
             self.logger.info("Signal generator disabled in config")
             return
 
-        self.logger.info(f"Starting signal generator (dry_run={self.dry_run})...")
+        event = stop_event or self._stop_event
+        self.logger.info("Starting signal generator", extra={"dry_run": self.dry_run})
+        self._initialize_strategy_handlers()
 
-        # Import and initialize strategy handlers
-        from dte_strategies import DTEStrategies
-        from moc_strategy import MOCStrategy
+        while not event.is_set():
+            cycle_started = time.perf_counter()
 
-        self.strategy_handlers['0dte'] = DTEStrategies(self.config, self.redis)
-        self.strategy_handlers['1dte'] = DTEStrategies(self.config, self.redis)
-        self.strategy_handlers['14dte'] = DTEStrategies(self.config, self.redis)
-        self.strategy_handlers['moc'] = MOCStrategy(self.config, self.redis)
-
-        while True:
             try:
+                if self._circuit_open_until and time.time() < self._circuit_open_until:
+                    await asyncio.sleep(min(1.0, self._circuit_open_until - time.time()))
+                    continue
+
                 current_time = datetime.now(self.eastern)
 
-                # Update heartbeat
+                # Update heartbeat for liveness monitoring
                 await self.redis.setex('health:signals:heartbeat', 15, current_time.isoformat())
 
-                # Process each enabled strategy
                 for strategy_name, strategy_config in self.strategies.items():
                     if not strategy_config.get('enabled', False):
                         continue
 
-                    # Check if strategy is active
                     if not self.is_strategy_active(strategy_name, current_time):
                         continue
 
-                    # Process each symbol for this strategy
                     symbols = strategy_config.get('symbols', [])
                     for symbol in symbols:
-                        try:
-                            # Check minimum refresh interval
-                            last_time = self.last_eval.get(f"{symbol}:{strategy_name}", 0)
-                            if time.time() - last_time < self.min_refresh_s:
-                                continue
+                        await self._evaluate_symbol(strategy_name, strategy_config, symbol)
 
-                            # Read features from Redis
-                            features = await self.read_features(symbol)
+                self._consecutive_errors = 0
 
-                            # Check freshness gate
-                            if not self.check_freshness(features):
-                                await self.redis.incr('metrics:signals:skipped_stale')
-                                await self.redis.incr('metrics:signals:blocked:stale_features')
-                                continue
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # pragma: no cover - defensive logging
+                self._consecutive_errors += 1
+                await self.redis.incr('metrics:signals:loop_errors')
+                self.logger.error("Error in signal generation loop", exc_info=exc)
+                if self._consecutive_errors >= 5:
+                    backoff = min(self.max_backoff_s, 2 ** self._consecutive_errors)
+                    self._circuit_open_until = time.time() + backoff
+                    self.logger.warning(
+                        "Opening signal generation circuit breaker",
+                        extra={"cooldown_s": backoff},
+                    )
 
-                            # Check schema gate
-                            if not self.check_schema(features):
-                                await self.redis.incr('metrics:signals:skipped_schema')
-                                continue
+            delay = self._compute_sleep_delay(time.perf_counter() - cycle_started)
+            if delay > 0:
+                await asyncio.sleep(delay)
 
-                            # Evaluate strategy conditions using appropriate handler
-                            handler = self.get_strategy_handler(strategy_name)
-                            confidence, reasons, side = await handler.evaluate(strategy_name, symbol, features)
+        self.logger.info("Signal generator loop stopped")
 
-                            # Increment considered counter
-                            await self.redis.incr('metrics:signals:considered')
+    def stop(self) -> None:
+        """Request cooperative shutdown of the signal loop."""
 
-                            # Check if signal meets threshold
-                            min_conf = strategy_config.get('thresholds', {}).get('min_confidence', self.min_confidence * 100)
-                            if side == "FLAT" or confidence < min_conf:
-                                await self._debug_rejected_signal(symbol, strategy_name, confidence, min_conf, side, reasons, features)
-                                continue
-
-                            # Process valid signal
-                            await self._process_valid_signal(
-                                symbol, strategy_name, confidence, reasons, features, side, strategy_config
-                            )
-
-                            # Update last evaluation time
-                            self.last_eval[f"{symbol}:{strategy_name}"] = time.time()
-
-                        except Exception as e:
-                            self.logger.error(f"Error processing {symbol} for {strategy_name}: {e}")
-                            self.logger.error(traceback.format_exc())
-
-                await asyncio.sleep(0.5)
-
-            except Exception as e:
-                self.logger.error(f"Error in signal generation loop: {e}")
-                self.logger.error(traceback.format_exc())
-                await asyncio.sleep(1)
+        self._stop_event.set()
 
     def get_strategy_handler(self, strategy_name: str):
         """Get the appropriate strategy handler."""
@@ -216,72 +185,158 @@ class SignalGenerator:
         else:
             return self.strategy_handlers.get(strategy_name)
 
-    async def _process_valid_signal(self, symbol: str, strategy_name: str, confidence: int,
-                                   reasons: List[str], features: Dict, side: str, strategy_config: Dict):
-        """Process a valid signal that meets confidence threshold."""
-        # Select contract first
+    def _initialize_strategy_handlers(self) -> None:
+        """Instantiate strategy handlers using the configured factories."""
+
+        if self.strategy_handlers:
+            return
+
+        for strategy_name, factory in self._strategy_factories.items():
+            if strategy_name in self.strategy_handlers:
+                continue
+
+            handler = factory(self.config, self.redis)
+
+            if strategy_name in {'0dte', '1dte', '14dte'}:
+                for alias in ('0dte', '1dte', '14dte'):
+                    self.strategy_handlers.setdefault(alias, handler)
+            else:
+                self.strategy_handlers[strategy_name] = handler
+
+    async def _evaluate_symbol(self, strategy_name: str, strategy_config: Dict[str, Any], symbol: str) -> None:
+        """Evaluate a single symbol for a strategy."""
+
+        now = time.time()
+        cache_key = f"{symbol}:{strategy_name}"
+        last_time = self.last_eval.get(cache_key, 0)
+        if now - last_time < self.min_refresh_s:
+            return
+
+        try:
+            features = await self._feature_reader(self.redis, symbol)
+        except Exception as exc:  # pragma: no cover - defensive
+            self.logger.error("Failed to load features", exc_info=exc, extra={"symbol": symbol})
+            await self.redis.incr('metrics:signals:feature_errors')
+            return
+
+        if not features:
+            return
+
+        if not self.check_freshness(features):
+            await self.redis.incr('metrics:signals:skipped_stale')
+            await self.redis.incr('metrics:signals:blocked:stale_features')
+            return
+
+        if not self.check_schema(features):
+            await self.redis.incr('metrics:signals:skipped_schema')
+            return
+
+        handler = self.get_strategy_handler(strategy_name)
+        if handler is None:
+            self.logger.error("No handler registered for strategy", extra={"strategy": strategy_name})
+            return
+
+        try:
+            confidence, reasons, side = await handler.evaluate(strategy_name, symbol, features)
+        except Exception as exc:  # pragma: no cover - surfaces strategy bugs
+            self.logger.error(
+                "Strategy evaluation failed",
+                exc_info=exc,
+                extra={"strategy": strategy_name, "symbol": symbol},
+            )
+            await self.redis.incr('metrics:signals:strategy_errors')
+            return
+
+        await self.redis.incr('metrics:signals:considered')
+
+        min_conf = self._normalize_confidence_threshold(
+            strategy_config.get('thresholds', {}).get('min_confidence')
+        )
+
+        if side == "FLAT" or confidence < min_conf:
+            await self._debug_rejected_signal(symbol, strategy_name, confidence, min_conf, side, reasons, features)
+            self.last_eval[cache_key] = now
+            return
+
+        await self._process_valid_signal(
+            symbol, strategy_name, confidence, reasons, features, side, strategy_config
+        )
+
+        self.last_eval[cache_key] = now
+
+    async def _process_valid_signal(
+        self,
+        symbol: str,
+        strategy_name: str,
+        confidence: int,
+        reasons: List[str],
+        features: Dict[str, Any],
+        side: str,
+        strategy_config: Dict[str, Any],
+    ) -> None:
+        """Process a validated signal by selecting a contract and emitting it atomically."""
+
         options_chain = features.get('options_chain') if strategy_name == 'moc' else None
         contract = await self.select_contract(symbol, strategy_name, side, features.get('price', 0), options_chain)
         contract_fp = contract_fingerprint(symbol, strategy_name, side, contract)
 
-        # Generate deterministic signal ID
-        signal_id = self.generate_signal_id(symbol, side, contract_fp)
+        signal_id = self._deduper.generate_signal_id(symbol, side, contract_fp)
 
-        # Check for material change
-        if not await self._check_material_change(confidence, contract_fp):
-            await self.redis.incr('metrics:signals:thin_update_blocked')
+        if not await self._deduper.check_material_change(contract_fp, int(confidence)):
             return
 
-        # Update last confidence
-        await self.redis.setex(f"signals:last_conf:{contract_fp}", 900, int(confidence))
-
-        # Create signal object
         signal = await self.create_signal_with_contract(
-            symbol, strategy_name, confidence, reasons, features, side,
-            contract=contract, emit_id=signal_id, contract_fp=contract_fp
+            symbol,
+            strategy_name,
+            int(confidence),
+            reasons,
+            features,
+            side,
+            contract=contract,
+            emit_id=signal_id,
+            contract_fp=contract_fp,
         )
 
-        # Calculate dynamic TTL
         dynamic_ttl = self.calculate_dynamic_ttl(contract)
 
-        # Atomic emit
-        emit_result = await self.atomic_emit_signal(signal, signal_id, contract_fp, symbol, dynamic_ttl)
+        emit_result = await self._deduper.atomic_emit(signal_id, contract_fp, symbol, signal, dynamic_ttl)
+        self.lua_sha = self._deduper.lua_sha
 
-        # Handle emit result
-        await self._handle_emit_result(emit_result, signal, signal_id, contract_fp, symbol, confidence, contract, dynamic_ttl, features)
-
-    async def _check_material_change(self, confidence: int, contract_fp: str) -> bool:
-        """Check if confidence change is material enough to emit."""
-        last_c_key = f"signals:last_conf:{contract_fp}"
-        last_conf = await self.redis.get(last_c_key)
-        if last_conf is not None:
-            last_conf_val = int(last_conf)
-            delta = abs(confidence - last_conf_val)
-            threshold = max(3, 0.05 * max(1, last_conf_val))  # 3 pts or 5%
-            if delta < threshold:
-                # Add to audit trail
-                await self._add_audit_entry(contract_fp, "blocked", "thin_update", confidence,
-                                          extra={"last_conf": last_conf_val, "delta": delta, "threshold": threshold})
-                return False
-        return True
+        await self._handle_emit_result(
+            emit_result,
+            signal,
+            signal_id,
+            contract_fp,
+            symbol,
+            int(confidence),
+            contract,
+            dynamic_ttl,
+            features,
+        )
 
     async def _handle_emit_result(self, emit_result: int, signal: Dict, signal_id: str,
                                  contract_fp: str, symbol: str, confidence: int,
                                  contract: Dict, dynamic_ttl: int, features: Dict):
         """Handle the result of atomic signal emission."""
         if emit_result == 0:
-            # Duplicate signal
             await self.redis.incr('metrics:signals:duplicates')
             await self.redis.incr('metrics:signals:blocked:duplicate')
-            await self._add_audit_entry(contract_fp, "blocked", "duplicate", confidence,
-                                       extra={"signal_id": signal_id})
+            await self._deduper.add_audit_entry(
+                contract_fp,
+                "blocked",
+                "duplicate",
+                {"conf": confidence, "signal_id": signal_id},
+            )
 
         elif emit_result == -1:
-            # Blocked by cooldown
             await self.redis.incr('metrics:signals:cooldown_blocked')
             await self.redis.incr('metrics:signals:blocked:cooldown')
-            await self._add_audit_entry(contract_fp, "blocked", "cooldown", confidence,
-                                       extra={"signal_id": signal_id})
+            await self._deduper.add_audit_entry(
+                contract_fp,
+                "blocked",
+                "cooldown",
+                {"conf": confidence, "signal_id": signal_id},
+            )
 
         elif emit_result == 1:
             # Successfully enqueued
@@ -289,37 +344,28 @@ class SignalGenerator:
             await self.redis.setex(f'signals:out:{symbol}:{ts}', dynamic_ttl, json.dumps(signal))
             await self.redis.setex(f'signals:latest:{symbol}', dynamic_ttl, json.dumps(signal))
 
-            await self._add_audit_entry(contract_fp, "emitted", None, confidence,
-                                       extra={"signal_id": signal_id, "ttl": dynamic_ttl, "contract": contract})
+            await self._deduper.add_audit_entry(
+                contract_fp,
+                "emitted",
+                "",
+                {
+                    "conf": confidence,
+                    "signal_id": signal_id,
+                    "ttl": dynamic_ttl,
+                    "contract": contract,
+                },
+            )
 
             # Increment emitted counter
             await self.redis.incr('metrics:signals:emitted')
 
             # Log signal
             self.logger.info(
-                f"signals DECIDE symbol={symbol} side={signal['side']} conf={confidence/100:.2f} "
+                f"signals DECIDE symbol={symbol} side={signal['side']} conf={confidence:.0f}% "
                 f"vpin={features.get('vpin', 0):.2f} obi={features.get('obi', 0):.2f} "
                 f"gexZ={features.get('gex_z', 0):.1f} dexZ={features.get('dex_z', 0):.1f} "
                 f"rth={self.is_rth(datetime.now(self.eastern))}"
             )
-
-    async def _add_audit_entry(self, contract_fp: str, action: str, reason: Optional[str],
-                              confidence: int, extra: Dict = None):
-        """Add entry to audit trail for a contract fingerprint."""
-        audit_key = f"signals:audit:{contract_fp}"
-        entry = {
-            "ts": time.time(),
-            "action": action,
-            "conf": confidence
-        }
-        if reason:
-            entry["reason"] = reason
-        if extra:
-            entry.update(extra)
-
-        await self.redis.lpush(audit_key, json.dumps(entry))
-        await self.redis.ltrim(audit_key, 0, 50)  # Keep last 50 entries
-        await self.redis.expire(audit_key, 3600)  # 1 hour TTL
 
     async def _debug_rejected_signal(self, symbol: str, strategy: str, confidence: int,
                                     min_conf: float, side: str, reasons: List[str], features: Dict):
@@ -374,6 +420,28 @@ class SignalGenerator:
         return (current_time.weekday() < 5 and
                 datetime_time(9, 30) <= current_time.time() <= datetime_time(16, 0))
 
+    def _normalize_confidence_threshold(self, value: Optional[float]) -> int:
+        """Normalize configuration confidence thresholds to an integer percentage."""
+
+        if value is None:
+            value = self.min_confidence
+
+        if value <= 1:
+            return int(round(value * 100))
+        return int(round(value))
+
+    def _compute_sleep_delay(self, cycle_duration: float) -> float:
+        """Compute sleep delay with jitter and back-pressure handling."""
+
+        base_delay = max(0.0, self.loop_interval_s - cycle_duration)
+        jitter = random.uniform(0, max(self.loop_jitter_s, 0.0))
+        delay = base_delay + jitter
+
+        if self._consecutive_errors:
+            delay = min(self.max_backoff_s, delay + (2 ** self._consecutive_errors) * 0.1)
+
+        return max(0.0, delay)
+
     def check_freshness(self, features: Dict[str, Any]) -> bool:
         """Check if features are fresh enough."""
         return features.get('age_s', 999) <= self.max_staleness_s
@@ -383,21 +451,10 @@ class SignalGenerator:
         required = ['price', 'vpin', 'obi', 'timestamp']
         return all(k in features for k in required)
 
-    async def read_features(self, symbol: str) -> Dict[str, Any]:
-        """Read all required features from Redis for signal evaluation."""
-        # This is a large method that reads various metrics
-        # Moving to separate module for clarity
-        from signal_deduplication import read_features_from_redis
-        return await read_features_from_redis(self.redis, symbol)
+    def calculate_dynamic_ttl(self, contract: Dict[str, Any], *, now: Optional[datetime] = None) -> int:
+        """Calculate TTL based on contract expiry and market close timing."""
 
-    def generate_signal_id(self, symbol: str, side: str, contract_fp: str) -> str:
-        """Generate deterministic signal ID."""
-        day_bucket = trading_day_bucket()
-        return f"{day_bucket}:{contract_fp}"
-
-    def calculate_dynamic_ttl(self, contract: dict) -> int:
-        """Calculate TTL based on contract expiry."""
-        now = datetime.now(self.eastern)
+        now = now or datetime.now(self.eastern)
 
         # Get market close time (4:00 PM ET)
         market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
@@ -421,53 +478,6 @@ class SignalGenerator:
 
         return max(60, int(ttl))
 
-    async def atomic_emit_signal(self, signal: dict, signal_id: str, contract_fp: str,
-                                symbol: str, ttl: int = None) -> int:
-        """Atomically check idempotency, enqueue signal, and set cooldown."""
-        # Load Lua script if not already loaded
-        if not self.lua_sha:
-            self.lua_sha = await self.redis.script_load(self.LUA_ATOMIC_EMIT)
-
-        # Use provided TTL or default
-        if ttl is None:
-            ttl = self.ttl_seconds
-
-        # Prepare keys and arguments
-        idempotency_key = f'signals:emitted:{signal_id}'
-        cooldown_key = f'signals:cooldown:{contract_fp}'
-        queue_key = f'signals:pending:{symbol}'
-
-        signal_json = json.dumps(signal)
-
-        try:
-            # Execute atomic operation
-            result = await self.redis.evalsha(
-                self.lua_sha,
-                3,  # Number of keys
-                idempotency_key,
-                cooldown_key,
-                queue_key,
-                signal_json,
-                str(ttl),
-                str(self.cooldown_s)
-            )
-            return int(result)
-
-        except redis.NoScriptError:
-            # Script was evicted, reload and retry
-            self.lua_sha = await self.redis.script_load(self.LUA_ATOMIC_EMIT)
-            result = await self.redis.evalsha(
-                self.lua_sha,
-                3,
-                idempotency_key,
-                cooldown_key,
-                queue_key,
-                signal_json,
-                str(ttl),
-                str(self.cooldown_s)
-            )
-            return int(result)
-
     async def select_contract(self, symbol: str, strategy: str, side: str,
                             spot: float, options_chain=None) -> Dict[str, Any]:
         """Select appropriate contract for the strategy."""
@@ -490,14 +500,16 @@ class SignalGenerator:
                                          reasons: List[str], features: Dict, side: str,
                                          contract: Dict, emit_id: str, contract_fp: str) -> Dict:
         """Create signal object with contract details."""
+        timestamp_ms = int(time.time() * 1000)
         return {
             'id': emit_id,
             'contract_fp': contract_fp,
-            'timestamp': int(time.time() * 1000),
+            'timestamp': timestamp_ms,
+            'ts': timestamp_ms,
             'symbol': symbol,
             'strategy': strategy,
             'side': side,
-            'confidence': confidence / 100.0,  # Convert to 0-1 scale
+            'confidence': int(confidence),
             'reasons': reasons,
             'contract': contract,
             'features': {
@@ -510,3 +522,178 @@ class SignalGenerator:
             'version': self.version,
             'dry_run': self.dry_run
         }
+
+
+async def default_feature_reader(redis_conn: aioredis.Redis, symbol: str) -> Dict[str, Any]:
+    """Load analytics features for a symbol from Redis.
+
+    Missing or stale data falls back to neutral defaults so the generator can
+    continue operating during transient upstream disruptions.
+    """
+
+    logger = logging.getLogger(__name__)
+
+    async with redis_conn.pipeline() as pipe:
+        pipe.get(Keys.market_ticker(symbol))
+        pipe.lrange(Keys.market_bars(symbol), -25, -1)
+        pipe.get(Keys.analytics_vpin(symbol))
+        pipe.get(Keys.analytics_obi(symbol))
+        pipe.get(Keys.analytics_gex(symbol))
+        pipe.get(Keys.analytics_dex(symbol))
+        pipe.get(Keys.analytics_toxicity(symbol))
+        pipe.get(Keys.analytics_metric(symbol, 'sweep'))
+        pipe.get(Keys.analytics_metric(symbol, 'hidden'))
+        pipe.get(Keys.analytics_metric(symbol, 'unusual'))
+        pipe.get(Keys.analytics_metric(symbol, 'institutional_flow'))
+        pipe.get(Keys.analytics_metric(symbol, 'retail_flow'))
+        pipe.get(Keys.analytics_metric(symbol, 'gamma_pin'))
+        pipe.get(Keys.analytics_metric(symbol, 'gamma_pull'))
+        pipe.get(Keys.analytics_metric(symbol, 'moc'))
+        pipe.get(Keys.options_chain(symbol))
+        raw_results = await pipe.execute()
+
+    def _decode(value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, bytes):
+            value = value.decode('utf-8', errors='ignore')
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                return value
+        return value
+
+    try:
+        (
+            ticker_raw,
+            bars_raw,
+            vpin_raw,
+            obi_raw,
+            gex_raw,
+            dex_raw,
+            toxicity_raw,
+            sweep_raw,
+            hidden_raw,
+            unusual_raw,
+            institutional_raw,
+            retail_raw,
+            gamma_pin_raw,
+            gamma_pull_raw,
+            moc_raw,
+            options_chain_raw,
+        ) = raw_results
+    except ValueError:  # pragma: no cover - defensive
+        logger.debug("Unexpected feature payload length for %s", symbol)
+        ticker_raw = bars_raw = vpin_raw = obi_raw = gex_raw = dex_raw = None
+        toxicity_raw = sweep_raw = hidden_raw = unusual_raw = None
+        institutional_raw = retail_raw = gamma_pin_raw = gamma_pull_raw = None
+        moc_raw = options_chain_raw = None
+
+    ticker = _decode(ticker_raw) or {}
+    bars_payload = bars_raw or []
+    bars: List[Dict[str, Any]] = []
+    for entry in bars_payload:
+        parsed = _decode(entry)
+        if isinstance(parsed, dict):
+            bars.append(parsed)
+
+    options_chain_value = _decode(options_chain_raw)
+    if isinstance(options_chain_value, dict):
+        options_chain = options_chain_value.get('contracts') or []
+    elif isinstance(options_chain_value, list):
+        options_chain = options_chain_value
+    else:
+        options_chain = []
+
+    timestamp_ms = int(ticker.get('timestamp') or ticker.get('ts') or 0)
+    if timestamp_ms and timestamp_ms < 1e12:
+        timestamp_ms = int(timestamp_ms * 1000)
+
+    price = ticker.get('mid') or ticker.get('last') or ticker.get('close') or ticker.get('price')
+    if price is None:
+        bid = ticker.get('bid')
+        ask = ticker.get('ask')
+        if bid is not None and ask is not None:
+            price = (float(bid) + float(ask)) / 2
+    price = float(price or 0)
+
+    now_ms = int(time.time() * 1000)
+    age_s = (now_ms - timestamp_ms) / 1000 if timestamp_ms else 999
+
+    def _extract_metric(payload: Any, *fields: str, default: float = 0.0) -> float:
+        data = _decode(payload)
+        if isinstance(data, (int, float)):
+            return float(data)
+        if isinstance(data, dict):
+            for field in fields:
+                if field in data:
+                    try:
+                        return float(data[field])
+                    except (TypeError, ValueError):
+                        continue
+        return float(default)
+
+    features: Dict[str, Any] = {
+        'price': price,
+        'timestamp': timestamp_ms or now_ms,
+        'age_s': max(age_s, 0),
+        'bars': bars,
+        'options_chain': options_chain,
+        'vpin': _extract_metric(vpin_raw, 'vpin', 'score'),
+        'obi': _extract_metric(obi_raw, 'value', 'obi', default=0.5),
+        'toxicity': _extract_metric(toxicity_raw, 'score', 'toxicity', default=0.5),
+        'sweep': _extract_metric(sweep_raw, 'score', 'value'),
+        'hidden_orders': _extract_metric(hidden_raw, 'score', 'value'),
+        'unusual_activity': _extract_metric(unusual_raw, 'score', 'value'),
+        'institutional_flow': _extract_metric(institutional_raw, 'value'),
+        'retail_flow': _extract_metric(retail_raw, 'value'),
+    }
+
+    gex_data = _decode(gex_raw) or {}
+    if isinstance(gex_data, dict):
+        features['gex'] = gex_data.get('total_gex') or gex_data.get('gex') or 0
+        by_strike = gex_data.get('gex_by_strike') or {}
+        if isinstance(by_strike, dict):
+            parsed_strikes = []
+            for strike, value in by_strike.items():
+                try:
+                    parsed_strikes.append({'strike': float(strike), 'gex': float(value)})
+                except (TypeError, ValueError):
+                    continue
+            features['gex_by_strike'] = parsed_strikes
+        pin_strike = gex_data.get('max_gex_strike') or gex_data.get('zero_gamma_strike')
+        spot = gex_data.get('spot') or price
+        if pin_strike and spot:
+            try:
+                distance_pct = abs(float(pin_strike) - float(spot)) / max(float(spot), 1e-6)
+                features['gamma_pin_proximity'] = max(0.0, min(1.0, 1 - distance_pct / 0.02))
+                features['gamma_pull_dir'] = 'UP' if pin_strike > spot else 'DOWN'
+            except (TypeError, ValueError):
+                pass
+
+    dex_data = _decode(dex_raw) or {}
+    if isinstance(dex_data, dict):
+        features['dex'] = dex_data.get('total_dex') or dex_data.get('dex') or 0
+        features['dex_z'] = dex_data.get('zscore') or dex_data.get('z') or 0
+
+    moc_data = _decode(moc_raw) or {}
+    if isinstance(moc_data, dict):
+        features.update({
+            'imbalance_total': moc_data.get('imbalance_total', 0),
+            'imbalance_ratio': moc_data.get('imbalance_ratio', 0),
+            'imbalance_side': moc_data.get('imbalance_side'),
+            'imbalance_paired': moc_data.get('imbalance_paired', 0),
+            'indicative_price': moc_data.get('indicative_price'),
+            'near_close_offset_bps': moc_data.get('near_close_offset_bps', 0),
+        })
+
+    gamma_pin_data = _decode(gamma_pin_raw)
+    if isinstance(gamma_pin_data, dict):
+        features.setdefault('gamma_pin_proximity', gamma_pin_data.get('proximity', 0))
+
+    gamma_pull_data = _decode(gamma_pull_raw)
+    if isinstance(gamma_pull_data, dict):
+        features.setdefault('gamma_pull_dir', gamma_pull_data.get('direction'))
+
+    return features
