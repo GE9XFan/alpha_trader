@@ -48,6 +48,26 @@ class DTEFeatureSet:
     imbalance_paired: float = 0.0
     indicative_price: float = 0.0
     near_close_offset_bps: float = 0.0
+    vanna_notional: float = 0.0
+    vanna_z: float = 0.0
+    charm_notional: float = 0.0
+    charm_z: float = 0.0
+    charm_shares_per_day: float = 0.0
+    hedging_notional_per_pct: float = 0.0
+    hedging_shares_per_pct: float = 0.0
+    hedging_gamma_shares: float = 0.0
+    hedging_vanna_shares: float = 0.0
+    charm_notional_per_day: float = 0.0
+    skew_value: float = 0.0
+    skew_z: float = 0.0
+    flow_momentum: float = 0.0
+    flow_mean_reversion: float = 0.0
+    flow_hedging: float = 0.0
+    flow_institutional: float = 0.0
+    flow_retail: float = 0.0
+    vix1d_value: float = 0.0
+    vix1d_z: float = 0.0
+    vix1d_regime: str = ''
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any]) -> "DTEFeatureSet":
@@ -100,6 +120,26 @@ class DTEFeatureSet:
             imbalance_paired=_float(payload.get('imbalance_paired')),
             indicative_price=_float(payload.get('indicative_price')),
             near_close_offset_bps=_float(payload.get('near_close_offset_bps')),
+            vanna_notional=_float(payload.get('vanna_notional')),
+            vanna_z=_float(payload.get('vanna_z')),
+            charm_notional=_float(payload.get('charm_notional')),
+            charm_z=_float(payload.get('charm_z')),
+            charm_shares_per_day=_float(payload.get('charm_shares_per_day')),
+            hedging_notional_per_pct=_float(payload.get('hedging_notional_per_pct')),
+            hedging_shares_per_pct=_float(payload.get('hedging_shares_per_pct')),
+            hedging_gamma_shares=_float(payload.get('hedging_gamma_shares')),
+            hedging_vanna_shares=_float(payload.get('hedging_vanna_shares')),
+            charm_notional_per_day=_float(payload.get('charm_notional_per_day')),
+            skew_value=_float(payload.get('skew')),
+            skew_z=_float(payload.get('skew_z')),
+            flow_momentum=_float(payload.get('flow_momentum')),
+            flow_mean_reversion=_float(payload.get('flow_mean_reversion')),
+            flow_hedging=_float(payload.get('flow_hedging')),
+            flow_institutional=_float(payload.get('flow_institutional')),
+            flow_retail=_float(payload.get('flow_retail')),
+            vix1d_value=_float(payload.get('vix1d_value')),
+            vix1d_z=_float(payload.get('vix1d_z')),
+            vix1d_regime=str(payload.get('vix1d_regime') or ''),
         )
 
     def as_dict(self) -> Dict[str, Any]:
@@ -131,6 +171,26 @@ class DTEFeatureSet:
             'imbalance_paired': self.imbalance_paired,
             'indicative_price': self.indicative_price,
             'near_close_offset_bps': self.near_close_offset_bps,
+            'vanna_notional': self.vanna_notional,
+            'vanna_z': self.vanna_z,
+            'charm_notional': self.charm_notional,
+            'charm_z': self.charm_z,
+            'charm_shares_per_day': self.charm_shares_per_day,
+            'hedging_notional_per_pct': self.hedging_notional_per_pct,
+            'hedging_shares_per_pct': self.hedging_shares_per_pct,
+            'hedging_gamma_shares': self.hedging_gamma_shares,
+            'hedging_vanna_shares': self.hedging_vanna_shares,
+            'charm_notional_per_day': self.charm_notional_per_day,
+            'skew_value': self.skew_value,
+            'skew_z': self.skew_z,
+            'flow_momentum': self.flow_momentum,
+            'flow_mean_reversion': self.flow_mean_reversion,
+            'flow_hedging': self.flow_hedging,
+            'flow_institutional': self.flow_institutional,
+            'flow_retail': self.flow_retail,
+            'vix1d_value': self.vix1d_value,
+            'vix1d_z': self.vix1d_z,
+            'vix1d_regime': self.vix1d_regime,
         }
 
 
@@ -276,10 +336,70 @@ class DTEStrategies:
                 reasons.append("Sweep activity")
             confidence += points
 
-        # 5. Determine direction with enhanced logic
+        # 5. Dealer flow analytics (Vanna/Charm)
+        dealer_weight = float(weights.get('dealer_flow', 20))
+        vanna_notional = features.get('vanna_notional', 0.0)
+        charm_notional = features.get('charm_notional', 0.0)
+        vanna_threshold = float(thresholds.get('vanna_notional_min', 1.5e8))
+        charm_threshold = float(thresholds.get('charm_notional_min', 5e7))
+        dealer_points = 0.0
+
+        if dealer_weight > 0:
+            if abs(vanna_notional) >= vanna_threshold > 0:
+                intensity = min(abs(vanna_notional) / max(vanna_threshold, 1e-6), 2.0) / 2.0
+                dealer_points += dealer_weight * 0.6 * intensity
+                direction = 'bullish' if vanna_notional > 0 else 'bearish'
+                reasons.append(f"Vanna {direction} pressure ({vanna_notional/1e9:.2f}B/1% vol)")
+            if abs(charm_notional) >= charm_threshold > 0:
+                intensity = min(abs(charm_notional) / max(charm_threshold, 1e-6), 2.0) / 2.0
+                dealer_points += dealer_weight * 0.4 * intensity
+                direction = 'bid' if charm_notional > 0 else 'offer'
+                reasons.append(f"Charm decay {direction} ({charm_notional/1e9:.2f}B/day)")
+            confidence += int(dealer_points)
+
+        # 6. Skew and flow clustering contributions
+        skew_weight = float(weights.get('skew', 10))
+        skew_value = features.get('skew_value')
+        skew_z = features.get('skew_z', 0.0)
+        skew_sigma = float(thresholds.get('skew_sigma', 1.0))
+        if skew_weight > 0 and skew_value is not None and abs(skew_z) >= skew_sigma:
+            skew_points = int(skew_weight * min(abs(skew_z) / max(skew_sigma, 1e-6), 2.0) / 2.0)
+            confidence += skew_points
+            if skew_value > 0:
+                reasons.append(f"Put skew elevated ({skew_z:.2f}σ)")
+            else:
+                reasons.append(f"Call skew elevated ({skew_z:.2f}σ)")
+
+        flow_weight = float(weights.get('flow_clusters', 15))
+        flow_momentum = features.get('flow_momentum', 0.0)
+        flow_threshold = float(thresholds.get('flow_momentum_min', 0.35))
+        if flow_weight > 0 and flow_momentum >= flow_threshold:
+            intensity = min((flow_momentum - flow_threshold) / max(1 - flow_threshold, 1e-6), 1.0)
+            points = int(flow_weight * intensity)
+            if points > 0:
+                confidence += points
+                reasons.append(f"Momentum flow {flow_momentum:.0%}")
+
+        # 7. Hedging elasticity guardrails
+        hedging_notional = abs(features.get('hedging_notional_per_pct', 0.0) or 0.0)
+        hedging_cap = float(thresholds.get('hedging_notional_max', 5e8))
+        if hedging_cap > 0 and hedging_notional >= hedging_cap:
+            confidence = int(confidence * 0.8)
+            reasons.append(f"Dealer elasticity high ({hedging_notional/1e9:.2f}B/% move)")
+
+        # 8. Volatility regime adjustments via VIX1D
+        vix_regime = str(features.get('vix1d_regime') or '').upper()
+        if vix_regime == 'SHOCK':
+            confidence = int(confidence * 0.75)
+            reasons.append("VIX1D shock regime")
+        elif vix_regime == 'ELEVATED':
+            confidence = int(confidence * 0.9)
+            reasons.append("VIX1D elevated")
+
+        # 9. Determine direction with enhanced logic
         side = self._determine_0dte_direction(features, obi, price)
 
-        # 6. Apply gamma-based direction override for strong setups
+        # 10. Apply gamma-based direction override for strong setups
         if gamma_proximity > 0.8 and side != "FLAT":
             gamma_pull_dir = features.get('gamma_pull_dir', '')
             if gamma_pull_dir == 'UP' and side == 'SHORT':
@@ -358,6 +478,31 @@ class DTEStrategies:
             else:
                 short_score += 1
 
+        # 5. Dealer positioning tilt
+        vanna = features.get('vanna_notional', 0.0)
+        if vanna > 0:
+            long_score += 1
+        elif vanna < 0:
+            short_score += 1
+
+        skew_value = features.get('skew_value')
+        if isinstance(skew_value, (int, float)):
+            if skew_value > 0:
+                short_score += 1
+            elif skew_value < 0:
+                long_score += 1
+
+        flow_momentum = features.get('flow_momentum', 0.0)
+        flow_hedging = features.get('flow_hedging', 0.0)
+        if flow_momentum > 0.55:
+            long_score += 1
+        if flow_hedging > 0.45:
+            short_score += 1
+
+        vix_regime = str(features.get('vix1d_regime') or '').upper()
+        if vix_regime == 'SHOCK':
+            short_score += 1
+
         # Final decision
         if long_score > short_score + 1:
             return "LONG"
@@ -376,12 +521,36 @@ class DTEStrategies:
 
         strategy_config = self.strategies.get('1dte', {})
         weights = strategy_config.get('confidence_weights', {})
+        thresholds = strategy_config.get('thresholds', {})
 
         # Get current time for EOD analysis
         current_time = datetime.now(self.eastern)
         minutes_to_close = (16 * 60) - (current_time.hour * 60 + current_time.minute)
         is_power_hour = 15 <= current_time.hour < 16
         is_last_30min = minutes_to_close <= 30
+
+        # VIX1D regime integration
+        vix1d_regime = str(features.get('vix1d_regime') or '').upper()
+        vix1d_value = features.get('vix1d_value', 0.0)
+        vix1d_weight = float(weights.get('vix1d', 20))
+        if vix1d_weight > 0:
+            if vix1d_regime == 'SHOCK':
+                confidence += int(vix1d_weight)
+                reasons.append(f"VIX1D shock ({vix1d_value:.1f})")
+            elif vix1d_regime == 'ELEVATED':
+                confidence += int(vix1d_weight * 0.6)
+                reasons.append("VIX1D elevated")
+
+        # Dealer hedging guardrail for overnight risk
+        hedging_notional = abs(features.get('hedging_notional_per_pct', 0.0) or 0.0)
+        hedging_cap = float(thresholds.get('hedging_notional_max', 4e8))
+        if hedging_cap > 0 and hedging_notional >= hedging_cap:
+            confidence = int(confidence * 0.85)
+            reasons.append(f"Dealer elasticity heavy ({hedging_notional/1e9:.2f}B/% move)")
+
+        vanna_notional = features.get('vanna_notional', 0.0)
+        if abs(vanna_notional) >= float(thresholds.get('vanna_notional_min', 1e8)):
+            reasons.append(f"Overnight vanna {'bid' if vanna_notional > 0 else 'offer'}")
 
         # 1. Volatility regime analysis (20 points max)
         regime = features.get('regime', 'NORMAL')

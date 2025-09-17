@@ -565,6 +565,12 @@ async def default_feature_reader(redis_conn: aioredis.Redis, symbol: str) -> Dic
         pipe.get(rkeys.analytics_metric_key(symbol, 'gamma_pull'))
         pipe.get(rkeys.analytics_metric_key(symbol, 'moc'))
         pipe.get(rkeys.options_chain_key(symbol))
+        pipe.get(rkeys.analytics_vanna_key(symbol))
+        pipe.get(rkeys.analytics_charm_key(symbol))
+        pipe.get(rkeys.analytics_hedging_impact_key(symbol))
+        pipe.get(rkeys.analytics_skew_key(symbol))
+        pipe.get(rkeys.analytics_flow_clusters_key(symbol))
+        pipe.get(rkeys.analytics_vix1d_key())
         raw_results = await pipe.execute()
 
     def _decode(value: Any) -> Any:
@@ -597,6 +603,12 @@ async def default_feature_reader(redis_conn: aioredis.Redis, symbol: str) -> Dic
             gamma_pull_raw,
             moc_raw,
             options_chain_raw,
+            vanna_raw,
+            charm_raw,
+            hedging_raw,
+            skew_raw,
+            flow_clusters_raw,
+            vix1d_raw,
         ) = raw_results
     except ValueError:  # pragma: no cover - defensive
         logger.debug("Unexpected feature payload length for %s", symbol)
@@ -604,6 +616,7 @@ async def default_feature_reader(redis_conn: aioredis.Redis, symbol: str) -> Dic
         toxicity_raw = sweep_raw = hidden_raw = unusual_raw = None
         institutional_raw = retail_raw = gamma_pin_raw = gamma_pull_raw = None
         moc_raw = options_chain_raw = None
+        vanna_raw = charm_raw = hedging_raw = skew_raw = flow_clusters_raw = vix1d_raw = None
 
     ticker = _decode(ticker_raw) or {}
     bars_payload = bars_raw or []
@@ -718,5 +731,67 @@ async def default_feature_reader(redis_conn: aioredis.Redis, symbol: str) -> Dic
     gamma_pull_data = _decode(gamma_pull_raw)
     if isinstance(gamma_pull_data, dict):
         features.setdefault('gamma_pull_dir', gamma_pull_data.get('direction'))
+
+    vanna_data = _decode(vanna_raw) or {}
+    if isinstance(vanna_data, dict):
+        features['vanna_notional'] = float(vanna_data.get('total_vanna_notional_per_pct_vol', 0.0) or 0.0)
+        history = vanna_data.get('history') or {}
+        try:
+            features['vanna_z'] = float(history.get('zscore', 0.0) or 0.0)
+        except (TypeError, ValueError):
+            features['vanna_z'] = 0.0
+        features['vanna_data'] = vanna_data
+
+    charm_data = _decode(charm_raw) or {}
+    if isinstance(charm_data, dict):
+        features['charm_notional'] = float(charm_data.get('total_charm_notional_per_day', 0.0) or 0.0)
+        features['charm_shares_per_day'] = float(charm_data.get('total_charm_shares_per_day', 0.0) or 0.0)
+        history = charm_data.get('history') or {}
+        try:
+            features['charm_z'] = float(history.get('zscore', 0.0) or 0.0)
+        except (TypeError, ValueError):
+            features['charm_z'] = 0.0
+        features['charm_data'] = charm_data
+
+    hedging_data = _decode(hedging_raw) or {}
+    if isinstance(hedging_data, dict):
+        features['hedging_notional_per_pct'] = float(hedging_data.get('notional_per_pct_move', 0.0) or 0.0)
+        features['hedging_shares_per_pct'] = float(hedging_data.get('shares_per_pct_move', 0.0) or 0.0)
+        features['hedging_gamma_shares'] = float(hedging_data.get('gamma_component_shares', 0.0) or 0.0)
+        features['hedging_vanna_shares'] = float(hedging_data.get('vanna_component_shares', 0.0) or 0.0)
+        features['charm_notional_per_day'] = float(hedging_data.get('charm_notional_per_day', 0.0) or 0.0)
+        features['hedging_data'] = hedging_data
+
+    skew_data = _decode(skew_raw) or {}
+    if isinstance(skew_data, dict):
+        features['skew'] = skew_data.get('skew')
+        history = skew_data.get('history') or {}
+        try:
+            features['skew_z'] = float(history.get('zscore', 0.0) or 0.0)
+        except (TypeError, ValueError):
+            features['skew_z'] = 0.0
+        features['skew_ratio'] = skew_data.get('skew_ratio')
+        features['skew_data'] = skew_data
+
+    flow_clusters = _decode(flow_clusters_raw) or {}
+    if isinstance(flow_clusters, dict):
+        strategy_dist = flow_clusters.get('strategy_distribution') or {}
+        participants = flow_clusters.get('participant_distribution') or {}
+        features['flow_momentum'] = float(strategy_dist.get('momentum', 0.0) or 0.0)
+        features['flow_mean_reversion'] = float(strategy_dist.get('mean_reversion', 0.0) or 0.0)
+        features['flow_hedging'] = float(strategy_dist.get('hedging', 0.0) or 0.0)
+        features['flow_institutional'] = float(participants.get('institutional', 0.0) or 0.0)
+        features['flow_retail'] = float(participants.get('retail', 0.0) or 0.0)
+        features['flow_clusters'] = flow_clusters
+
+    vix1d_data = _decode(vix1d_raw) or {}
+    if isinstance(vix1d_data, dict):
+        features['vix1d_value'] = float(vix1d_data.get('value', 0.0) or 0.0)
+        features['vix1d_regime'] = str(vix1d_data.get('regime') or '')
+        try:
+            features['vix1d_z'] = float(vix1d_data.get('zscore', 0.0) or 0.0)
+        except (TypeError, ValueError):
+            features['vix1d_z'] = 0.0
+        features['vix1d'] = vix1d_data
 
     return features

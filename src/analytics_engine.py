@@ -31,6 +31,9 @@ from redis_keys import get_ttl
 from vpin_calculator import VPINCalculator
 from gex_dex_calculator import GEXDEXCalculator
 from pattern_analyzer import PatternAnalyzer
+from dealer_flow_calculator import DealerFlowCalculator
+from flow_clustering import FlowClusterModel
+from volatility_metrics import VolatilityMetrics
 
 
 class MetricsAggregator:
@@ -97,7 +100,11 @@ class MetricsAggregator:
             'toxic_count': sum(1 for snap in snapshots if (snap.get('vpin') or 0) >= self.toxic_threshold),
             'total_gex': float(sum(snap.get('gex', 0.0) for snap in snapshots)),
             'total_dex': float(sum(snap.get('dex', 0.0) for snap in snapshots)),
+            'total_vanna_notional': float(sum(snap.get('vanna_notional', 0.0) or 0.0 for snap in snapshots)),
+            'total_charm_notional': float(sum(snap.get('charm_notional', 0.0) or 0.0 for snap in snapshots)),
+            'total_hedging_notional': float(sum(snap.get('hedging_notional', 0.0) or 0.0 for snap in snapshots)),
             'sector_flows': {},
+            'vix1d': snapshots[0].get('vix1d') if snapshots else None,
         }
 
         metrics['sector_flows'] = self._build_sector_summary(snapshots)
@@ -172,6 +179,7 @@ class MetricsAggregator:
 
     async def _gather_symbol_snapshots(self) -> List[Dict[str, Any]]:
         snapshots: List[Dict[str, Any]] = []
+        vix1d_data = await self._fetch_json(rkeys.analytics_vix1d_key())
 
         for symbol in self.symbols:
             snapshot: Dict[str, Any] = {
@@ -184,6 +192,16 @@ class MetricsAggregator:
                 'call_dex': 0.0,
                 'put_dex': 0.0,
                 'volume': 0.0,
+                'vanna_notional': 0.0,
+                'vanna_z': 0.0,
+                'charm_notional': 0.0,
+                'charm_z': 0.0,
+                'hedging_notional': 0.0,
+                'hedging_shares_per_pct': 0.0,
+                'skew': None,
+                'skew_z': 0.0,
+                'flow_clusters': {},
+                'vix1d': vix1d_data,
             }
 
             vpin_data = await self._fetch_json(rkeys.analytics_vpin_key(symbol))
@@ -202,6 +220,46 @@ class MetricsAggregator:
                 snapshot['dex'] = float(dex_data.get('total_dex', 0.0))
                 snapshot['call_dex'] = float(dex_data.get('call_dex', 0.0))
                 snapshot['put_dex'] = float(dex_data.get('put_dex', 0.0))
+
+            vanna_data = await self._fetch_json(rkeys.analytics_vanna_key(symbol))
+            if vanna_data:
+                snapshot['vanna'] = vanna_data
+                snapshot['vanna_notional'] = float(vanna_data.get('total_vanna_notional_per_pct_vol', 0.0))
+                history = vanna_data.get('history') or {}
+                try:
+                    snapshot['vanna_z'] = float(history.get('zscore', 0.0))
+                except (TypeError, ValueError):
+                    snapshot['vanna_z'] = 0.0
+
+            charm_data = await self._fetch_json(rkeys.analytics_charm_key(symbol))
+            if charm_data:
+                snapshot['charm'] = charm_data
+                snapshot['charm_notional'] = float(charm_data.get('total_charm_notional_per_day', 0.0))
+                history = charm_data.get('history') or {}
+                try:
+                    snapshot['charm_z'] = float(history.get('zscore', 0.0))
+                except (TypeError, ValueError):
+                    snapshot['charm_z'] = 0.0
+
+            hedging_data = await self._fetch_json(rkeys.analytics_hedging_impact_key(symbol))
+            if hedging_data:
+                snapshot['hedging'] = hedging_data
+                snapshot['hedging_notional'] = float(hedging_data.get('notional_per_pct_move', 0.0))
+                snapshot['hedging_shares_per_pct'] = float(hedging_data.get('shares_per_pct_move', 0.0))
+
+            skew_data = await self._fetch_json(rkeys.analytics_skew_key(symbol))
+            if skew_data:
+                snapshot['skew'] = skew_data.get('skew')
+                history = skew_data.get('history') or {}
+                try:
+                    snapshot['skew_z'] = float(history.get('zscore', 0.0))
+                except (TypeError, ValueError):
+                    snapshot['skew_z'] = 0.0
+                snapshot['skew_data'] = skew_data
+
+            clusters_data = await self._fetch_json(rkeys.analytics_flow_clusters_key(symbol))
+            if clusters_data:
+                snapshot['flow_clusters'] = clusters_data
 
             ticker = await self._fetch_json(rkeys.market_ticker_key(symbol))
             if ticker:
@@ -229,6 +287,13 @@ class MetricsAggregator:
                 'put_dex': 0.0,
                 'toxic_symbols': [],
                 'timestamp': time.time(),
+                'total_vanna_notional': 0.0,
+                'total_charm_notional': 0.0,
+                'total_hedging_notional': 0.0,
+                'hedging_shares_per_pct': 0.0,
+                'skew_values': [],
+                'momentum_probs': [],
+                'hedging_probs': [],
             })
 
             data['symbols'].append(snap['symbol'])
@@ -237,12 +302,30 @@ class MetricsAggregator:
             data['total_dex'] += snap.get('dex', 0.0) or 0.0
             data['call_dex'] += snap.get('call_dex', 0.0) or 0.0
             data['put_dex'] += snap.get('put_dex', 0.0) or 0.0
+            data['total_vanna_notional'] += snap.get('vanna_notional', 0.0) or 0.0
+            data['total_charm_notional'] += snap.get('charm_notional', 0.0) or 0.0
+            data['total_hedging_notional'] += snap.get('hedging_notional', 0.0) or 0.0
+            data['hedging_shares_per_pct'] += snap.get('hedging_shares_per_pct', 0.0) or 0.0
 
             vpin_value = snap.get('vpin')
             if vpin_value is not None:
                 data['avg_vpin'].append(vpin_value)
                 if vpin_value >= self.toxic_threshold:
                     data['toxic_symbols'].append(snap['symbol'])
+
+            skew_value = snap.get('skew')
+            if isinstance(skew_value, (int, float)):
+                data['skew_values'].append(float(skew_value))
+
+            clusters = snap.get('flow_clusters') or {}
+            strategy_dist = clusters.get('strategy_distribution') or {}
+            if strategy_dist:
+                momentum = strategy_dist.get('momentum')
+                hedging = strategy_dist.get('hedging')
+                if isinstance(momentum, (int, float)):
+                    data['momentum_probs'].append(float(momentum))
+                if isinstance(hedging, (int, float)):
+                    data['hedging_probs'].append(float(hedging))
 
         for sector, data in summary.items():
             vpins = data.pop('avg_vpin')
@@ -256,6 +339,19 @@ class MetricsAggregator:
             data['put_dex'] = float(data['put_dex'])
             data['net_flow'] = float(data['total_dex'])
             data['toxic_symbols'] = sorted(set(data['toxic_symbols']))
+            skew_values = data.pop('skew_values')
+            if skew_values:
+                data['avg_skew'] = sum(skew_values) / len(skew_values)
+            else:
+                data['avg_skew'] = None
+            momentum_probs = data.pop('momentum_probs')
+            hedging_probs = data.pop('hedging_probs')
+            data['avg_momentum_prob'] = sum(momentum_probs) / len(momentum_probs) if momentum_probs else None
+            data['avg_hedging_prob'] = sum(hedging_probs) / len(hedging_probs) if hedging_probs else None
+            data['total_vanna_notional'] = float(data['total_vanna_notional'])
+            data['total_charm_notional'] = float(data['total_charm_notional'])
+            data['total_hedging_notional'] = float(data['total_hedging_notional'])
+            data['hedging_shares_per_pct'] = float(data['hedging_shares_per_pct'])
 
         return summary
 
@@ -389,9 +485,19 @@ class AnalyticsEngine:
             'portfolio': 15,
             'sectors': 30,
             'correlation': 300,
+            'dealer_flows': 60,
+            'flow_clustering': 90,
+            'volatility': 60,
         }
         configured_intervals = analytics_cfg.get('update_intervals', {})
         self.update_intervals = {**default_intervals, **configured_intervals}
+
+        signals_cfg = config.get('modules', {}).get('signals', {})
+        cluster_symbols = signals_cfg.get('strategies', {}).get('0dte', {}).get('symbols', self.symbols)
+        if isinstance(cluster_symbols, list):
+            self.flow_cluster_symbols = sorted({s for s in cluster_symbols if isinstance(s, str)})
+        else:
+            self.flow_cluster_symbols = list(self.symbols)
 
         # Track last update times and error counts
         self.last_updates: Dict[str, float] = defaultdict(float)
@@ -413,6 +519,10 @@ class AnalyticsEngine:
         self.vpin_calculator: Optional[VPINCalculator] = None
         self.gex_dex_calculator: Optional[GEXDEXCalculator] = None
         self.pattern_analyzer: Optional[PatternAnalyzer] = None
+        self.dealer_flow_calculator: Optional[DealerFlowCalculator] = None
+        self.flow_cluster_model: Optional[FlowClusterModel] = None
+        self.volatility_metrics: Optional[VolatilityMetrics] = None
+        self.flow_cluster_symbols: List[str] = []
         self.aggregator = MetricsAggregator(config, redis_conn)
 
         self.logger.info(f"AnalyticsEngine initialized for {len(self.symbols)} symbols")
@@ -429,6 +539,9 @@ class AnalyticsEngine:
             self.vpin_calculator = VPINCalculator(self.config, self.redis)
             self.gex_dex_calculator = GEXDEXCalculator(self.config, self.redis)
             self.pattern_analyzer = PatternAnalyzer(self.config, self.redis)
+            self.dealer_flow_calculator = DealerFlowCalculator(self.config, self.redis)
+            self.flow_cluster_model = FlowClusterModel(self.config, self.redis)
+            self.volatility_metrics = VolatilityMetrics(self.config, self.redis)
 
             self._running = True
             self._loop_task = asyncio.create_task(self._calculation_loop(), name="analytics_calculation_loop")
@@ -500,6 +613,17 @@ class AnalyticsEngine:
 
             elif calc_type == 'sweep_detection' and self.pattern_analyzer:
                 tasks = [self.pattern_analyzer.detect_sweeps(symbol) for symbol in self.symbols]
+
+            elif calc_type == 'dealer_flows' and self.dealer_flow_calculator:
+                tasks = [self.dealer_flow_calculator.calculate_dealer_metrics(symbol) for symbol in self.symbols]
+
+            elif calc_type == 'flow_clustering' and self.flow_cluster_model:
+                symbols = self.flow_cluster_symbols or self.symbols
+                tasks = [self.flow_cluster_model.classify_flows(symbol) for symbol in symbols]
+
+            elif calc_type == 'volatility' and self.volatility_metrics:
+                await self.volatility_metrics.update_vix1d()
+                return True
 
             elif calc_type == 'portfolio':
                 await self.aggregator.calculate_portfolio_metrics()
@@ -583,3 +707,5 @@ class AnalyticsEngine:
 
         self._loop_task = None
         await self._update_heartbeat(idle=True)
+        if self.volatility_metrics:
+            await self.volatility_metrics.close()

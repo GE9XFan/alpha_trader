@@ -26,14 +26,23 @@ OPTIONS_KEYS = {
 
 # Analytics Keys
 ANALYTICS_KEYS = {
-    'vpin': 'analytics:{symbol}:vpin',        # VPIN score
-    'obi': 'analytics:{symbol}:obi',          # Order book imbalance
-    'regime': 'analytics:{symbol}:regime',    # Market regime
-    'hidden': 'analytics:{symbol}:hidden',    # Hidden order detection
-    'trend': 'analytics:{symbol}:trend',      # Trend metrics
-    'gex': 'analytics:{symbol}:gex',          # Gamma exposure snapshot
-    'dex': 'analytics:{symbol}:dex',          # Delta exposure snapshot
-    'toxicity': 'analytics:{symbol}:toxicity' # Flow toxicity summary
+    'vpin': 'analytics:{symbol}:vpin',            # VPIN score
+    'obi': 'analytics:{symbol}:obi',              # Order book imbalance
+    'regime': 'analytics:{symbol}:regime',        # Market regime
+    'hidden': 'analytics:{symbol}:hidden',        # Hidden order detection
+    'trend': 'analytics:{symbol}:trend',          # Trend metrics
+    'gex': 'analytics:{symbol}:gex',              # Gamma exposure snapshot
+    'dex': 'analytics:{symbol}:dex',              # Delta exposure snapshot
+    'toxicity': 'analytics:{symbol}:toxicity',    # Flow toxicity summary
+    'vanna': 'analytics:{symbol}:vanna',          # Vanna exposure snapshot
+    'charm': 'analytics:{symbol}:charm',          # Charm exposure snapshot
+    'skew': 'analytics:{symbol}:skew',            # Intraday skew monitoring
+    'hedging_impact': 'analytics:{symbol}:hedging_impact',  # Dealer hedging elasticity
+    'flow_clusters': 'analytics:{symbol}:flow_clusters',    # Flow clustering output
+}
+
+VOLATILITY_KEYS = {
+    'vix1d': 'analytics:volatility:vix1d',
 }
 
 # Portfolio/Sector Analytics Keys
@@ -284,6 +293,36 @@ def analytics_toxicity_key(symbol: str) -> str:
 def analytics_obi_key(symbol: str) -> str:
     """Return the order-book imbalance analytics key."""
     return ANALYTICS_KEYS["obi"].format(symbol=symbol)
+
+
+def analytics_vanna_key(symbol: str) -> str:
+    """Return the dealer Vanna exposure key."""
+    return ANALYTICS_KEYS["vanna"].format(symbol=symbol)
+
+
+def analytics_charm_key(symbol: str) -> str:
+    """Return the dealer Charm exposure key."""
+    return ANALYTICS_KEYS["charm"].format(symbol=symbol)
+
+
+def analytics_skew_key(symbol: str) -> str:
+    """Return the intraday skew analytics key."""
+    return ANALYTICS_KEYS["skew"].format(symbol=symbol)
+
+
+def analytics_hedging_impact_key(symbol: str) -> str:
+    """Return the dynamic hedging impact analytics key."""
+    return ANALYTICS_KEYS["hedging_impact"].format(symbol=symbol)
+
+
+def analytics_flow_clusters_key(symbol: str) -> str:
+    """Return the flow clustering analytics key."""
+    return ANALYTICS_KEYS["flow_clusters"].format(symbol=symbol)
+
+
+def analytics_vix1d_key() -> str:
+    """Return the global VIX1D analytics key."""
+    return VOLATILITY_KEYS["vix1d"]
 
 
 def analytics_metric_key(symbol: str, metric: str) -> str:

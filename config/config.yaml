@@ -100,6 +100,9 @@ modules:
       portfolio: 15
       sectors: 30
       correlation: 300
+      dealer_flows: 60
+      flow_clustering: 90
+      volatility: 60
     sector_map:
       SPY: INDEX
       QQQ: TECH
@@ -113,6 +116,29 @@ modules:
       AMZN: CONSUMER
       MSFT: TECH
       VXX: VOLATILITY
+    dealer_flow:
+      history_window: 240
+      max_expiry_days: 30
+      contract_multiplier: 100
+      min_open_interest: 5
+      vol_beta: -0.30
+      sigma_floor: 0.02
+      min_samples: 20
+    volatility:
+      history_window: 480
+      timeout: 10
+      vix1d_thresholds:
+        shock: 35
+        elevated: 25
+        benign: 18
+      change_thresholds:
+        shock: 5.0
+        elevated: 2.0
+    flow_clustering:
+      window_trades: 200
+      min_trades: 40
+      institutional_size: 250
+      random_state: 42
   
   signals:
     enabled: true
@@ -129,12 +155,18 @@ modules:
 
     # Optional global blend (for future hybrid scorers)
     weights:
-      vpin: 0.25
-      toxicity: 0.20
-      gex: 0.20
-      dex: 0.10
-      trend: 0.20
+      vpin: 0.15
+      toxicity: 0.10
+      gex: 0.15
+      dex: 0.05
+      trend: 0.15
       vol: 0.05
+      vanna: 0.10
+      charm: 0.05
+      hedging: 0.10
+      skew: 0.05
+      flow_momentum: 0.05
+      vix1d: 0.10
 
     strategies:
       0dte:
@@ -146,11 +178,19 @@ modules:
           obi: 25
           gamma_proximity: 30
           sweep: 15
+          dealer_flow: 20
+          skew: 10
+          flow_clusters: 15
         thresholds:
           min_confidence: 90
           vpin_min: 0.40
           obi_min: 0.30
           gamma_pin_distance: 0.005   # 0.5%
+          vanna_notional_min: 150000000
+          charm_notional_min: 60000000
+          skew_sigma: 1.0
+          flow_momentum_min: 0.35
+          hedging_notional_max: 500000000
 
       1dte:
         enabled: true
@@ -161,8 +201,11 @@ modules:
           obi: 30
           gex: 25
           vpin: 25
+          vix1d: 20
         thresholds:
           min_confidence: 90
+          hedging_notional_max: 400000000
+          vanna_notional_min: 100000000
 
       14dte:
         enabled: true
