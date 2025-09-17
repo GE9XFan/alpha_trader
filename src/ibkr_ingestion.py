@@ -31,6 +31,8 @@ from ibkr_processor import IBKRDataProcessor
 import traceback
 from decimal import Decimal, ROUND_HALF_UP
 
+from logging_utils import get_logger
+
 class IBKRIngestion:
     """
     IBKR WebSocket data ingestion with exchange-specific Level 2 depth.
@@ -42,7 +44,7 @@ class IBKRIngestion:
         self.config = config
         self.redis = redis_conn  # This is async Redis (redis.asyncio.Redis)
         self.ib = IB()
-        self.logger = logging.getLogger(__name__)
+        self.logger = get_logger(__name__, component="ingestion", subsystem="ibkr")
         
         # Load configuration
         self.ibkr_config = config.get('ibkr', {})
@@ -97,7 +99,14 @@ class IBKRIngestion:
         self.update_counts = {'depth': 0, 'trades': 0, 'bars': 0}
         self.subscriptions = {}  # Track all subscriptions
         
-        self.logger.info(f"IBKRIngestion initialized - L2: {self.level2_symbols}, Standard: {self.standard_symbols}")
+        self.logger.info(
+            "ibkr_ingestion_initialized",
+            extra={
+                "action": "init",
+                "level2_symbols": self.level2_symbols,
+                "standard_symbols": self.standard_symbols,
+            },
+        )
     
     def _make_depth_handler(self, exchange: str) -> Callable[[Ticker], None]:
         """Create a strongly typed depth update handler."""
@@ -113,7 +122,7 @@ class IBKRIngestion:
     
     async def start(self):
         """Start IBKR data ingestion."""
-        self.logger.info("Starting IBKR data ingestion...")
+        self.logger.info("ibkr_ingestion_start", extra={"action": "start"})
         self.running = True
         
         try:
@@ -172,9 +181,15 @@ class IBKRIngestion:
                     # Log account info
                     accounts = self.ib.managedAccounts()
                     if accounts:
-                        self.logger.info(f"Connected to IBKR Gateway - Account: {accounts[0]}")
+                        self.logger.info(
+                            "ibkr_connection_established",
+                            extra={"action": "connect", "account": accounts[0]}
+                        )
                     else:
-                        self.logger.info("Connected to IBKR Gateway")
+                        self.logger.info(
+                            "ibkr_connection_established",
+                            extra={"action": "connect", "account": None}
+                        )
                     
                     return True
                     
@@ -184,7 +199,10 @@ class IBKRIngestion:
                 
                 if self.reconnect_attempts < self.max_reconnect_attempts:
                     delay = self.reconnect_delay_base ** self.reconnect_attempts
-                    self.logger.info(f"Retrying in {delay} seconds...")
+                    self.logger.info(
+                        "ibkr_connection_retry",
+                        extra={"action": "retry", "attempt": self.reconnect_attempts, "delay_s": delay}
+                    )
                     await asyncio.sleep(delay)
         
         self.logger.error("Max reconnection attempts reached")
@@ -693,21 +711,44 @@ class IBKRIngestion:
                 
                 # Log summary every 10 seconds
                 if level2_status:
-                    self.logger.info(f"✓ IBKR L2 Depth: {', '.join(level2_status[:3])}")
-                
+                    self.logger.info(
+                        "ibkr_depth_status",
+                        extra={
+                            "action": "depth_status",
+                            "sample": level2_status[:3],
+                            "symbol_count": len(level2_status),
+                        },
+                    )
+
                 if standard_status:
-                    self.logger.info(f"✓ IBKR Quotes: {', '.join(standard_status[:3])}")
-                
-                # Check for recent trades/sweeps
+                    self.logger.info(
+                        "ibkr_quote_status",
+                        extra={
+                            "action": "quote_status",
+                            "sample": standard_status[:3],
+                            "symbol_count": len(standard_status),
+                        },
+                    )
+
                 sweep_alerts = await self.redis.lrange('alerts:sweeps', 0, 0)
                 if sweep_alerts:
                     latest_sweep = json.loads(sweep_alerts[0])
-                    self.logger.info(f"⚡ Sweep detected: {latest_sweep['symbol']} {latest_sweep['size']} @ ${latest_sweep['price']}")
-                
-                # Log bar update counts
+                    self.logger.info(
+                        "ibkr_sweep_detected",
+                        extra={
+                            "action": "sweep_detected",
+                            "symbol": latest_sweep.get('symbol'),
+                            "size": latest_sweep.get('size'),
+                            "price": latest_sweep.get('price'),
+                        },
+                    )
+
                 bars_count = self.update_counts.get('bars', 0)
                 if bars_count > 0:
-                    self.logger.info(f"✓ IBKR Bars: {bars_count} updates in last 10s")
+                    self.logger.info(
+                        "ibkr_bar_updates",
+                        extra={"action": "bar_status", "count": bars_count, "window_s": 10}
+                    )
                 
                 await asyncio.sleep(10)
                 

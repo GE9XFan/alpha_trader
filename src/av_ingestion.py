@@ -21,9 +21,10 @@ import aiohttp
 import random
 from typing import Dict, List, Any, Optional
 from datetime import datetime
-import logging
 import redis_keys as rkeys
 import traceback
+
+from logging_utils import get_logger
 
 
 class RollingRateLimiter:
@@ -44,7 +45,7 @@ class RollingRateLimiter:
         self.tokens = self.capacity
         self.updated = asyncio.get_event_loop().time()
         self.lock = asyncio.Lock()
-        self.logger = logging.getLogger(__name__)
+        self.logger = get_logger(__name__, component="ingestion", subsystem="alpha_vantage.rate_limiter")
 
         # Track request statistics
         self.total_requests = 0
@@ -125,7 +126,7 @@ class AlphaVantageIngestion:
         """Initialize with async Redis and unified symbol list."""
         self.config = config
         self.redis = redis_conn  # Async Redis
-        self.logger = logging.getLogger(__name__)
+        self.logger = get_logger(__name__, component="ingestion", subsystem="alpha_vantage")
 
         # Alpha Vantage configuration
         self.av_config = config.get('alpha_vantage', {})
@@ -208,7 +209,10 @@ class AlphaVantageIngestion:
         }
 
         self.running = False
-        self.logger.info(f"AlphaVantageIngestion initialized for {len(self.symbols)} symbols")
+        self.logger.info(
+            "av_ingestion_initialized",
+            extra={"action": "init", "symbol_count": len(self.symbols)}
+        )
 
     async def start(self):
         """Start Alpha Vantage data ingestion."""
@@ -216,10 +220,21 @@ class AlphaVantageIngestion:
         api_key_status = "configured" if self.api_key and not self.api_key.startswith("${") else "NOT SET"
         masked_key = f"{self.api_key[:4]}...{self.api_key[-4:]}" if self.api_key and len(self.api_key) > 8 else "INVALID"
 
-        self.logger.info(f"Starting Alpha Vantage data ingestion...")
-        self.logger.info(f"  API Key: {api_key_status} ({masked_key})")
-        self.logger.info(f"  Symbols: {self.symbols}")
-        self.logger.info(f"  Update intervals: options={self.options_interval}s, sentiment={self.sentiment_interval}s, technicals={self.technicals_interval}s")
+        self.logger.info(
+            "av_ingestion_start",
+            extra={
+                "action": "start",
+                "api_key_status": api_key_status,
+                "api_key_mask": masked_key,
+                "symbol_count": len(self.symbols),
+                "symbols": self.symbols,
+                "intervals": {
+                    "options_s": self.options_interval,
+                    "sentiment_s": self.sentiment_interval,
+                    "technicals_s": self.technicals_interval,
+                },
+            },
+        )
 
         self.running = True
 
@@ -272,7 +287,10 @@ class AlphaVantageIngestion:
                                 self._mark_attempt(symbol, data_type, current_time)
 
                     if tasks:
-                        self.logger.info(f"Fetching {len(tasks)} updates from Alpha Vantage...")
+                        self.logger.info(
+                            "av_ingestion_fetch_batch",
+                            extra={"action": "fetch", "task_count": len(tasks)}
+                        )
                         results = await asyncio.gather(*tasks, return_exceptions=True)
 
                         # Log errors
@@ -494,7 +512,7 @@ class AlphaVantageIngestion:
     async def stop(self):
         """Stop Alpha Vantage ingestion."""
         self.running = False
-        self.logger.info("Stopping Alpha Vantage ingestion")
+        self.logger.info("av_ingestion_stop", extra={"action": "stop"})
 
 
 async def fetch_symbol_data(symbol: str, redis_conn: aioredis.Redis, av_session, av_config):

@@ -1,31 +1,31 @@
-generated_at: '2025-09-16T14:23:05.104612'
+generated_at: '2025-09-17T18:43:42.256489'
 parameters:
-  vpin_bucket_size: 100
+  vpin_bucket_size: 435
   lookback_bars: 10
   flow_toxicity:
     SPY:
-      toxicity: 0.545
+      toxicity: 0.479
       vpin: 0.5
       venue_tox: 0.5
-      pattern_tox: 0.727
+      pattern_tox: 0.393
       book_tox: 0.5
       venue_mix:
         UNKNOWN: 1000
       label: neutral
     QQQ:
-      toxicity: 0.462
+      toxicity: 0.5
       vpin: 0.5
       venue_tox: 0.5
-      pattern_tox: 0.312
+      pattern_tox: 0.502
       book_tox: 0.5
       venue_mix:
         UNKNOWN: 1000
       label: neutral
     IWM:
-      toxicity: 0.493
+      toxicity: 0.568
       vpin: 0.5
       venue_tox: 0.5
-      pattern_tox: 0.467
+      pattern_tox: 0.838
       book_tox: 0.5
       venue_mix:
         UNKNOWN: 1000
@@ -36,18 +36,18 @@ parameters:
   correlation_matrix: {}
 metadata:
   symbols_analyzed:
-  - TSLA
-  - GOOGL
-  - AMZN
-  - META
-  - NVDA
-  - IWM
-  - QQQ
-  - AAPL
-  - MSFT
-  - SPY
   - VXX
   - AMD
+  - AAPL
+  - TSLA
+  - META
+  - AMZN
+  - NVDA
+  - IWM
+  - GOOGL
+  - MSFT
+  - QQQ
+  - SPY
   discovery_config:
     enabled: true
     run_on_startup: true

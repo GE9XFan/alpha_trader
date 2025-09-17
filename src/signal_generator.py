@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import random
 import time
 import traceback
@@ -20,6 +19,7 @@ from moc_strategy import MOCStrategy
 from option_utils import normalize_expiry
 import redis_keys as rkeys
 from signal_deduplication import SignalDeduplication, contract_fingerprint
+from logging_utils import get_logger
 
 
 class StrategyEvaluator(Protocol):
@@ -60,7 +60,7 @@ class SignalGenerator:
     ) -> None:
         self.config = config
         self.redis = redis_conn
-        self.logger = logging.getLogger(__name__)
+        self.logger = get_logger(__name__, component="signals", subsystem="generator")
 
         # Signal configuration
         self.signal_config = config.get('modules', {}).get('signals', {})
@@ -121,11 +121,14 @@ class SignalGenerator:
         """
 
         if not self.enabled:
-            self.logger.info("Signal generator disabled in config")
+            self.logger.info("signal_generator_disabled", extra={"action": "disabled"})
             return
 
         event = stop_event or self._stop_event
-        self.logger.info("Starting signal generator", extra={"dry_run": self.dry_run})
+        self.logger.info(
+            "signal_generator_start",
+            extra={"action": "start", "dry_run": self.dry_run}
+        )
         self._initialize_strategy_handlers()
 
         while not event.is_set():
@@ -172,7 +175,7 @@ class SignalGenerator:
             if delay > 0:
                 await asyncio.sleep(delay)
 
-        self.logger.info("Signal generator loop stopped")
+        self.logger.info("signal_generator_stop", extra={"action": "stop"})
 
     def stop(self) -> None:
         """Request cooperative shutdown of the signal loop."""
@@ -362,10 +365,22 @@ class SignalGenerator:
 
             # Log signal
             self.logger.info(
-                f"signals DECIDE symbol={symbol} side={signal['side']} conf={confidence:.0f}% "
-                f"vpin={features.get('vpin', 0):.2f} obi={features.get('obi', 0):.2f} "
-                f"gexZ={features.get('gex_z', 0):.1f} dexZ={features.get('dex_z', 0):.1f} "
-                f"rth={self.is_rth(datetime.now(self.eastern))}"
+                "signal_emitted",
+                extra={
+                    "action": "emit",
+                    "symbol": symbol,
+                    "side": signal['side'],
+                    "confidence_pct": confidence,
+                    "is_rth": self.is_rth(datetime.now(self.eastern)),
+                    "features": {
+                        "vpin": features.get('vpin', 0),
+                        "obi": features.get('obi', 0),
+                        "gex_z": features.get('gex_z', 0),
+                        "dex_z": features.get('dex_z', 0),
+                    },
+                    "signal_id": signal_id,
+                    "ttl": dynamic_ttl,
+                },
             )
 
     async def _debug_rejected_signal(self, symbol: str, strategy: str, confidence: int,
@@ -546,7 +561,7 @@ async def default_feature_reader(redis_conn: aioredis.Redis, symbol: str) -> Dic
     continue operating during transient upstream disruptions.
     """
 
-    logger = logging.getLogger(__name__)
+    logger = get_logger(__name__, component="signals", subsystem="features")
 
     async with redis_conn.pipeline() as pipe:
         pipe.get(rkeys.market_ticker_key(symbol))

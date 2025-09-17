@@ -137,6 +137,12 @@ Signals published by the dedupe helper now land in both `signals:pending:{symbol
 - **Config-driven controls** – `config/config.yaml` exposes analytics TTLs, update cadences, and sector mappings so operators can tune schedules without code changes.【F:config/config.yaml†L84-L115】
 - **Canonical calculator outputs** – VPIN, GEX/DEX, and pattern analyzers now publish into the canonical `analytics:{symbol}:*` keys via the shared helper layer, aligning all downstream consumers.【F:src/vpin_calculator.py†L31-L144】【F:src/gex_dex_calculator.py†L1-L514】【F:src/pattern_analyzer.py†L1-L460】
 
+## Logging
+- **Structured JSON output** – All modules now emit structured records through `logging_utils.StructuredFormatter`, adding `component`, `subsystem`, and action metadata to every line in `logs/alphatrader.log` for easier searching and ingestion.【F:src/logging_utils.py†L18-L189】【F:main.py†L29-L53】【F:src/analytics_engine.py†L31-L117】【F:src/ibkr_ingestion.py†L40-L215】
+- **Console-friendly view** – Terminal output now renders a compact, color-free key/value line per event while the rotating file handler keeps full JSON payloads for downstream ingestion.【F:src/logging_utils.py†L95-L189】
+- **Centralised configuration** – Logging options (level, rotation, console mirroring) continue to live under the `logging` block in `config/config.yaml`; updating the file and restarting applies without code edits.【F:config/config.yaml†L393-L402】【F:src/logging_utils.py†L120-L189】
+- **Context adapters** – `get_logger` wraps the standard library logger with a context adapter so subsystems automatically annotate events without repeating boilerplate everywhere.【F:src/logging_utils.py†L170-L189】【F:src/signal_generator.py†L46-L181】【F:src/av_ingestion.py†L32-L237】
+
 ## Signal Engine Enhancements
 - **Dependency-injected strategies** – `SignalGenerator` resolves 0DTE/1DTE/14DTE and MOC handlers through injectable factories, shares a pluggable feature reader, and backs off automatically on repeated failures to protect downstream services.【F:src/signal_generator.py†L51-L209】
 - **Normalized feature payloads** – `DTEFeatureSet` guarantees typed defaults (price, VPIN, gamma, imbalance, flows) before strategies score opportunities, avoiding missing-key crashes and aligning analytics expectations.【F:src/dte_strategies.py†L13-L218】

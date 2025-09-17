@@ -12,13 +12,13 @@ import yaml
 import redis.asyncio as aioredis
 from pathlib import Path
 from typing import Dict, Any, Optional
-import logging
-from logging.handlers import RotatingFileHandler
 from datetime import datetime
 from dotenv import load_dotenv
 
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
+
+from logging_utils import get_logger, setup_logging
 
 
 class AlphaTrader:
@@ -29,49 +29,29 @@ class AlphaTrader:
     
     def __init__(self, config_path: str = 'config/config.yaml'):
         """Initialize the AlphaTrader system."""
-        # Set up logging first so we can log everything
-        self._setup_logging()
-        self.logger = logging.getLogger(__name__)
-        
+        setup_logging({}, environment="bootstrap")
+        self.logger = get_logger(__name__, component="bootstrap", subsystem="main")
+
         # Load configuration from config/config.yaml
         self.config = self._load_config(config_path)
-        
+
+        environment = (
+            self.config.get('system', {}).get('environment')
+            or os.getenv('APP_ENV')
+            or 'development'
+        )
+        setup_logging(self.config, environment=environment)
+        self.logger = get_logger(__name__, component="bootstrap", subsystem="main", environment=environment)
+
         # Redis connection will be initialized in async context
         self.redis = None
-        
+
         # Module instances (will be initialized in setup())
         self.modules = {}
         
         # Shutdown flag
         self.shutdown_requested = False
         
-    def _setup_logging(self):
-        """Set up logging configuration for the application."""
-        # Create logs directory if it doesn't exist
-        log_dir = Path('logs')
-        log_dir.mkdir(exist_ok=True)
-        
-        # Configure logging with both file and console handlers
-        log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        
-        # File handler with rotation
-        file_handler = RotatingFileHandler(
-            'logs/alphatrader.log',
-            maxBytes=10485760,  # 10MB
-            backupCount=5
-        )
-        file_handler.setFormatter(logging.Formatter(log_format))
-        
-        # Console handler
-        console_handler = logging.StreamHandler()
-        console_handler.setFormatter(logging.Formatter(log_format))
-        
-        # Configure root logger
-        logging.basicConfig(
-            level=logging.INFO,
-            handlers=[file_handler, console_handler]
-        )
-    
     def _load_config(self, config_path: str) -> Dict[str, Any]:
         """Load configuration from YAML file."""
         config_file = Path(config_path)
@@ -139,7 +119,7 @@ class AlphaTrader:
     
     def initialize_modules(self):
         """Initialize modules with graceful fallback for missing components."""
-        self.logger.info("Initializing modules...")
+        self.logger.info("module_init_start", extra={"action": "init_modules"})
         
         # Ensure Redis is initialized (for type checker)
         assert self.redis is not None, "Redis connection must be initialized before modules"
@@ -151,9 +131,15 @@ class AlphaTrader:
                 from src.av_ingestion import AlphaVantageIngestion
                 self.modules['ibkr_ingestion'] = IBKRIngestion(self.config, self.redis)
                 self.modules['av_ingestion'] = AlphaVantageIngestion(self.config, self.redis)
-                self.logger.info("✓ Data ingestion modules initialized")
+                self.logger.info(
+                    "module_initialized",
+                    extra={"action": "module_init", "module": "data_ingestion"}
+                )
             except Exception as e:
-                self.logger.error(f"FATAL: Cannot initialize data ingestion: {e}")
+                self.logger.error(
+                    "module_init_failed",
+                    extra={"action": "module_init", "module": "data_ingestion", "error": str(e)}
+                )
                 raise
 
         # REQUIRED: Analytics (for Day 4)
@@ -163,7 +149,10 @@ class AlphaTrader:
                 from src.parameter_discovery import ParameterDiscovery
                 self.modules['analytics'] = AnalyticsEngine(self.config, self.redis)
                 self.modules['param_discovery'] = ParameterDiscovery(self.config, self.redis)
-                self.logger.info("✓ Analytics modules initialized")
+                self.logger.info(
+                    "module_initialized",
+                    extra={"action": "module_init", "module": "analytics"}
+                )
             except ImportError as e:
                 self.logger.warning(f"Analytics module missing (required for Day 4): {e}")
             except Exception as e:
@@ -173,7 +162,10 @@ class AlphaTrader:
         try:
             from src.monitoring import SystemMonitor
             self.modules['monitor'] = SystemMonitor(self.config, self.redis)
-            self.logger.info("✓ System monitor initialized")
+            self.logger.info(
+                "module_initialized",
+                extra={"action": "module_init", "module": "system_monitor"}
+            )
         except ImportError:
             self.logger.warning("System monitor not available")
         
@@ -191,11 +183,17 @@ class AlphaTrader:
                 self.modules['signal_deduplication'] = SignalDeduplication(self.config, self.redis)
                 self.modules['dte_strategies'] = DTEStrategies(self.config, self.redis)
                 self.modules['moc_strategy'] = MOCStrategy(self.config, self.redis)
-                self.logger.info("✓ Signal generation modules initialized")
+                self.logger.info(
+                    "module_initialized",
+                    extra={"action": "module_init", "module": "signals"}
+                )
             except ImportError:
-                self.logger.info("⚠ Signal modules not available (expected for Day 4)")
+                self.logger.info(
+                    "module_unavailable",
+                    extra={"action": "module_init", "module": "signals", "reason": "import_error"}
+                )
             except Exception as e:
-                self.logger.warning(f"⚠ Error loading signal modules: {e}")
+                self.logger.warning(f"Error loading signal modules: {e}")
 
         # OPTIONAL: Execution and risk management modules
         if self.config.get('modules', {}).get('execution', {}).get('enabled', False):
@@ -209,11 +207,17 @@ class AlphaTrader:
                 self.modules['position_manager'] = PositionManager(self.config, self.redis)
                 self.modules['risk_manager'] = RiskManager(self.config, self.redis)
                 self.modules['emergency_manager'] = EmergencyManager(self.config, self.redis)
-                self.logger.info("✓ Execution and risk modules initialized")
+                self.logger.info(
+                    "module_initialized",
+                    extra={"action": "module_init", "module": "execution"}
+                )
             except ImportError:
-                self.logger.info("⚠ Execution modules not available (expected for Day 4)")
+                self.logger.info(
+                    "module_unavailable",
+                    extra={"action": "module_init", "module": "execution", "reason": "import_error"}
+                )
             except Exception as e:
-                self.logger.warning(f"⚠ Error loading execution modules: {e}")
+                self.logger.warning(f"Error loading execution modules: {e}")
 
         # OPTIONAL: Social media modules
         if self.config.get('modules', {}).get('social_media', {}).get('enabled', False):
@@ -225,11 +229,17 @@ class AlphaTrader:
                 self.modules['twitter_bot'] = TwitterBot(self.config, self.redis)
                 self.modules['telegram_bot'] = TelegramBot(self.config, self.redis)
                 self.modules['discord_bot'] = DiscordBot(self.config, self.redis)
-                self.logger.info("✓ Social media modules initialized")
+                self.logger.info(
+                    "module_initialized",
+                    extra={"action": "module_init", "module": "social_media"}
+                )
             except ImportError:
-                self.logger.info("⚠ Social media modules not available (expected for Day 4)")
+                self.logger.info(
+                    "module_unavailable",
+                    extra={"action": "module_init", "module": "social_media", "reason": "import_error"}
+                )
             except Exception as e:
-                self.logger.warning(f"⚠ Error loading social media modules: {e}")
+                self.logger.warning(f"Error loading social media modules: {e}")
 
         # OPTIONAL: Dashboard modules
         if self.config.get('modules', {}).get('dashboard', {}).get('enabled', False):
@@ -242,11 +252,17 @@ class AlphaTrader:
                 self.modules['log_aggregator'] = LogAggregator(self.config, self.redis)
                 self.modules['alert_manager'] = AlertManager(self.config, self.redis)
                 self.modules['performance_dashboard'] = PerformanceDashboard(self.config, self.redis)
-                self.logger.info("✓ Dashboard modules initialized")
+                self.logger.info(
+                    "module_initialized",
+                    extra={"action": "module_init", "module": "dashboard"}
+                )
             except ImportError:
-                self.logger.info("⚠ Dashboard modules not available (expected for Day 4)")
+                self.logger.info(
+                    "module_unavailable",
+                    extra={"action": "module_init", "module": "dashboard", "reason": "import_error"}
+                )
             except Exception as e:
-                self.logger.warning(f"⚠ Error loading dashboard modules: {e}")
+                self.logger.warning(f"Error loading dashboard modules: {e}")
 
         # OPTIONAL: Morning analysis modules
         if self.config.get('modules', {}).get('morning_analysis', {}).get('enabled', False):
@@ -258,17 +274,26 @@ class AlphaTrader:
                 self.modules['market_analysis'] = MarketAnalysisGenerator(self.config, self.redis)
                 self.modules['scheduled_tasks'] = ScheduledTasks(self.config, self.redis)
                 self.modules['data_archiver'] = DataArchiver(self.config, self.redis)
-                self.logger.info("✓ Morning analysis modules initialized")
+                self.logger.info(
+                    "module_initialized",
+                    extra={"action": "module_init", "module": "morning_analysis"}
+                )
             except ImportError:
-                self.logger.info("⚠ Morning analysis modules not available (expected for Day 4)")
+                self.logger.info(
+                    "module_unavailable",
+                    extra={"action": "module_init", "module": "morning_analysis", "reason": "import_error"}
+                )
             except Exception as e:
-                self.logger.warning(f"⚠ Error loading morning analysis modules: {e}")
+                self.logger.warning(f"Error loading morning analysis modules: {e}")
         
-        self.logger.info(f"Module initialization complete: {len(self.modules)} modules loaded")
+        self.logger.info(
+            "module_init_complete",
+            extra={"action": "module_init", "module_count": len(self.modules)}
+        )
     
     async def start(self):
         """Start all system modules asynchronously."""
-        self.logger.info("Starting AlphaTrader System...")
+        self.logger.info("alphatrader_start", extra={"action": "start"})
         
         # Schedule parameter discovery after data collection if enabled
         pd_config = self.config.get('parameter_discovery', {})
@@ -285,7 +310,7 @@ class AlphaTrader:
         if self.config.get('modules', {}).get('data_ingestion', {}).get('enabled', True):
             # Start IBKR ingestion
             if 'ibkr_ingestion' in self.modules:
-                self.logger.info("Starting IBKR data ingestion module...")
+                self.logger.info("module_start", extra={"action": "start_module", "module": "ibkr_ingestion"})
                 ibkr_module = self.modules['ibkr_ingestion']
                 task = asyncio.create_task(ibkr_module.start())
                 task.set_name("module_ibkr_ingestion")
@@ -296,7 +321,7 @@ class AlphaTrader:
             
             # Start Alpha Vantage ingestion
             if 'av_ingestion' in self.modules:
-                self.logger.info("Starting Alpha Vantage data ingestion module...")
+                self.logger.info("module_start", extra={"action": "start_module", "module": "av_ingestion"})
                 av_module = self.modules['av_ingestion']
                 task = asyncio.create_task(av_module.start())
                 task.set_name("module_av_ingestion")
@@ -504,7 +529,7 @@ class AlphaTrader:
     
     async def health_check(self):
         """Continuous health monitoring of all modules."""
-        self.logger.info("Health monitoring started")
+        self.logger.info("health_monitor_start", extra={"action": "health_monitor"})
         
         while True:
             try:
@@ -548,7 +573,7 @@ class AlphaTrader:
     
     async def validate_environment(self):
         """Validate environment before starting."""
-        self.logger.info("Validating environment...")
+        self.logger.info("environment_validation_start", extra={"action": "validate_environment"})
         
         # Check Python version
         if sys.version_info < (3, 10):
@@ -564,7 +589,7 @@ class AlphaTrader:
             if not await test_redis.ping():
                 raise ConnectionError("Redis ping failed")
             await test_redis.aclose()
-            self.logger.info("✓ Redis is running")
+            self.logger.info("redis_check", extra={"action": "check", "service": "redis", "status": "online"})
         except Exception as e:
             raise ConnectionError(
                 f"Redis not accessible at {self.config['redis']['host']}:{self.config['redis']['port']}\n"
@@ -575,24 +600,25 @@ class AlphaTrader:
         log_dir = Path('logs')
         if not log_dir.exists():
             log_dir.mkdir(parents=True)
-            self.logger.info("Created logs directory")
+            self.logger.info("log_directory_created", extra={"action": "ensure_path", "path": str(log_dir)})
         
         # Validate API keys are present
         if 'alpha_vantage' in self.config:
             if not self.config['alpha_vantage'].get('api_key'):
                 self.logger.warning("Alpha Vantage API key not configured")
             else:
-                self.logger.info("✓ Alpha Vantage API key configured")
-        
-        self.logger.info("Environment validation complete")
+                self.logger.info(
+                    "alpha_vantage_key_present",
+                    extra={"action": "validate_environment", "service": "alpha_vantage", "status": "configured"}
+                )
+
+        self.logger.info("environment_validation_complete", extra={"action": "validate_environment"})
 
 
 async def main():
     """Main entry point for the application."""
-    logger = logging.getLogger(__name__)
-    logger.info("=" * 60)
-    logger.info("AlphaTrader Pro Starting...")
-    logger.info("=" * 60)
+    logger = get_logger(__name__, component="bootstrap", subsystem="main")
+    logger.info("alphatrader_startup", extra={"action": "startup"})
     
     # Initialize the system
     trader = None
@@ -617,7 +643,7 @@ async def main():
         await trader.start()
         
     except KeyboardInterrupt:
-        logger.info("\nReceived keyboard interrupt...")
+        logger.info("alphatrader_interrupt", extra={"action": "interrupt", "signal": "keyboard"})
         if trader:
             await trader.shutdown()
     except Exception as e:

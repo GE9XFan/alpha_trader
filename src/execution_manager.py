@@ -45,6 +45,7 @@ import redis.asyncio as aioredis
 from ib_insync import IB, Stock, Option, MarketOrder, LimitOrder, StopOrder
 
 from src.option_utils import normalize_expiry
+from logging_utils import get_logger
 
 
 class RiskManager:
@@ -102,7 +103,7 @@ class ExecutionManager:
         self.reconnect_attempts = 0
         self.max_reconnect_attempts = 10
 
-        self.logger = logging.getLogger(__name__)
+        self.logger = get_logger(__name__, component="execution", subsystem="manager")
 
     @staticmethod
     def _normalize_strategy(strategy: Optional[str]) -> str:
@@ -404,8 +405,15 @@ class ExecutionManager:
         await self.redis.incrbyfloat('risk:daily_pnl', realized_total if unposted else delta)
 
         self.logger.info(
-            f"Position {position_id[:8]} closed ({reason}): {symbol} @ ${exit_price:.2f}, "
-            f"realized Δ ${realized_pnl_delta:+.2f}"
+            "position_closed",
+            extra={
+                "action": "position_closed",
+                "symbol": symbol,
+                "position_id": position_id,
+                "reason": reason,
+                "exit_price": round(exit_price, 4),
+                "realized_pnl_delta": round(realized_pnl_delta or 0.0, 4),
+            },
         )
 
 
@@ -457,7 +465,7 @@ class ExecutionManager:
         Main execution loop for processing signals.
         Processing frequency: Every 200ms
         """
-        self.logger.info("Starting execution manager...")
+        self.logger.info("execution_manager_start", extra={"action": "start"})
 
         # Connect to IBKR
         await self.connect_ibkr()
@@ -510,14 +518,25 @@ class ExecutionManager:
                 if self.ib.isConnected():
                     self.ib.disconnect()
 
-                self.logger.info(f"Connecting to IBKR at {self.host}:{self.port} (client_id={self.client_id})")
+                self.logger.info(
+                    "execution_manager_connect",
+                    extra={
+                        "action": "connect",
+                        "host": self.host,
+                        "port": self.port,
+                        "client_id": self.client_id,
+                    },
+                )
                 await self.ib.connectAsync(self.host, self.port, clientId=self.client_id, timeout=10)
 
                 # Verify connection
                 if self.ib.isConnected():
                     self.connected = True
                     self.reconnect_attempts = 0
-                    self.logger.info("IBKR execution connection established")
+                    self.logger.info(
+                        "execution_manager_connected",
+                        extra={"action": "connect", "status": "connected"}
+                    )
 
                     # Get account info (ib_insync doesn't have async version)
                     account_values = self.ib.accountValues()
@@ -697,7 +716,14 @@ class ExecutionManager:
                     if added:
                         await self._increment_position_count(added)
 
-                    self.logger.info(f"Position sync: Added new {symbol} position {ib_id}")
+                    self.logger.info(
+                        "execution_position_added",
+                        extra={
+                            "action": "position_sync",
+                            "symbol": symbol,
+                            "position_id": ib_id,
+                        },
+                    )
 
                 self.logger.debug("Position sync completed")
 
@@ -744,7 +770,14 @@ class ExecutionManager:
                 added = await self.redis.sadd(f'positions:by_symbol:{symbol}', position_id)
                 if not existing and added:
                     await self._increment_position_count(added)
-                self.logger.info(f"Reconciled live IB position for {symbol} ({position_id})")
+                self.logger.info(
+                    "execution_position_reconciled",
+                    extra={
+                        "action": "position_sync",
+                        "symbol": symbol,
+                        "position_id": position_id,
+                    },
+                )
             except Exception as snapshot_error:  # pragma: no cover - defensive per-position
                 self.logger.error(
                     f"Failed to reconcile position for {getattr(contract, 'symbol', 'UNKNOWN')}: {snapshot_error}"
@@ -869,7 +902,16 @@ class ExecutionManager:
             strategy = signal.get('strategy')  # 0DTE, 1DTE, 14DTE, MOC
             strategy_code = self._normalize_strategy(strategy)
 
-            self.logger.info(f"Executing signal: {symbol} {side} {strategy} (confidence={confidence}%)")
+            self.logger.info(
+                "execution_signal_accepted",
+                extra={
+                    "action": "execute_signal",
+                    "symbol": symbol,
+                    "side": side,
+                    "strategy": strategy,
+                    "confidence_pct": confidence,
+                },
+            )
 
             # Create IB contract (add symbol to contract info)
             contract_info = signal.get('contract', {})
@@ -953,7 +995,17 @@ class ExecutionManager:
             finally:
                 self.active_trades.pop(order_id, None)
 
-            self.logger.info(f"Order {order_id} placed: {action} {order_size} {symbol} @ {order_type}")
+            self.logger.info(
+                "execution_order_placed",
+                extra={
+                    "action": "order_placed",
+                    "order_id": order_id,
+                    "symbol": symbol,
+                    "side": action,
+                    "size": order_size,
+                    "order_type": order_type,
+                },
+            )
 
         except Exception as e:
             self.logger.error(f"Error executing signal: {e}")
@@ -1222,8 +1274,14 @@ class ExecutionManager:
 
             if filled and remaining and not order_record.get('partial_alerted'):
                 self.logger.info(
-                    f"Order {order_id} partially filled: {filled}/{total_quantity} "
-                    f"{order_record.get('symbol')}"
+                    "execution_order_partial",
+                    extra={
+                        "action": "order_partial",
+                        "order_id": order_id,
+                        "filled": filled,
+                        "total": total_quantity,
+                        "symbol": order_record.get('symbol'),
+                    },
                 )
                 order_record['partial_alerted'] = True
 
@@ -1445,9 +1503,16 @@ class ExecutionManager:
 
             # Log fill
             self.logger.info(
-                f"Position created: {symbol} {position['side']} "
-                f"{position['quantity']} @ ${position['entry_price']:.2f} "
-                f"(commission=${total_commission:.2f})"
+                "execution_position_created",
+                extra={
+                    "action": "position_created",
+                    "symbol": symbol,
+                    "side": position['side'],
+                    "quantity": position['quantity'],
+                    "entry_price": round(position['entry_price'], 4),
+                    "commission": round(total_commission, 4),
+                    "position_id": position_id,
+                },
             )
 
             # Store fill record
@@ -1562,8 +1627,14 @@ class ExecutionManager:
                 target_order_ids.append(target_trade.order.orderId)
 
                 self.logger.info(
-                    f"Target order placed: {close_action} {quantity} @ ${target_price:.2f} "
-                    f"for position {position_id[:8]}"
+                    "execution_target_order",
+                    extra={
+                        "action": "target_order",
+                        "position_id": position_id,
+                        "side": close_action,
+                        "quantity": quantity,
+                        "target_price": round(target_price, 4),
+                    },
                 )
 
             # Update position with bracket metadata
@@ -1580,8 +1651,14 @@ class ExecutionManager:
                 self.target_orders[position_id] = target_trades
 
             self.logger.info(
-                f"Stop loss placed: {close_action} {quantity} @ ${stop_price:.2f} "
-                f"for position {position_id[:8]}"
+                "execution_stop_order",
+                extra={
+                    "action": "stop_order",
+                    "position_id": position_id,
+                    "side": close_action,
+                    "quantity": quantity,
+                    "stop_price": round(stop_price, 4),
+                },
             )
 
         except Exception as e:
@@ -1698,8 +1775,14 @@ class ExecutionManager:
         """
         try:
             self.logger.info(
-                f"Fill received: {fill.contract.symbol} "
-                f"{fill.execution.shares} @ ${fill.execution.price:.2f}"
+                "execution_fill_received",
+                extra={
+                    "action": "fill",
+                    "symbol": getattr(fill.contract, 'symbol', None),
+                    "shares": getattr(fill.execution, 'shares', None),
+                    "price": round(getattr(fill.execution, 'price', 0.0), 4),
+                    "order_id": getattr(fill.execution, 'orderId', None),
+                },
             )
 
             async def _process_fill():
@@ -1725,9 +1808,15 @@ class ExecutionManager:
             if errorCode == 201:  # Order rejected
                 asyncio.create_task(self.handle_order_rejection_by_id(reqId, errorString))
             elif errorCode == 202:  # Order cancelled
-                self.logger.info(f"Order {reqId} cancelled")
+                self.logger.info(
+                    "execution_order_cancelled",
+                    extra={"action": "order_cancelled", "order_id": reqId}
+                )
             elif errorCode in [2104, 2106, 2158]:  # Connection OK messages
-                self.logger.info(f"IBKR Info: {errorString}")
+                self.logger.info(
+                    "execution_ibkr_info",
+                    extra={"action": "ibkr_info", "message": errorString, "code": errorCode}
+                )
             elif errorCode == 1100:  # Connection lost
                 self.logger.critical("IBKR connection lost!")
                 self.connected = False

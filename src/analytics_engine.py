@@ -23,8 +23,9 @@ import pytz
 from datetime import datetime, time as datetime_time
 from typing import Dict, List, Any, Optional
 from collections import defaultdict
-import logging
 import traceback
+
+from logging_utils import get_logger
 
 import redis_keys as rkeys
 from redis_keys import get_ttl
@@ -42,7 +43,7 @@ class MetricsAggregator:
     def __init__(self, config: Dict[str, Any], redis_conn: aioredis.Redis):
         self.config = config
         self.redis = redis_conn
-        self.logger = logging.getLogger(__name__)
+        self.logger = get_logger(__name__, component="analytics", subsystem="metrics")
 
         symbols_cfg = config.get('symbols', {})
         self.symbols = sorted({*symbols_cfg.get('standard', []), *symbols_cfg.get('level2', [])})
@@ -458,7 +459,7 @@ class AnalyticsEngine:
         """
         self.config = config
         self.redis = redis_conn  # This is async Redis
-        self.logger = logging.getLogger(__name__)
+        self.logger = get_logger(__name__, component="analytics", subsystem="engine")
 
         # Load symbols from config - combine standard and level2
         syms = config.get('symbols', {})
@@ -525,7 +526,10 @@ class AnalyticsEngine:
         self.flow_cluster_symbols: List[str] = []
         self.aggregator = MetricsAggregator(config, redis_conn)
 
-        self.logger.info(f"AnalyticsEngine initialized for {len(self.symbols)} symbols")
+        self.logger.info(
+            "analytics_engine_initialized",
+            extra={"action": "init", "symbol_count": len(self.symbols)}
+        )
 
     async def start(self):
         """Start the analytics engine."""
@@ -533,7 +537,7 @@ class AnalyticsEngine:
             self.logger.warning("Analytics engine already running")
             return
 
-        self.logger.info("Starting analytics engine...")
+        self.logger.info("analytics_engine_start", extra={"action": "start"})
 
         try:
             self.vpin_calculator = VPINCalculator(self.config, self.redis)
@@ -548,7 +552,7 @@ class AnalyticsEngine:
             await self._loop_task
 
         except asyncio.CancelledError:
-            self.logger.info("Analytics engine start cancelled")
+            self.logger.info("analytics_engine_start_cancelled", extra={"action": "start", "status": "cancelled"})
             raise
         except Exception as exc:
             self.logger.error(f"Error starting analytics engine: {exc}")
@@ -559,7 +563,7 @@ class AnalyticsEngine:
 
     async def _calculation_loop(self):
         """Main loop that triggers calculations based on configured intervals."""
-        self.logger.info("Analytics calculation loop started")
+        self.logger.info("analytics_loop_start", extra={"action": "loop_start"})
 
         try:
             while self._running:
@@ -587,7 +591,7 @@ class AnalyticsEngine:
                     await asyncio.sleep(1.0)
 
         except asyncio.CancelledError:
-            self.logger.info("Analytics calculation loop cancelled")
+            self.logger.info("analytics_loop_cancelled", extra={"action": "loop_cancelled"})
             raise
         finally:
             await self._update_heartbeat(idle=True)
@@ -695,7 +699,7 @@ class AnalyticsEngine:
 
     async def stop(self):
         """Stop the analytics engine."""
-        self.logger.info("Stopping analytics engine...")
+        self.logger.info("analytics_engine_stop", extra={"action": "stop"})
         self._running = False
 
         if self._loop_task and not self._loop_task.done():
