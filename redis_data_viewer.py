@@ -5,7 +5,8 @@ Redis Data Viewer - Displays trading system data in a readable format
 import asyncio
 import json
 import redis.asyncio as redis
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Dict, Any, List, Optional
 from tabulate import tabulate
 import sys
@@ -144,26 +145,31 @@ class RedisDataViewer:
 
         # Simple value metrics
         metrics = [
-            ('Daily P&L', 'risk:daily_pnl'),
-            ('Realized P&L', 'positions:pnl:realized:total'),
-            ('Unrealized P&L', 'positions:pnl:unrealized'),
-            ('Daily Trades', 'risk:daily_trades'),
-            ('Consecutive Losses', 'risk:consecutive_losses'),
-            ('Current Drawdown', 'risk:drawdown:current'),
-            ('Max Drawdown', 'risk:drawdown:max'),
-            ('Halt Status', 'risk:halt:status'),
-            ('Emergency Active', 'risk:emergency:active'),
-            ('Current VaR', 'risk:var:current'),
+            ('Daily P&L', 'risk:daily_pnl', 'currency'),
+            ('Realized P&L', 'positions:pnl:realized:total', 'currency'),
+            ('Unrealized P&L', 'positions:pnl:unrealized', 'currency'),
+            ('Daily Trades', 'risk:daily_trades', None),
+            ('Consecutive Losses', 'risk:consecutive_losses', None),
+            ('Current Drawdown', 'risk:current_drawdown', 'json'),
+            ('Max Drawdown', 'risk:drawdown:max', 'currency'),
+            ('Halt Status', 'risk:halt:status', None),
+            ('Emergency Active', 'risk:emergency:active', None),
+            ('Current VaR', 'risk:var:current', 'currency'),
         ]
 
-        for name, key in metrics:
+        for name, key, value_type in metrics:
             value = await self.redis.get(key)
             if value:
                 try:
-                    # Try to parse as number for formatting
-                    if '.' in str(value):
-                        value = f"${float(value):,.2f}" if 'P&L' in name or 'Drawdown' in name or 'VaR' in name else value
-                except:
+                    if value_type == 'currency':
+                        value = f"${float(value):,.2f}"
+                    elif value_type == 'json':
+                        parsed = json.loads(value)
+                        pct = parsed.get('drawdown_pct', 0.0)
+                        current_val = parsed.get('current_value', 0.0)
+                        hwm = parsed.get('high_water_mark', 0.0)
+                        value = f"{pct:.2f}% (Acct ${current_val:,.2f} | HWM ${hwm:,.2f})"
+                except Exception:
                     pass
                 risk_data.append([name, value])
             else:
@@ -186,6 +192,27 @@ class RedisDataViewer:
         if correlation:
             print("\n📊 Correlation Matrix:")
             self._print_json(correlation)
+
+        # Drawdown history (if available)
+        history = await self.redis.lrange('risk:drawdown:history', 0, -1)
+        if history:
+            print("\n📉 Recent Drawdown Samples:")
+            latest = []
+            for entry in history[:5]:
+                try:
+                    item = json.loads(entry)
+                except Exception:
+                    continue
+                latest.append([
+                    item.get('timestamp', 'N/A'),
+                    f"{float(item.get('drawdown_pct', 0)):0.2f}%",
+                    f"${float(item.get('account_value', 0)):,.2f}",
+                    f"${float(item.get('hwm', 0)):,.2f}",
+                ])
+            if latest:
+                print(tabulate(latest, headers=['Time', 'Drawdown %', 'Account Value', 'HWM'], tablefmt='simple'))
+        else:
+            print("\n⚠️ Drawdown history missing (risk manager may not be running or recording).")
 
     async def get_positions(self):
         """Display open positions and exposure"""
@@ -264,6 +291,85 @@ class RedisDataViewer:
                         exposures.append([symbol, f"${float(exposure):,.2f}"])
             if exposures:
                 print(tabulate(exposures[:10], headers=['Symbol', 'Exposure'], tablefmt='simple'))
+
+        # Closed positions for today
+        today = datetime.utcnow().strftime('%Y%m%d')
+        closed_keys = await self.redis.keys(f'positions:closed:{today}:*')
+        if closed_keys:
+            print("\n✅ Closed Positions Today:")
+            rows = []
+            seen = set()
+            for key in sorted(closed_keys):
+                payload = await self.redis.get(key)
+                if not payload:
+                    continue
+                try:
+                    pos = json.loads(payload)
+                except Exception:
+                    continue
+
+                realized = float(pos.get('realized_pnl', 0) or 0.0)
+                commission = float(pos.get('commission', 0) or 0.0)
+                strategy = (pos.get('strategy') or '').upper()
+
+                # Skip reconciled placeholders (realized/commission zero and strategy flagged)
+                if realized == 0.0 and commission == 0.0 and strategy == 'RECONCILED':
+                    continue
+
+                contract = pos.get('contract', {})
+                dedupe_key = (pos.get('symbol'), contract.get('localSymbol'), pos.get('exit_time'))
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+
+                entry_time = pos.get('entry_time')
+                exit_time = pos.get('exit_time')
+
+                def to_et(ts: Optional[str]) -> str:
+                    if not ts:
+                        return 'N/A'
+                    try:
+                        ts_norm = ts.replace('Z', '+00:00')
+                        dt = datetime.fromisoformat(ts_norm)
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                        dt_et = dt.astimezone(ZoneInfo('US/Eastern'))
+                        return dt_et.strftime('%Y-%m-%d %H:%M:%S ET')
+                    except Exception:
+                        return ts
+
+                rows.append([
+                    pos.get('symbol', 'N/A'),
+                    contract.get('localSymbol', contract.get('symbol', 'N/A')),
+                    pos.get('side', 'N/A'),
+                    f"${pos.get('entry_price', 0):.2f}",
+                    to_et(entry_time),
+                    f"${pos.get('exit_price', 0):.2f}",
+                    to_et(exit_time),
+                    f"${realized:.2f}",
+                    f"${commission:.2f}",
+                    (len(pos.get('realized_events', [])) or ''),
+                ])
+
+            if rows:
+                headers = [
+                    'Symbol',
+                    'Contract',
+                    'Side',
+                    'Entry $',
+                    'Entry (ET)',
+                    'Exit $',
+                    'Exit (ET)',
+                    'Realized',
+                    'Comm',
+                    '#Fills',
+                ]
+                print(tabulate(rows[:10], headers=headers, tablefmt='simple'))
+                if len(rows) > 10:
+                    print(f"\n... and {len(rows) - 10} more closed positions")
+                print(f"\nShowing {len(rows[:10])} of {len(rows)} reconciled closes.")
+            else:
+                print("  (No closed positions with realized P&L yet today)")
 
     async def get_orders(self):
         """Display order management data"""

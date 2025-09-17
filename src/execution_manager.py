@@ -377,7 +377,15 @@ class ExecutionManager:
         position['exit_price'] = exit_price
         position['exit_time'] = datetime.utcnow().isoformat()
         position['close_reason'] = reason
-        position['realized_pnl'] = position.get('realized_pnl', 0.0) + realized_pnl_delta
+
+        prior_realized = float(position.get('realized_pnl') or 0.0)
+        delta = float(realized_pnl_delta or 0.0)
+        unposted = float(position.pop('realized_unposted', 0.0) or 0.0)
+        realized_total = prior_realized
+        if realized_total == 0.0 and (unposted or delta):
+            realized_total = unposted if unposted else delta
+        position['realized_pnl'] = realized_total
+        position['commission'] = float(position.get('commission') or 0.0)
 
         redis_key = f'positions:open:{symbol}:{position_id}'
         await self.redis.delete(redis_key)
@@ -386,11 +394,14 @@ class ExecutionManager:
             await self._decrement_position_count(symbol, removed)
 
         closed_key = f'positions:closed:{datetime.utcnow().strftime("%Y%m%d")}:{position_id}'
-        await self.redis.setex(closed_key, 604800, json.dumps(position))
+        snapshot = dict(position)
+        snapshot['realized_pnl'] = round(realized_total, 2)
+        snapshot['commission'] = round(position['commission'], 2)
+        await self.redis.setex(closed_key, 604800, json.dumps(snapshot))
 
         await self.redis.incr('positions:closed:total')
-        await self.redis.incrbyfloat('positions:pnl:realized:total', position['realized_pnl'])
-        await self.redis.incrbyfloat('risk:daily_pnl', realized_pnl_delta)
+        await self.redis.incrbyfloat('positions:pnl:realized:total', realized_total)
+        await self.redis.incrbyfloat('risk:daily_pnl', realized_total if unposted else delta)
 
         self.logger.info(
             f"Position {position_id[:8]} closed ({reason}): {symbol} @ ${exit_price:.2f}, "
@@ -413,6 +424,8 @@ class ExecutionManager:
         position.setdefault('exit_time', now_iso)
         position.setdefault('exit_price', position.get('current_price'))
         realized_total = float(position.get('realized_pnl', 0.0) or 0.0)
+        position.pop('realized_unposted', None)
+        position['commission'] = float(position.get('commission') or 0.0)
         if realized_total:
             await self.redis.incrbyfloat('positions:pnl:realized:total', realized_total)
             await self.redis.incrbyfloat('risk:daily_pnl', realized_total)
@@ -426,7 +439,10 @@ class ExecutionManager:
             await self._decrement_position_count(symbol, removed)
 
         closed_key = f'positions:closed:{datetime.utcnow().strftime("%Y%m%d")}:{position_id}'
-        await self.redis.setex(closed_key, 604800, json.dumps(position))
+        snapshot = dict(position)
+        snapshot['realized_pnl'] = round(realized_total, 2)
+        snapshot['commission'] = round(position['commission'], 2)
+        await self.redis.setex(closed_key, 604800, json.dumps(snapshot))
 
         self.stop_orders.pop(position_id, None)
         self.target_orders.pop(position_id, None)
@@ -1731,6 +1747,13 @@ class ExecutionManager:
             symbol = fill.contract.symbol
             filled_qty = abs(getattr(fill.execution, 'shares', 0))
             fill_price = getattr(fill.execution, 'price', 0)
+            commission = 0.0
+            realized_override = None
+            if fill.commissionReport:
+                commission = float(getattr(fill.commissionReport, 'commission', 0) or 0.0)
+                realized_val = getattr(fill.commissionReport, 'realizedPNL', None)
+                if realized_val is not None:
+                    realized_override = float(realized_val)
 
             # Check if this is a stop or target order by checking all positions
             position_keys = await self.redis.keys(f'positions:open:{symbol}:*')
@@ -1747,12 +1770,31 @@ class ExecutionManager:
                 # Check if this fill is for a stop or target order
                 if order_id == stop_order_id or order_id in target_order_ids:
                     multiplier = self._position_multiplier(position)
-                    if position.get('side') == 'LONG':
-                        realized_pnl = (fill_price - position.get('entry_price', 0)) * filled_qty * multiplier
+                    if realized_override is not None:
+                        realized_pnl = realized_override
                     else:
-                        realized_pnl = (position.get('entry_price', 0) - fill_price) * filled_qty * multiplier
+                        if position.get('side') == 'LONG':
+                            realized_pnl = (fill_price - position.get('entry_price', 0)) * filled_qty * multiplier
+                        else:
+                            realized_pnl = (position.get('entry_price', 0) - fill_price) * filled_qty * multiplier
+                        if commission:
+                            realized_pnl -= commission
 
                     reason = 'STOP' if order_id == stop_order_id else 'TARGET'
+                    position['commission'] = float(position.get('commission', 0.0) or 0.0) + commission
+                    events = position.setdefault('realized_events', [])
+                    events.append(
+                        {
+                            'type': reason,
+                            'quantity': filled_qty,
+                            'price': fill_price,
+                            'commission': commission,
+                            'realized': realized_pnl,
+                            'timestamp': datetime.utcnow().isoformat(),
+                            'exec_id': getattr(fill.execution, 'execId', None),
+                            'side': getattr(fill.execution, 'side', None),
+                        }
+                    )
                     await self._finalize_position_close(position, fill_price, realized_pnl, reason)
                     return True
 
@@ -1785,21 +1827,45 @@ class ExecutionManager:
         filled_qty = abs(getattr(fill.execution, 'shares', 0))
         fill_price = getattr(fill.execution, 'price', 0.0)
 
+        commission = 0.0
+        realized_override = None
+        if fill.commissionReport:
+            commission = float(getattr(fill.commissionReport, 'commission', 0) or 0.0)
+            realized_val = getattr(fill.commissionReport, 'realizedPNL', None)
+            if realized_val is not None:
+                realized_override = float(realized_val)
+
         if filled_qty == 0 or side not in {'LONG', 'SHORT'} or fill_side not in {'BOT', 'SLD'}:
             return
 
         if (side == 'LONG' and fill_side == 'SLD') or (side == 'SHORT' and fill_side == 'BOT'):
             # Reducing or closing position
-            await self._apply_position_reduction(position, filled_qty, fill_price, 'MANUAL')
+            await self._apply_position_reduction(
+                position,
+                filled_qty,
+                fill_price,
+                'MANUAL',
+                commission=commission,
+                realized_override=realized_override,
+                execution=getattr(fill, 'execution', None),
+            )
         elif (side == 'LONG' and fill_side == 'BOT') or (side == 'SHORT' and fill_side == 'SLD'):
             # Scaling into existing position
-            await self._apply_position_addition(position, filled_qty, fill_price)
+            await self._apply_position_addition(
+                position,
+                filled_qty,
+                fill_price,
+                commission=commission,
+                execution=getattr(fill, 'execution', None),
+            )
 
     async def _apply_position_addition(
         self,
         position: Dict[str, Any],
         added_qty: float,
         fill_price: float,
+        commission: float = 0.0,
+        execution: Optional[Any] = None,
     ) -> None:
         symbol = position.get('symbol')
         position_id = position.get('id')
@@ -1818,6 +1884,21 @@ class ExecutionManager:
         position['quantity'] = new_qty
         position['current_price'] = fill_price
         position['last_update'] = time.time()
+        if commission:
+            position['commission'] = float(position.get('commission', 0.0) or 0.0) + commission
+        if execution is not None:
+            fills = position.setdefault('fill_history', [])
+            fills.append(
+                {
+                    'type': 'ADD',
+                    'quantity': added_qty,
+                    'price': fill_price,
+                    'commission': commission,
+                    'timestamp': datetime.utcnow().isoformat(),
+                    'exec_id': getattr(execution, 'execId', None),
+                    'side': getattr(execution, 'side', None),
+                }
+            )
 
         await self.redis.set(
             f'positions:open:{symbol}:{position_id}',
@@ -1830,6 +1911,9 @@ class ExecutionManager:
         closed_qty: float,
         fill_price: float,
         reason: str,
+        commission: float = 0.0,
+        realized_override: Optional[float] = None,
+        execution: Optional[Any] = None,
     ) -> None:
         symbol = position.get('symbol')
         position_id = position.get('id')
@@ -1845,21 +1929,48 @@ class ExecutionManager:
         entry_price = float(position.get('entry_price', 0) or 0.0)
         side = (position.get('side') or '').upper()
 
-        if side == 'LONG':
-            realized_delta = (fill_price - entry_price) * closed_qty * multiplier
+        if realized_override is not None:
+            realized_delta = float(realized_override)
         else:
-            realized_delta = (entry_price - fill_price) * closed_qty * multiplier
+            if side == 'LONG':
+                realized_delta = (fill_price - entry_price) * closed_qty * multiplier
+            else:
+                realized_delta = (entry_price - fill_price) * closed_qty * multiplier
+            if commission:
+                realized_delta -= commission
 
         position['quantity'] = max(current_qty - closed_qty, 0)
-        position['realized_pnl'] = position.get('realized_pnl', 0.0) + realized_delta
+        prior_realized = float(position.get('realized_pnl') or 0.0)
+        position['realized_pnl'] = prior_realized + realized_delta
+        unposted = float(position.get('realized_unposted', 0.0) or 0.0) + realized_delta
+        position['realized_unposted'] = unposted
         position.setdefault('reductions', []).append(
             {
                 'quantity': closed_qty,
                 'price': fill_price,
                 'reason': reason,
                 'timestamp': datetime.utcnow().isoformat(),
+                'realized': realized_delta,
+                'commission': commission,
             }
         )
+        if commission:
+            position['commission'] = float(position.get('commission', 0.0) or 0.0) + commission
+        if execution is not None:
+            events = position.setdefault('realized_events', [])
+            events.append(
+                {
+                    'type': reason,
+                    'quantity': closed_qty,
+                    'price': fill_price,
+                    'commission': commission,
+                    'realized': realized_delta,
+                    'timestamp': datetime.utcnow().isoformat(),
+                    'exec_id': getattr(execution, 'execId', None),
+                    'side': getattr(execution, 'side', None),
+                    'remaining_quantity': position['quantity'],
+                }
+            )
 
         if position['quantity'] <= 0:
             await self._finalize_position_close(position, fill_price, realized_delta, reason)
