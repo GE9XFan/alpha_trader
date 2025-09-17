@@ -391,30 +391,32 @@ class MetricsAggregator:
         price_returns: Dict[str, pd.Series] = {}
 
         for symbol in self.symbols:
-            bars_raw = await self.redis.get(rkeys.market_bars_key(symbol))
+            bars_raw = await self.redis.lrange(rkeys.market_bars_key(symbol, '1min'), -self.correlation_window, -1)
+            if not bars_raw:
+                bars_raw = await self.redis.lrange(rkeys.market_bars_key(symbol), -self.correlation_window, -1)
             if not bars_raw:
                 continue
 
-            try:
-                bars = json.loads(bars_raw)
-            except json.JSONDecodeError:
-                self.logger.debug(f"Failed to parse bars for {symbol}")
-                continue
-
             closes: List[float] = []
-            if isinstance(bars, list):
-                for entry in bars[-self.correlation_window:]:
-                    close = None
-                    if isinstance(entry, dict):
-                        close = entry.get('close') or entry.get('c')
-                    elif isinstance(entry, (list, tuple)):
-                        close = entry[4] if len(entry) >= 5 else None
-                    if close is None:
-                        continue
-                    try:
-                        closes.append(float(close))
-                    except (TypeError, ValueError):
-                        continue
+            for raw_entry in bars_raw:
+                if isinstance(raw_entry, bytes):
+                    raw_entry = raw_entry.decode('utf-8', errors='ignore')
+                try:
+                    entry = json.loads(raw_entry)
+                except json.JSONDecodeError:
+                    continue
+
+                close = None
+                if isinstance(entry, dict):
+                    close = entry.get('close') or entry.get('c')
+                elif isinstance(entry, (list, tuple)):
+                    close = entry[4] if len(entry) >= 5 else None
+                if close is None:
+                    continue
+                try:
+                    closes.append(float(close))
+                except (TypeError, ValueError):
+                    continue
 
             if len(closes) < 2:
                 continue

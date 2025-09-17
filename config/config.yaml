@@ -127,6 +127,11 @@ modules:
     volatility:
       history_window: 480
       timeout: 10
+      ttl: 300
+      data_sources:
+        primary: cboe
+        enable_fallback: true
+        cache_duration: 300
       vix1d_thresholds:
         shock: 35
         elevated: 25
@@ -139,6 +144,7 @@ modules:
       min_trades: 40
       institutional_size: 250
       random_state: 42
+      ttl: 180
   
   signals:
     enabled: true

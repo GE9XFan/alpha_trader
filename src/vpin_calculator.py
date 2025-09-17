@@ -52,6 +52,9 @@ class VPINCalculator:
         Returns:
             VPIN score between 0 and 1
         """
+        bucket_size = self.config.get('parameter_discovery', {}).get('vpin', {}).get('default_bucket_size', 100)
+        trades_json: List[str] = []
+
         try:
             # 1. Get discovered bucket size from Redis
             bucket_size_str = await self.redis.get('discovered:vpin_bucket_size')
@@ -60,7 +63,6 @@ class VPINCalculator:
                 self.logger.debug(f"Using discovered bucket size: {bucket_size}")
             else:
                 # Fallback to config default
-                bucket_size = self.config.get('parameter_discovery', {}).get('vpin', {}).get('default_bucket_size', 100)
                 self.logger.warning(f"No discovered bucket size, using default: {bucket_size}")
 
             # 2. Fetch recent trades from Redis (last 1000 trades)
@@ -68,8 +70,10 @@ class VPINCalculator:
 
             # Check minimum trades requirement
             min_trades = self.config.get('parameter_discovery', {}).get('vpin', {}).get('min_trades_required', 100)
+            ttl = self.ttls.get('analytics', self.ttls.get('metrics', 60))
             if len(trades_json) < min_trades:
                 self.logger.debug(f"Insufficient trades for {symbol}: {len(trades_json)} < {min_trades}")
+                await self._store_neutral_vpin(symbol, ttl, bucket_size, len(trades_json), 'insufficient_trades')
                 return 0.5  # Neutral VPIN if insufficient data
 
             # 3. Parse trades
@@ -82,6 +86,7 @@ class VPINCalculator:
                     continue
 
             if not trades:
+                await self._store_neutral_vpin(symbol, ttl, bucket_size, 0, 'no_trades')
                 return 0.5
 
             # 4. Classify trades as buy/sell
@@ -94,7 +99,6 @@ class VPINCalculator:
             vpin = self._calculate_vpin_from_buckets(buckets)
 
             # 7. Store in Redis with configured TTL
-            ttl = self.ttls.get('analytics', self.ttls.get('metrics', 60))
             vpin_data = {
                 'value': round(float(vpin), 4),
                 'buckets': len(buckets),
@@ -120,7 +124,32 @@ class VPINCalculator:
         except Exception as e:
             self.logger.error(f"Error calculating VPIN for {symbol}: {e}")
             self.logger.error(traceback.format_exc())
+            ttl = self.ttls.get('analytics', self.ttls.get('metrics', 60))
+            await self._store_neutral_vpin(symbol, ttl, bucket_size, len(trades_json), 'error')
             return 0.5  # Default neutral VPIN on error
+
+    async def _store_neutral_vpin(
+        self,
+        symbol: str,
+        ttl: int,
+        bucket_size: int,
+        trades_analyzed: int,
+        status: str,
+    ) -> None:
+        payload = {
+            'value': 0.5,
+            'buckets': 0,
+            'bucket_size': bucket_size,
+            'trades_analyzed': trades_analyzed,
+            'timestamp': time.time(),
+            'status': status,
+        }
+
+        await self.redis.setex(
+            rkeys.analytics_vpin_key(symbol),
+            ttl,
+            json.dumps(payload)
+        )
 
     async def _classify_trades(self, trades: List[dict], symbol: str) -> List[dict]:
         """

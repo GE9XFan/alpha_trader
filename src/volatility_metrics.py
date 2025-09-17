@@ -3,11 +3,13 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import logging
 import math
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
@@ -26,9 +28,8 @@ class VolatilityMetrics:
 
         analytics_cfg = config.get('modules', {}).get('analytics', {})
         store_ttls = analytics_cfg.get('store_ttls', {})
-        self.ttl = int(store_ttls.get('analytics', 60))
-
         vol_cfg = analytics_cfg.get('volatility', {})
+        self.ttl = int(vol_cfg.get('ttl', store_ttls.get('analytics', 60)))
         self.history_window = int(vol_cfg.get('history_window', 480))
         self.timeout = float(vol_cfg.get('timeout', 10.0))
         self.session: Optional[aiohttp.ClientSession] = None
@@ -41,6 +42,16 @@ class VolatilityMetrics:
         change_cfg = vol_cfg.get('change_thresholds', {})
         self.shock_change = float(change_cfg.get('shock', 5.0))
         self.elevated_change = float(change_cfg.get('elevated', 2.0))
+
+        data_sources_cfg = vol_cfg.get('data_sources', {})
+        self.primary_source = str(data_sources_cfg.get('primary', 'cboe')).lower()
+        self.enable_fallback = bool(data_sources_cfg.get('enable_fallback', True))
+        self.cache_duration = int(data_sources_cfg.get('cache_duration', 300))
+
+        self.cboe_cache_key = 'volatility:vix1d:cboe:last'
+        self.cboe_history_cache_key = 'volatility:vix1d:cboe:history'
+        self.yahoo_backoff_key = 'volatility:vix1d:yahoo_backoff'
+        self.yahoo_retry_count = 0
 
     async def update_vix1d(self) -> Dict[str, Any]:
         value = await self._fetch_vix1d()
@@ -90,30 +101,238 @@ class VolatilityMetrics:
         return self.session
 
     async def _fetch_vix1d(self) -> Optional[float]:
-        url = 'https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX1D?range=1d&interval=1m'
+        for source in self._ordered_sources():
+            if source == 'cboe':
+                value = await self._fetch_vix1d_cboe()
+            elif source == 'ibkr':
+                value = await self._fetch_vix1d_ibkr()
+            elif source == 'yahoo':
+                value = await self._fetch_vix1d_yahoo_with_backoff()
+            else:
+                continue
+
+            if value is not None:
+                self.logger.debug("VIX1D from %s: %.4f", source, value)
+                return value
+
+        self.logger.warning("VIX1D unavailable from configured sources")
+        return None
+
+    def _ordered_sources(self) -> List[str]:
+        universe = ['cboe', 'ibkr', 'yahoo']
+        primary = self.primary_source if self.primary_source in universe else 'cboe'
+        if not self.enable_fallback:
+            return [primary]
+
+        order: List[str] = [primary]
+        for candidate in universe:
+            if candidate not in order:
+                order.append(candidate)
+        return order
+
+    async def _fetch_vix1d_cboe(self) -> Optional[float]:
+        cached_value = await self._get_cached_cboe_value()
+        if cached_value is not None:
+            return cached_value
+
+        history = await self._fetch_and_cache_cboe_history()
+        if not history:
+            return None
+
+        latest = history[-1]
+        try:
+            close_value = float(latest['close'])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+        date_str = latest.get('date')
+        if date_str:
+            try:
+                data_date = self._parse_cboe_date(date_str)
+            except ValueError:
+                data_date = None
+            else:
+                today = datetime.now().date()
+                if data_date and data_date < today - timedelta(days=2):
+                    # Too stale to trust
+                    self.logger.debug("Discarding stale CBOE VIX1D value from %s", date_str)
+                    return None
+
+        payload = {
+            'timestamp': time.time(),
+            'value': close_value,
+            'date': date_str,
+        }
+        await self.redis.setex(self.cboe_cache_key, max(self.cache_duration, 60), json.dumps(payload))
+        return close_value
+
+    async def _get_cached_cboe_value(self) -> Optional[float]:
+        raw = await self.redis.get(self.cboe_cache_key)
+        if not raw:
+            return None
+        try:
+            payload = json.loads(raw)
+            ts = float(payload.get('timestamp', 0))
+            if time.time() - ts > self.cache_duration:
+                return None
+            return float(payload.get('value'))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return None
+
+    async def _fetch_and_cache_cboe_history(self) -> Optional[List[Dict[str, Any]]]:
+        raw_cache = await self.redis.get(self.cboe_history_cache_key)
+        if raw_cache:
+            try:
+                payload = json.loads(raw_cache)
+                cached_ts = float(payload.get('timestamp', 0))
+                if time.time() - cached_ts < 4 * 3600:
+                    data = payload.get('data')
+                    if isinstance(data, list) and data:
+                        return data
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
+
+        url = 'https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX1D_History.csv'
         try:
             session = await self._get_session()
-            async with session.get(url) as response:
-                response.raise_for_status()
-                payload = await response.json()
+            async with session.get(url, timeout=self.timeout) as response:
+                if response.status != 200:
+                    self.logger.debug("CBOE VIX1D history request failed: %s", response.status)
+                    return None
+                text = await response.text()
         except Exception as exc:
-            self.logger.debug("Failed to fetch VIX1D: %s", exc)
+            self.logger.debug("CBOE VIX1D fetch failed: %s", exc)
+            return None
+
+        reader = csv.DictReader(io.StringIO(text))
+        history: List[Dict[str, Any]] = []
+        for row in reader:
+            if not row:
+                continue
+            try:
+                history.append({
+                    'date': row.get('DATE') or row.get('Date'),
+                    'open': float(row.get('OPEN') or row.get('Open')),
+                    'high': float(row.get('HIGH') or row.get('High')),
+                    'low': float(row.get('LOW') or row.get('Low')),
+                    'close': float(row.get('CLOSE') or row.get('Close')),
+                })
+            except (TypeError, ValueError):
+                continue
+
+        if not history:
+            return None
+
+        cache_payload = {
+            'timestamp': time.time(),
+            'data': history,
+        }
+        await self.redis.setex(self.cboe_history_cache_key, 4 * 3600, json.dumps(cache_payload))
+        return history
+
+    def _parse_cboe_date(self, date_str: str):
+        for fmt in ('%m/%d/%Y', '%Y-%m-%d'):
+            try:
+                return datetime.strptime(date_str, fmt).date()
+            except ValueError:
+                continue
+        raise ValueError(f"Unknown CBOE date format: {date_str}")
+
+    async def _fetch_vix1d_ibkr(self) -> Optional[float]:
+        try:
+            raw = await self.redis.get('ibkr:market_data:VIX1D')
+        except Exception as exc:
+            self.logger.debug("IBKR VIX1D fetch failed: %s", exc)
+            return None
+
+        if not raw:
             return None
 
         try:
-            result = (payload.get('chart') or {}).get('result') or []
-            if not result:
-                return None
-            meta = result[0].get('meta') or {}
-            value = meta.get('regularMarketPrice')
-            if value is None:
-                closes = result[0].get('indicators', {}).get('quote', [{}])[0].get('close') or []
-                value = next((c for c in reversed(closes) if isinstance(c, (int, float))), None)
-            if value is None:
-                return None
-            return float(value)
-        except Exception:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
             return None
+
+        value = payload.get('last') or payload.get('close') or payload.get('value')
+        ts = payload.get('timestamp')
+        if value is None:
+            return None
+        if ts is not None:
+            try:
+                age = time.time() - float(ts)
+            except (TypeError, ValueError):
+                age = None
+            else:
+                if age is not None and age > 300:
+                    return None
+
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    async def _fetch_vix1d_yahoo_with_backoff(self) -> Optional[float]:
+        state = await self._load_yahoo_backoff_state()
+        now = time.time()
+        if state is not None:
+            retries, last_ts = state
+            backoff_seconds = min(3600, 60 * (2 ** retries))
+            if now - last_ts < backoff_seconds:
+                return None
+        else:
+            retries = self.yahoo_retry_count
+
+        url = 'https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX1D?range=1d&interval=1m'
+        try:
+            session = await self._get_session()
+            async with session.get(url, timeout=5) as response:
+                if response.status == 429:
+                    await self._store_yahoo_backoff_state(retries + 1, now)
+                    self.yahoo_retry_count = retries + 1
+                    return None
+                response.raise_for_status()
+                payload = await response.json()
+        except Exception as exc:
+            self.logger.debug("Yahoo VIX1D fetch failed: %s", exc)
+            await self._store_yahoo_backoff_state(retries + 1, now)
+            self.yahoo_retry_count = retries + 1
+            return None
+
+        result = (payload.get('chart') or {}).get('result') or []
+        if not result:
+            return None
+
+        meta = result[0].get('meta') or {}
+        value = meta.get('regularMarketPrice')
+        if value is None:
+            closes = result[0].get('indicators', {}).get('quote', [{}])[0].get('close') or []
+            value = next((c for c in reversed(closes) if isinstance(c, (int, float))), None)
+        if value is None:
+            return None
+
+        await self._clear_yahoo_backoff_state()
+        self.yahoo_retry_count = 0
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    async def _load_yahoo_backoff_state(self) -> Optional[Tuple[int, float]]:
+        raw = await self.redis.get(self.yahoo_backoff_key)
+        if not raw:
+            return None
+        try:
+            payload = json.loads(raw)
+            return int(payload.get('retries', 1)), float(payload.get('ts', 0.0))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return None
+
+    async def _store_yahoo_backoff_state(self, retries: int, timestamp: float) -> None:
+        payload = json.dumps({'retries': retries, 'ts': timestamp})
+        await self.redis.setex(self.yahoo_backoff_key, 3600, payload)
+
+    async def _clear_yahoo_backoff_state(self) -> None:
+        await self.redis.delete(self.yahoo_backoff_key)
 
     async def _update_history(self, value: float) -> Tuple[Dict[str, float], float, float, float]:
         history_key = f"{rkeys.analytics_vix1d_key()}:history"

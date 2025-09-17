@@ -37,9 +37,22 @@ class FlowClusterModel:
 
         analytics_cfg = config.get('modules', {}).get('analytics', {})
         store_ttls = analytics_cfg.get('store_ttls', {})
-        self.ttl = int(store_ttls.get('analytics', 60))
+        default_ttl = int(store_ttls.get('analytics', 60))
 
         cluster_cfg = analytics_cfg.get('flow_clustering', {})
+        cluster_ttl = int(cluster_cfg.get('ttl', 0))
+        if cluster_ttl <= 0:
+            interval_cfg = analytics_cfg.get('update_intervals', {}).get('flow_clustering', 90)
+            try:
+                interval = int(interval_cfg)
+            except (TypeError, ValueError):
+                interval = 90
+            cluster_ttl = max(default_ttl, interval * 2)
+        else:
+            cluster_ttl = max(cluster_ttl, default_ttl)
+
+        self.ttl = cluster_ttl
+
         self.window_trades = int(cluster_cfg.get('window_trades', 150))
         self.min_trades = int(cluster_cfg.get('min_trades', 30))
         self.institutional_size = float(cluster_cfg.get('institutional_size', 250.0))
