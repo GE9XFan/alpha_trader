@@ -7,7 +7,7 @@ restarts and ensures reliable signal delivery.
 
 Redis Keys Used:
     Read:
-        - signals:pending:{symbol} (pending signals queue)
+        - signals:distribution:pending (executed signal queue)
         - distribution:scheduled:basic (scheduled basic tier signals)
         - distribution:scheduled:free (scheduled free tier signals)
     Write:
@@ -82,35 +82,37 @@ class SignalDistributor:
         # Start the scheduler task for delayed signals
         asyncio.create_task(self.process_scheduled_signals())
 
+        distribution_queue = 'signals:distribution:pending'
+
         while True:
             try:
-                # Get symbols from configuration (bug fix #5)
-                level2_symbols = self.config.get('symbols', {}).get('level2', [])
-                standard_symbols = self.config.get('symbols', {}).get('standard', [])
-                all_symbols = list(set(level2_symbols + standard_symbols))
+                result = await self.redis.brpop(distribution_queue, timeout=2)
+                if not result:
+                    await asyncio.sleep(0.2)
+                    continue
 
-                # Build list of all pending queues
-                pending_queues = [f'signals:pending:{symbol}' for symbol in all_symbols]
+                _, signal_payload = result
+                try:
+                    if isinstance(signal_payload, bytes):
+                        signal_payload = signal_payload.decode('utf-8')
+                    signal = json.loads(signal_payload)
+                    execution_info = signal.get('execution') or {}
+                    if execution_info.get('status') != 'FILLED':
+                        self.logger.debug(
+                            "Skipping non-filled signal from distribution queue",
+                            extra={'signal_id': signal.get('id')}
+                        )
+                        continue
 
-                if pending_queues:
-                    # Use BRPOP with multiple queues and timeout (bug fix #1)
-                    result = await self.redis.brpop(pending_queues, timeout=2)
-                    if result:
-                        queue_name, signal_json = result
-                        try:
-                            signal = json.loads(signal_json)
-                            await self.distribute_signal(signal)
-                            self._consecutive_failures = 0
-                        except Exception as exc:  # pragma: no cover - defensive
-                            self._consecutive_failures += 1
-                            await self.redis.lpush(self.dead_letter_key, signal_json)
-                            backoff = min(5, 0.5 * self._consecutive_failures)
-                            self.logger.error("Failed to distribute signal", exc_info=exc)
-                            if backoff:
-                                await asyncio.sleep(backoff)
-                else:
-                    # No symbols configured, sleep longer
-                    await asyncio.sleep(5)
+                    await self.distribute_signal(signal)
+                    self._consecutive_failures = 0
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    self._consecutive_failures += 1
+                    await self.redis.lpush(self.dead_letter_key, signal_payload)
+                    backoff = min(5, 0.5 * self._consecutive_failures)
+                    self.logger.error("Failed to distribute signal", exc_info=exc)
+                    if backoff:
+                        await asyncio.sleep(backoff)
 
             except Exception as e:
                 self.logger.error(f"Error in distribution loop: {e}")
@@ -191,9 +193,10 @@ class SignalDistributor:
                 await self.redis.incr('metrics:signals:validator_rejects')
                 return
 
-            if not await self.validator.validate_market_conditions(symbol):
-                await self.redis.incr('metrics:signals:validator_rejects')
-                return
+            if not signal.get('execution'):
+                if not await self.validator.validate_market_conditions(symbol):
+                    await self.redis.incr('metrics:signals:validator_rejects')
+                    return
 
             current_time = time.time()
 

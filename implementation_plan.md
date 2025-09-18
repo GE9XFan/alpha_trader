@@ -5,6 +5,7 @@
 - **Phase 3 – Flow clustering & volatility regimes** (Complete): FlowClusterModel classifies recent trade prints into participant archetypes while VolatilityMetrics maintains VIX1D history and regime tags, both orchestrated by the analytics scheduler and folded into downstream aggregates.【F:src/flow_clustering.py†L30-L199】【F:src/volatility_metrics.py†L19-L190】【F:src/analytics_engine.py†L500-L660】
 - **Phase 4 – Signal integration & scoring** (Complete): The default feature reader and DTE/MOC playbooks ingest dealer-flow, clustering, VIX1D, imbalance, and unusual-activity features and rebalance confidence scoring weights so emissions align with the new analytics payloads.【F:src/signal_generator.py†L542-L803】【F:src/dte_strategies.py†L68-L209】【F:src/moc_strategy.py†L55-L214】【F:config/config.yaml†L143-L250】
 - **Phase 5 – Backfills, monitoring, and regression coverage** (Pending): Historical backfill utilities, dedicated monitoring dashboards for the new metrics, and regression tests for dealer-flow components remain open items.
+- **Phase 6 – Execution & distribution hardening** (Complete): Risk gating, commission normalization, bracket maintenance, and social publishing now depend on confirmed IBKR fills, preventing dual-side order rejections and ensuring outbound messaging reflects real positions.
 
 ## Phase 1 – Schema & Configuration
 The Redis schema now dedicates stable helpers for dealer-flow buckets (`analytics:vanna`, `analytics:charm`, `analytics:hedging`, `analytics:skew`), flow-cluster payloads, and VIX1D volatility state to keep all producers and consumers aligned on key formats.【F:src/redis_keys.py†L37-L141】 Configuration exposes cadence, TTLs, and weighting knobs for each analytics family—including cluster windows, VIX1D thresholds, and dealer-flow history depth—allowing operators to retune behaviour without code changes.【F:config/config.yaml†L84-L141】 These settings are loaded during bootstrap alongside existing module toggles so every service shares a single source of truth.【F:main.py†L100-L176】
@@ -21,7 +22,13 @@ The default feature reader batches Redis fetches for dealer-flow, hedging, skew,
 ## Phase 5 – Outstanding Follow-Ups
 - Add historical backfill jobs for dealer-flow, flow clusters, and VIX1D so ingestors can reconstruct state after outages.
 - Build monitoring/backtesting notebooks or dashboards focused on the new metrics (success rates, z-score drift, cluster stability).
-- Extend automated regression coverage to exercise DealerFlowCalculator edge cases and signal-scoring paths that combine the new features.
+- Extend automated regression coverage to exercise DealerFlowCalculator edge cases, signal-scoring paths that combine the new features, and the hardened execution/distribution workflows (fills, partial scale-outs, trailing-stop rebuilds).
+
+## Phase 6 – Execution & Distribution Hardening
+- **Notional-aware sizing** – `ExecutionManager.calculate_order_size` stores the computed dollar exposure on each signal and reruns `passes_risk_checks` after sizing so the 25 % buying-power guardrail applies to the true post-sizing notional. The notional is persisted with pending orders and positions for downstream reconciliation.【F:src/execution_manager.py†L840-L1593】
+- **Commission-normalized P&L** – All fills convert IBKR’s negative commissions into absolute costs before updating positions, metrics, and reconciliation outputs. Daily P&L scripts mirror the same convention so realized totals match broker statements exactly.【F:src/execution_manager.py†L115-L2065】【F:reconcile_daily_pnl.py†L85-L138】
+- **Resilient bracket workflow** – Trailing-stop updates tear down and recreate the entire OCA group, scale-outs pause active protection while partial fills route, and reduced positions immediately receive right-sized stops and targets, eliminating IBKR’s dual-side rejection.【F:src/position_manager.py†L70-L1140】【F:src/execution_manager.py†L828-L1593】
+- **Executed-only distribution** – Fills enqueue an enriched payload on `signals:distribution:pending`, and the distributor only fans out premium/basic/free messages once execution status is `FILLED`, preserving the 0s/60s/300s tier delays without leaking rejected signals.【F:src/execution_manager.py†L1333-L1593】【F:src/signal_distributor.py†L71-L229】【F:src/redis_keys.py†L55-L64】
 
 ### September 2025 Enhancements
 - Added neutral VPIN fallbacks so toxicity and sector summaries always have data, even during low-volume windows.【F:src/vpin_calculator.py†L52-L150】

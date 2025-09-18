@@ -56,6 +56,7 @@ PORTFOLIO_ANALYTICS_KEYS = {
 SIGNAL_KEYS = {
     'pending': 'signals:pending',                      # Pending signal queue
     'execution': 'signals:execution',                  # Dedicated execution queue
+    'distribution_pending': 'signals:distribution:pending',  # Executed signals awaiting tier fan-out
     'out': 'signals:out:{symbol}:{timestamp}',        # Published signal
     'latest': 'signals:latest:{symbol}',              # Latest signal per symbol
     'fingerprint': 'signals:fingerprint:{symbol}',    # Dedup fingerprint

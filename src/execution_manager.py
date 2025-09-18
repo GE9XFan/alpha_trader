@@ -112,6 +112,16 @@ class ExecutionManager:
             return ''
         return str(strategy).strip().upper()
 
+    @staticmethod
+    def _extract_commission(fill) -> float:
+        """Return the absolute commission cost for a fill."""
+        commission_report = getattr(fill, 'commissionReport', None)
+        raw = getattr(commission_report, 'commission', 0) if commission_report else 0
+        try:
+            return abs(float(raw or 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+
     # ------------------------------------------------------------------
     # Internal helpers for position reconciliation
     # ------------------------------------------------------------------
@@ -842,7 +852,7 @@ class ExecutionManager:
                     self._risk_manager = None
             return self._risk_manager
 
-    async def passes_risk_checks(self, signal: dict) -> bool:
+    async def passes_risk_checks(self, signal: dict, *, position_size_override: Optional[float] = None) -> bool:
         """
         Perform pre-trade risk checks.
 
@@ -858,9 +868,11 @@ class ExecutionManager:
 
             # Check buying power
             buying_power = float(await self.redis.get('account:buying_power') or 0)
-            position_size = signal.get('position_size', 0)
+            position_size = position_size_override
+            if position_size is None:
+                position_size = signal.get('position_size', 0)
 
-            if position_size > buying_power * 0.25:  # Max 25% of buying power
+            if position_size and position_size > buying_power * 0.25:  # Max 25% of buying power
                 self.logger.warning(f"Position size {position_size} exceeds 25% of buying power {buying_power}")
                 return False
 
@@ -931,6 +943,19 @@ class ExecutionManager:
                 self.logger.warning(f"Order size is 0 for {symbol}")
                 return
 
+            # Re-run notional-based risk gate now that we know the exposure
+            position_notional = signal.get('position_size')
+            if not await self.passes_risk_checks(signal, position_size_override=position_notional):
+                self.logger.warning(
+                    "Risk checks failed after sizing",
+                    extra={
+                        "action": "risk_block",
+                        "symbol": symbol,
+                        "position_notional": position_notional,
+                    },
+                )
+                return
+
             # Determine order type and price
             action = 'BUY' if side == 'LONG' else 'SELL'
 
@@ -971,6 +996,7 @@ class ExecutionManager:
                 'side': side,
                 'action': action,
                 'size': order_size,
+                'position_notional': signal.get('position_size'),
                 'order_type': order_type,
                 'confidence': confidence,
                 'strategy': strategy_code or strategy,
@@ -1152,6 +1178,7 @@ class ExecutionManager:
             # Cap at 25% of buying power
             max_position_size = buying_power * 0.25
             position_size = min(base_position_size, max_position_size)
+            signal['position_size'] = round(position_size, 2)
 
             if contract_type in {'option', 'options', 'opt'}:
                 # For options, calculate number of contracts
@@ -1181,8 +1208,11 @@ class ExecutionManager:
                         max_contracts = int(max_contracts * 0.75)
 
                     # Minimum 1 contract, maximum based on strategy
-                    return max(1, min(contracts, max_contracts))
+                    order_size = max(1, min(contracts, max_contracts))
+                    signal['order_size'] = order_size
+                    return order_size
                 else:
+                    signal['order_size'] = 1
                     return 1  # Default to 1 contract
 
             elif contract_type in {'stock', 'equity'}:
@@ -1198,8 +1228,10 @@ class ExecutionManager:
                     shares = int(position_size / stock_price)
                     # Round to nearest 100 for better liquidity
                     shares = max(100, (shares // 100) * 100)
+                    signal['order_size'] = shares
                     return shares
                 else:
+                    signal['order_size'] = 100
                     return 100  # Default to 100 shares
             else:
                 self.logger.warning(
@@ -1214,7 +1246,10 @@ class ExecutionManager:
 
                 if option_price > 0:
                     contracts = int(position_size / (option_price * 100))
-                    return max(1, contracts)
+                    order_size = max(1, contracts)
+                    signal['order_size'] = order_size
+                    return order_size
+                signal['order_size'] = 1
                 return 1
 
         except Exception as e:
@@ -1294,6 +1329,39 @@ class ExecutionManager:
             'avg_price': avg_price,
             'total': total_quantity,
         }
+
+    async def _enqueue_distribution_signal(
+        self,
+        signal: dict,
+        position: Dict[str, Any],
+        avg_price: float,
+        quantity: int,
+        total_commission: float,
+        executed_at: str,
+        order_id: int,
+    ) -> None:
+        """Push executed signal details into the downstream distribution queue."""
+        try:
+            payload = dict(signal)
+            payload['ts'] = payload.get('ts') or int(time.time() * 1000)
+            payload['position_id'] = position.get('id')
+            payload['position_notional'] = signal.get('position_size')
+            payload['stop_loss'] = position.get('stop_loss')
+            payload['targets'] = position.get('targets', [])
+            payload['execution'] = {
+                'status': 'FILLED',
+                'avg_fill_price': round(float(avg_price), 4),
+                'filled_quantity': int(quantity),
+                'commission': round(float(total_commission), 4),
+                'order_id': order_id,
+                'position_id': position.get('id'),
+                'executed_at': executed_at,
+                'notional': signal.get('position_size'),
+            }
+
+            await self.redis.lpush('signals:distribution:pending', json.dumps(payload))
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self.logger.error(f"Failed to enqueue distribution payload: {exc}")
 
     async def _escalate_timeout(self, order_id: int, trade, signal: dict, filled: float, timeout_seconds: int) -> None:
         """Alert and cancel an order that exceeded its monitoring window."""
@@ -1389,10 +1457,7 @@ class ExecutionManager:
             )
             avg_price = total_cost / total_quantity
 
-            total_commission = sum(
-                getattr(fill.commissionReport, 'commission', 0) if fill.commissionReport else 0
-                for fill in fills
-            )
+            total_commission = sum(self._extract_commission(fill) for fill in fills)
 
             last_fill_time = max((getattr(fill, 'time', None) for fill in fills if getattr(fill, 'time', None)), default=None)
             entry_time = last_fill_time.isoformat() if last_fill_time else datetime.utcnow().isoformat()
@@ -1477,6 +1542,8 @@ class ExecutionManager:
             position['reconciled'] = False
             position['ib_account'] = account
             position['ib_con_id'] = con_id
+            if signal.get('position_size') is not None:
+                position['position_notional'] = signal.get('position_size')
 
             # Store position in Redis
             await self.redis.set(redis_key, json.dumps(position))
@@ -1513,6 +1580,16 @@ class ExecutionManager:
                     "commission": round(total_commission, 4),
                     "position_id": position_id,
                 },
+            )
+
+            await self._enqueue_distribution_signal(
+                signal,
+                position,
+                avg_price,
+                total_quantity,
+                total_commission,
+                entry_time,
+                order_id,
             )
 
             # Store fill record
@@ -1839,7 +1916,7 @@ class ExecutionManager:
             commission = 0.0
             realized_override = None
             if fill.commissionReport:
-                commission = float(getattr(fill.commissionReport, 'commission', 0) or 0.0)
+                commission = self._extract_commission(fill)
                 realized_val = getattr(fill.commissionReport, 'realizedPNL', None)
                 if realized_val is not None:
                     realized_override = float(realized_val)
@@ -1919,7 +1996,7 @@ class ExecutionManager:
         commission = 0.0
         realized_override = None
         if fill.commissionReport:
-            commission = float(getattr(fill.commissionReport, 'commission', 0) or 0.0)
+            commission = self._extract_commission(fill)
             realized_val = getattr(fill.commissionReport, 'realizedPNL', None)
             if realized_val is not None:
                 realized_override = float(realized_val)
@@ -2074,7 +2151,7 @@ class ExecutionManager:
         Update fill metrics in Redis.
         """
         try:
-            commission = fill.commissionReport.commission if fill.commissionReport else 0
+            commission = self._extract_commission(fill)
             await self.redis.incrbyfloat('execution:commission:daily', commission)
             await self.redis.hincrby('execution:fills:by_symbol', fill.contract.symbol, 1)
         except Exception as e:

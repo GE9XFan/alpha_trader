@@ -110,7 +110,7 @@ def build_summaries(fills: List[Fill], contracts: Dict[int, Contract]) -> Tuple[
 
         rs = fill.commissionReport or None
         realized = float(getattr(rs, 'realizedPNL', 0.0) or 0.0)
-        commission = float(getattr(rs, 'commission', 0.0) or 0.0)
+        commission = abs(float(getattr(rs, 'commission', 0.0) or 0.0))
 
         summary.realized += realized
         summary.commission += commission

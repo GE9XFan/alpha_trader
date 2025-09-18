@@ -31,7 +31,7 @@ import time
 import logging
 from datetime import datetime
 import re
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 import pytz
 import redis.asyncio as aioredis
 from ib_insync import IB, Stock, Option, LimitOrder, MarketOrder, StopOrder
@@ -106,6 +106,221 @@ class PositionManager:
         members = await self.redis.scard(f'positions:by_symbol:{symbol}')
         if members == 0:
             await self.redis.delete(f'positions:by_symbol:{symbol}')
+
+    @staticmethod
+    def _normalize_strategy(strategy: Optional[str]) -> str:
+        return str(strategy).strip().upper() if strategy else ''
+
+    def _close_action(self, position: Dict[str, Any]) -> str:
+        side = (position.get('side') or '').upper()
+        return 'SELL' if side == 'LONG' else 'BUY'
+
+    def _find_trade_by_id(self, order_id: Optional[int]):
+        if order_id is None:
+            return None
+
+        for trade in self.stop_orders.values():
+            if trade and getattr(trade.order, 'orderId', None) == order_id:
+                return trade
+
+        for trades in self.target_orders.values():
+            for trade in trades:
+                if trade and getattr(trade.order, 'orderId', None) == order_id:
+                    return trade
+
+        for trade in self.ib.trades():
+            if getattr(trade.order, 'orderId', None) == order_id:
+                return trade
+
+        return None
+
+    async def _cancel_order_id(self, order_id: Optional[int]) -> None:
+        if order_id is None or not self.ib.isConnected():
+            return
+
+        trade = self._find_trade_by_id(order_id)
+        if not trade:
+            return
+
+        if trade.isDone():
+            return
+
+        try:
+            self.ib.cancelOrder(trade.order)
+        except Exception as cancel_error:
+            self.logger.error(f"Failed to cancel order {order_id}: {cancel_error}")
+
+    async def _cancel_stop_order(self, position: Dict[str, Any]) -> None:
+        position_id = position.get('id')
+        stop_order_id = position.get('stop_order_id')
+        await self._cancel_order_id(stop_order_id)
+        position['stop_order_id'] = None
+        if position_id in self.stop_orders:
+            self.stop_orders.pop(position_id, None)
+
+    async def _cancel_target_orders(self, position: Dict[str, Any]) -> None:
+        position_id = position.get('id')
+        target_ids = position.get('target_order_ids') or []
+        for order_id in target_ids:
+            await self._cancel_order_id(order_id)
+        position['target_order_ids'] = []
+        if position_id in self.target_orders:
+            self.target_orders.pop(position_id, None)
+
+    def _derive_stop_price(self, position: Dict[str, Any], entry_price: float) -> Optional[float]:
+        existing = position.get('stop_loss')
+        if existing is not None:
+            try:
+                return round(float(existing), 2)
+            except (TypeError, ValueError):
+                self.logger.debug("Invalid stored stop price for %s", position.get('id'))
+
+        strategy_code = self._normalize_strategy(position.get('strategy'))
+        side = (position.get('side') or '').upper()
+        if entry_price <= 0:
+            return None
+
+        if strategy_code == '0DTE':
+            return round(entry_price * (0.5 if side == 'LONG' else 1.5), 2)
+        if strategy_code == '1DTE':
+            return round(entry_price * (0.75 if side == 'LONG' else 1.25), 2)
+        return round(entry_price * (0.7 if side == 'LONG' else 1.3), 2)
+
+    def _prepare_target_allocations(
+        self,
+        position: Dict[str, Any],
+        quantity: int,
+        entry_price: float,
+        stop_price: float,
+    ) -> List[Tuple[int, float]]:
+        raw_targets = position.get('targets', []) or []
+        side = (position.get('side') or '').upper()
+
+        target_levels: List[float] = []
+        for target in raw_targets:
+            try:
+                target_levels.append(round(float(target), 2))
+            except (TypeError, ValueError):
+                continue
+
+        if not target_levels and entry_price:
+            if side == 'LONG':
+                target_levels.append(round(entry_price * 1.3, 2))
+            else:
+                target_levels.append(round(entry_price * 0.7, 2))
+
+        # Ensure targets maintain logical relationship with stop
+        if side == 'LONG':
+            target_levels = [tp for tp in target_levels if tp >= stop_price]
+        else:
+            target_levels = [tp for tp in target_levels if tp <= stop_price]
+
+        if not target_levels:
+            return []
+
+        # Current implementation fans out the first target for the full remaining quantity.
+        # A more advanced allocation can distribute across multiple targets.
+        return [(int(quantity), target_levels[0])]
+
+    async def _submit_stop_order(
+        self,
+        position: Dict[str, Any],
+        stop_price: float,
+        quantity: int,
+    ) -> Optional[Tuple[Any, str]]:
+        if quantity <= 0 or not self.ib.isConnected():
+            return None
+
+        ib_contract = await self._resolve_contract(position.get('contract'))
+        if not ib_contract:
+            return None
+
+        action = self._close_action(position)
+        oca_group = position.get('oca_group') or f"OCA_{position.get('id')}"
+
+        stop_order = StopOrder(action, int(quantity), stop_price)
+        stop_order.ocaGroup = oca_group
+        stop_order.ocaType = 1
+        stop_order.tif = 'GTC'
+
+        stop_trade = self.ib.placeOrder(ib_contract, stop_order)
+        self.stop_orders[position.get('id')] = stop_trade
+        return stop_trade, oca_group
+
+    async def _submit_target_orders(
+        self,
+        position: Dict[str, Any],
+        allocations: List[Tuple[int, float]],
+        oca_group: str,
+    ) -> List[Any]:
+        if not allocations or not self.ib.isConnected():
+            return []
+
+        ib_contract = await self._resolve_contract(position.get('contract'))
+        if not ib_contract:
+            return []
+
+        action = self._close_action(position)
+        trades: List[Any] = []
+        for qty, price in allocations:
+            if qty <= 0:
+                continue
+            limit_order = LimitOrder(action, int(qty), price)
+            limit_order.ocaGroup = oca_group
+            limit_order.ocaType = 1
+            limit_order.tif = 'GTC'
+            trade = self.ib.placeOrder(ib_contract, limit_order)
+            trades.append(trade)
+
+        position_id = position.get('id')
+        if trades:
+            self.target_orders[position_id] = trades
+        else:
+            self.target_orders.pop(position_id, None)
+        return trades
+
+    async def _place_bracket_orders(
+        self,
+        position: Dict[str, Any],
+        *,
+        quantity: Optional[int] = None,
+        stop_price: Optional[float] = None,
+    ) -> None:
+        qty = int(quantity if quantity is not None else position.get('quantity', 0) or 0)
+        if qty <= 0:
+            return
+
+        entry_price = float(position.get('entry_price', 0) or 0)
+        derived_stop = stop_price
+        if derived_stop is None:
+            derived_stop = self._derive_stop_price(position, entry_price)
+        if derived_stop is None:
+            self.logger.warning(
+                "Unable to determine stop price for position %s", position.get('id')
+            )
+            return
+
+        stop_price_rounded = round(float(derived_stop), 2)
+        result = await self._submit_stop_order(position, stop_price_rounded, qty)
+        if not result:
+            return
+
+        stop_trade, oca_group = result
+        position_id = position.get('id')
+        target_allocations = self._prepare_target_allocations(position, qty, entry_price, stop_price_rounded)
+        target_trades = await self._submit_target_orders(position, target_allocations, oca_group)
+
+        position['oca_group'] = oca_group
+        position['stop_order_id'] = stop_trade.order.orderId
+        position['stop_loss'] = stop_price_rounded
+        position['target_order_ids'] = [trade.order.orderId for trade in target_trades]
+
+        symbol = position.get('symbol')
+        if symbol:
+            await self.redis.set(
+                f'positions:open:{symbol}:{position_id}',
+                json.dumps(position)
+            )
 
     async def start(self):
         """
@@ -688,44 +903,33 @@ class PositionManager:
         Update stop loss order with IBKR.
         """
         try:
+            if new_stop is None or not self.ib.isConnected():
+                return
+
+            stop_price = round(float(new_stop), 2)
+            await self._cancel_stop_order(position)
+
+            quantity = int(position.get('quantity', 0) or 0)
+            if quantity <= 0:
+                return
+
+            result = await self._submit_stop_order(position, stop_price, quantity)
+            if not result:
+                return
+
+            stop_trade, oca_group = result
+
             position_id = position.get('id')
-            stop_order_id = position.get('stop_order_id')
+            position['stop_loss'] = stop_price
+            position['stop_order_id'] = stop_trade.order.orderId
+            position['oca_group'] = oca_group
 
-            if stop_order_id and self.ib.isConnected():
-                existing_trade = self.stop_orders.get(position_id)
-                if not existing_trade:
-                    existing_trade = next(
-                        (trade for trade in self.ib.trades() if trade.order.orderId == stop_order_id),
-                        None
-                    )
-
-                if existing_trade and not existing_trade.isDone():
-                    try:
-                        self.ib.cancelOrder(existing_trade.order)
-                    except Exception as cancel_error:
-                        self.logger.error(f"Failed to cancel old stop for {position_id}: {cancel_error}")
-
-                ib_contract = await self._resolve_contract(position.get('contract'))
-
-                if ib_contract:
-                    side = position.get('side')
-                    action = 'SELL' if side == 'LONG' else 'BUY'
-                    quantity = position.get('quantity')
-
-                    stop_order = StopOrder(action, quantity, new_stop)
-                    stop_trade = self.ib.placeOrder(ib_contract, stop_order)
-
-                    # Update tracking
-                    self.stop_orders[position_id] = stop_trade
-                    position['stop_loss'] = new_stop
-                    position['stop_order_id'] = stop_trade.order.orderId
-
-                    # Update in Redis
-                    symbol = position.get('symbol')
-                    await self.redis.set(
-                        f'positions:open:{symbol}:{position_id}',
-                        json.dumps(position)
-                    )
+            symbol = position.get('symbol')
+            if symbol:
+                await self.redis.set(
+                    f'positions:open:{symbol}:{position_id}',
+                    json.dumps(position)
+                )
 
         except Exception as e:
             self.logger.error(f"Error updating stop loss: {e}")
@@ -769,7 +973,7 @@ class PositionManager:
         try:
             position_id = position.get('id')
             symbol = position.get('symbol')
-            current_quantity = position.get('quantity', 0)
+            current_quantity = int(position.get('quantity', 0) or 0)
             side = position.get('side')
 
             # Scale percentages for each target
@@ -787,6 +991,10 @@ class PositionManager:
                 # Final target: close all
                 close_quantity = current_quantity
 
+            close_quantity = min(close_quantity, current_quantity)
+            if close_quantity <= 0 or current_quantity <= 0:
+                return
+
             # Don't scale if less than minimum
             contract_type = position.get('contract', {}).get('type', 'stock')
             if contract_type == 'option' and current_quantity < 3:
@@ -799,6 +1007,10 @@ class PositionManager:
             ib_contract = await self._resolve_contract(position.get('contract'))
 
             if ib_contract and self.ib.isConnected():
+                # Pause existing protective orders while we work the scale-out
+                await self._cancel_stop_order(position)
+                await self._cancel_target_orders(position)
+
                 action = 'SELL' if side == 'LONG' else 'BUY'
                 limit_price = round(float(target_price), 2)
                 order = LimitOrder(action, close_quantity, limit_price)
@@ -819,6 +1031,10 @@ class PositionManager:
                         fill_price,
                         f'Target {target_index + 1}'
                     )
+
+                    # Reestablish protective orders for the remaining size
+                    if position.get('quantity', 0) > 0:
+                        await self._place_bracket_orders(position)
                 else:
                     if not trade.isDone():
                         try:
@@ -830,6 +1046,8 @@ class PositionManager:
                     self.logger.info(
                         f"Scale-out limit order for {symbol} target {target_index + 1} timed out without fill"
                     )
+                    # Restore protection since the position size did not change
+                    await self._place_bracket_orders(position, quantity=current_quantity)
 
         except Exception as e:
             self.logger.error(f"Error scaling out position: {e}")
