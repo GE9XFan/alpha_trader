@@ -54,7 +54,11 @@ class VolatilityMetrics:
         self.yahoo_retry_count = 0
 
     async def update_vix1d(self) -> Dict[str, Any]:
-        value = await self._fetch_vix1d()
+        fetched = await self._fetch_vix1d()
+        if isinstance(fetched, tuple):
+            value, source = fetched
+        else:  # Backwards compatibility with monkeypatched helpers returning raw floats
+            value, source = fetched, None
         if value is None:
             cached = await self.redis.get(rkeys.analytics_vix1d_key())
             if cached:
@@ -64,27 +68,60 @@ class VolatilityMetrics:
                     pass
             return {'error': 'unavailable'}
 
-        history_stats, change_5m, change_1h, percentile = await self._update_history(value)
+        as_of = datetime.now(timezone.utc)
+        history_stats, change_5m, change_1h, percentile = await self._update_history(value, as_of.timestamp())
         regime = self._classify_regime(value, history_stats.get('zscore', 0.0), change_5m, change_1h)
 
-        payload = {
-            'timestamp': int(time.time() * 1000),
-            'as_of': datetime.now(timezone.utc).isoformat(),
-            'value': value,
-            'change_5m': change_5m,
-            'change_1h': change_1h,
-            'zscore': history_stats.get('zscore'),
-            'mean': history_stats.get('mean'),
-            'stdev': history_stats.get('stdev'),
-            'samples': history_stats.get('samples'),
-            'percentile': percentile,
-            'regime': regime,
-            'thresholds': {
-                'shock': self.shock_threshold,
-                'elevated': self.elevated_threshold,
-                'benign': self.benign_threshold,
-            },
-        }
+        payload = self._build_payload(
+            value=value,
+            history_stats=history_stats,
+            change_5m=change_5m,
+            change_1h=change_1h,
+            percentile=percentile,
+            regime=regime,
+            as_of=as_of,
+            source=source or 'auto',
+        )
+
+        await self.redis.setex(rkeys.analytics_vix1d_key(), self.ttl, json.dumps(payload))
+        return payload
+
+    async def ingest_manual(
+        self,
+        value: float,
+        *,
+        as_of: Optional[datetime] = None,
+        source: str = 'manual',
+    ) -> Dict[str, Any]:
+        """Persist an externally supplied VIX1D reading for backfills.
+
+        Args:
+            value: The VIX1D level to store.
+            as_of: Timestamp associated with the reading (defaults to current UTC time).
+            source: Label describing the upstream provider for auditing.
+
+        Returns:
+            The payload written to Redis, mirroring :meth:`update_vix1d`.
+        """
+
+        if as_of is None:
+            as_of = datetime.now(timezone.utc)
+        elif as_of.tzinfo is None:
+            as_of = as_of.replace(tzinfo=timezone.utc)
+
+        history_stats, change_5m, change_1h, percentile = await self._update_history(value, as_of.timestamp())
+        regime = self._classify_regime(value, history_stats.get('zscore', 0.0), change_5m, change_1h)
+
+        payload = self._build_payload(
+            value=value,
+            history_stats=history_stats,
+            change_5m=change_5m,
+            change_1h=change_1h,
+            percentile=percentile,
+            regime=regime,
+            as_of=as_of,
+            source=source,
+        )
 
         await self.redis.setex(rkeys.analytics_vix1d_key(), self.ttl, json.dumps(payload))
         return payload
@@ -100,7 +137,7 @@ class VolatilityMetrics:
             self.session = aiohttp.ClientSession(timeout=timeout)
         return self.session
 
-    async def _fetch_vix1d(self) -> Optional[float]:
+    async def _fetch_vix1d(self) -> Tuple[Optional[float], Optional[str]]:
         for source in self._ordered_sources():
             if source == 'cboe':
                 value = await self._fetch_vix1d_cboe()
@@ -113,10 +150,10 @@ class VolatilityMetrics:
 
             if value is not None:
                 self.logger.debug("VIX1D from %s: %.4f", source, value)
-                return value
+                return value, source
 
         self.logger.warning("VIX1D unavailable from configured sources")
-        return None
+        return None, None
 
     def _ordered_sources(self) -> List[str]:
         universe = ['cboe', 'ibkr', 'yahoo']
@@ -334,9 +371,14 @@ class VolatilityMetrics:
     async def _clear_yahoo_backoff_state(self) -> None:
         await self.redis.delete(self.yahoo_backoff_key)
 
-    async def _update_history(self, value: float) -> Tuple[Dict[str, float], float, float, float]:
+    async def _update_history(
+        self,
+        value: float,
+        timestamp: Optional[float] = None,
+    ) -> Tuple[Dict[str, float], float, float, float]:
         history_key = f"{rkeys.analytics_vix1d_key()}:history"
-        entry = json.dumps({'ts': int(time.time()), 'value': float(value)})
+        ts = int(timestamp if timestamp is not None else time.time())
+        entry = json.dumps({'ts': ts, 'value': float(value)})
 
         async with self.redis.pipeline(transaction=False) as pipe:
             await pipe.lpush(history_key, entry)
@@ -384,11 +426,43 @@ class VolatilityMetrics:
 
             percentile = sum(1 for v in values if v <= value) / len(values)
 
-            now = int(time.time())
+            now = int(timestamp if timestamp is not None else time.time())
             change_5m = self._compute_change(now, timestamps, values, 300, value)
             change_1h = self._compute_change(now, timestamps, values, 3600, value)
 
         return stats, change_5m, change_1h, percentile
+
+    def _build_payload(
+        self,
+        *,
+        value: float,
+        history_stats: Dict[str, float],
+        change_5m: float,
+        change_1h: float,
+        percentile: float,
+        regime: str,
+        as_of: datetime,
+        source: str,
+    ) -> Dict[str, Any]:
+        return {
+            'timestamp': int(as_of.timestamp() * 1000),
+            'as_of': as_of.isoformat(),
+            'value': value,
+            'change_5m': change_5m,
+            'change_1h': change_1h,
+            'zscore': history_stats.get('zscore'),
+            'mean': history_stats.get('mean'),
+            'stdev': history_stats.get('stdev'),
+            'samples': history_stats.get('samples'),
+            'percentile': percentile,
+            'regime': regime,
+            'source': source,
+            'thresholds': {
+                'shock': self.shock_threshold,
+                'elevated': self.elevated_threshold,
+                'benign': self.benign_threshold,
+            },
+        }
 
     def _compute_change(
         self,
