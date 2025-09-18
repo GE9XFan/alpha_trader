@@ -1,8 +1,27 @@
 # AlphaTrader Pro
 
+## Document Map
+- [Overview](#overview)
+- [Current Capabilities](#current-capabilities)
+  - [Platform Highlights](#platform-highlights)
+  - [Redis Architecture & Data Flow](#redis-architecture--data-flow)
+  - [Analytics Cadence & Aggregation](#analytics-cadence--aggregation)
+  - [Logging](#logging)
+  - [Setup & Operation](#setup--operation)
+  - [Repository Highlights](#repository-highlights)
+  - [Testing & Verification](#testing--verification)
+  - [Contributing](#contributing)
+- [Open Work](#open-work)
+  - [Community Publishing & Automation (In Planning)](#community-publishing--automation-in-planning)
+  - [Pending Integrations](#pending-integrations)
+
+## Overview
+
 AlphaTrader Pro is a Redis-centric institutional options trading platform that ingests real-time market structure, performs high-frequency analytics, generates contract-level signals, and coordinates execution, risk controls, and downstream distribution. The platform never routes equity orders—option selectors, signal emitters, and execution flows enforce normalized option payloads with validated strikes/expiries so the system remains strictly derivatives-only. Every production module exchanges state exclusively through Redis, allowing services to scale and recover independently while sharing a consistent data fabric.【F:src/main.py†L97-L192】【F:src/redis_keys.py†L1-L141】 The latest iteration decouples signal distribution from order intake by writing deduped payloads into dedicated `signals:execution` queues and wiring bracket-style stop/target management into the execution stack while keeping the emergency breaker fully async-safe.【F:src/signal_deduplication.py†L224-L262】【F:src/execution_manager.py†L256-L292】【F:src/execution_manager.py†L828-L972】【F:src/position_manager.py†L741-L773】【F:src/emergency_manager.py†L211-L279】
 
-## Platform Highlights
+## Current Capabilities
+
+### Platform Highlights
 - **Real-time market ingestion** – IBKR and Alpha Vantage feeds stream depth, trade prints, option chains, and sentiment with rate-limited retries and freshness telemetry written through the shared Redis schema.【F:src/ibkr_ingestion.py†L49-L748】【F:src/av_ingestion.py†L45-L493】【F:src/redis_keys.py†L8-L158】
 - **Dealer-flow analytics fabric** – `AnalyticsEngine` orchestrates VPIN, GEX/DEX, DealerFlowCalculator, FlowClusterModel, and VIX1D updates so Vanna/Charm hedging elasticity, trade-cluster labels, and volatility regimes land in the same Redis snapshots as legacy toxicity metrics and portfolio aggregates.【F:src/analytics_engine.py†L73-L220】【F:src/analytics_engine.py†L500-L660】【F:src/dealer_flow_calculator.py†L52-L206】【F:src/flow_clustering.py†L30-L199】【F:src/volatility_metrics.py†L19-L190】
 - **Dealer-aware signal scoring** – The default feature reader and DTE playbooks pull Vanna, Charm, hedging impact, skew, flow-cluster distributions, and VIX1D regimes into per-strategy confidence engines so contracts respect dealer balance and volatility state before emitting orders.【F:src/signal_generator.py†L542-L797】【F:src/dte_strategies.py†L68-L209】【F:src/dte_strategies.py†L391-L540】
@@ -16,26 +35,26 @@ AlphaTrader Pro is a Redis-centric institutional options trading platform that i
 - **Resilient emergency tooling** – Mass-cancel workflows now clear both pending and execution signal queues, persist cancellation metadata, and broadcast breaker state transitions through Redis pub/sub for operational awareness.【F:src/emergency_manager.py†L211-L319】
 - **Extended pattern detections** – Sweep alerts persist for 30 seconds and maintain velocity metadata so signal models can react to short-lived toxicity without re-deriving heuristics on every tick.【F:src/pattern_analyzer.py†L347-L354】
 
-## Recent Analytics Updates *(September 2025)*
+### Recent Analytics Updates *(September 2025)*
 - **Multi-source VIX1D ingestion** – `VolatilityMetrics` now prioritizes the CBOE daily CSV, caches history, falls back to IBKR snapshots, and throttles Yahoo retries with exponential backoff so volatility regimes remain populated even under rate limits.【F:src/volatility_metrics.py†L24-L222】【F:config/config.yaml†L127-L138】
 - **Correlation data parity** – Portfolio correlations pull the same 1-minute bar stream published by IBKR ingestion, preventing empty matrices when timeframe-suffixed keys are the only data available.【F:src/analytics_engine.py†L391-L420】【F:src/ibkr_ingestion.py†L583-L589】
 - **Dashboards aligned with Redis schema** – `analytics_data_viewer.py` now renders the dealer-flow totals, toxicity labels, and order-book stats actually stored in Redis, eliminating blank columns caused by legacy field names.
 - **VPIN resilience under sparse flow** – `VPINCalculator` writes a neutral snapshot whenever trade volume is insufficient or errors occur, ensuring toxicity pipelines, sector averages, and dashboards always have a baseline value.【F:src/vpin_calculator.py†L52-L150】
 - **Longer-lived flow clustering metrics** – Flow-cluster TTLs scale with the configured interval so sector aggregates retain momentum/hedging probabilities between refreshes without data gaps.【F:src/flow_clustering.py†L37-L78】【F:config/config.yaml†L139-L141】
 
-## Dealer Flow & Regime Analytics
+### Dealer Flow & Regime Analytics
 `AnalyticsEngine` now runs on a unified cadence that loads DealerFlowCalculator, FlowClusterModel, and VolatilityMetrics alongside legacy VPIN/GEX calculators so every symbol snapshot carries Vanna- and Charm-derived hedging pressure, 0DTE skew, participant mix, and VIX1D context before the aggregator rolls them into sector and portfolio summaries.【F:src/analytics_engine.py†L73-L220】【F:src/analytics_engine.py†L500-L660】【F:src/dealer_flow_calculator.py†L52-L206】【F:src/flow_clustering.py†L30-L199】【F:src/volatility_metrics.py†L19-L190】 These metrics are persisted under dedicated Redis namespaces (`analytics:dealer:*`, `analytics:flow_clusters:*`, `analytics:volatility:vix1d`) defined in `redis_keys.py` and governed by configurable TTLs in `config.yaml` so downstream services consume a single, normalized schema.【F:src/redis_keys.py†L37-L127】【F:config/config.yaml†L84-L141】
 
 DealerFlowCalculator computes option-chain Vanna, Charm, hedging elasticity, and 0DTE skew with rolling z-scores so strategies can judge how aggressively dealers must hedge near-dated strikes.【F:src/dealer_flow_calculator.py†L75-L206】 FlowClusterModel ingests the latest trade prints, clusters flow into momentum/mean-reversion/hedging archetypes, and publishes participant distributions for each symbol.【F:src/flow_clustering.py†L48-L199】 VolatilityMetrics fetches VIX1D directly from Yahoo Finance, maintains rolling history, and classifies regimes (`NORMAL`, `ELEVATED`, `SHOCK`, etc.) that feed both analytics snapshots and strategy scoring.【F:src/volatility_metrics.py†L45-L190】 The default feature reader and DTE confidence engines consume these payloads to weight dealer congestion, volatility regime, and flow bias before emitting orders, ensuring execution only fires when the broader dealer and volatility backdrop cooperates.【F:src/signal_generator.py†L542-L797】【F:src/dte_strategies.py†L391-L540】
 
-## Quick Start
+### Quick Start
 1. Install dependencies with a Python 3.10+ environment: `pip install -r requirements.txt` (optional extras remain commented).【F:requirements.txt†L1-L64】
 2. Configure Redis, IBKR, and module toggles in `config/config.yaml`, replacing `${VAR}` placeholders through environment variables or a `.env` file consumed by the orchestrator.【F:config/config.yaml†L1-L160】【F:src/main.py†L43-L109】
 3. Ensure Redis and IBKR TWS/Gateway are running, then launch the coordinator via `python main.py` to start enabled modules in dependency order.【F:src/main.py†L140-L206】
 4. Use `pytest -k managers` or targeted suites once a test Redis instance is available; full test runs require Redis and optional IBKR/Alpha Vantage fakes to satisfy external dependencies.【F:tests/test_managers.py†L1-L253】【F:tests/test_analytics_engine.py†L1-L216】
 5. Reference `implementation_plan.md` for module readiness, roadmap priorities, and outstanding TODO inventories before enabling optional services.【F:implementation_plan.md†L1-L100】
 
-## Module Topology
+### Module Topology
 The original monolith has been reorganized into 30 focused modules grouped by responsibility. Line counts reflect the current implementation.
 
 ### Data Ingestion
@@ -102,7 +121,7 @@ These modules are scaffolding-heavy and require additional API credentials.
 | `news_analyzer.py` | 318 | `ScheduledTasks` | Coordinates scheduled jobs, news summaries, and archival tasks; placeholders for real integrations.【F:src/news_analyzer.py†L25-L260】 |
 | `report_generator.py` | 97 | `DataArchiver` | Archives historical data sets and produces daily reports using Redis snapshots.【F:src/report_generator.py†L25-L189】 |
 
-## Redis Architecture & Data Flow
+### Redis Architecture & Data Flow
 All modules share a single Redis schema defined in `redis_keys.py`, which standardizes market data, analytics metrics, portfolio/sector summaries, order/position keys, and TTL policies.【F:src/redis_keys.py†L25-L205】 Typed helper functions (`get_market_key`, `get_options_key`, `get_signal_key`, `get_system_key`, `get_portfolio_key`, etc.) now replace the legacy `Keys` class, so ingestion, analytics, and signal pipelines construct canonical keys through validated call sites while preserving compatibility with existing Redis namespaces.【F:src/redis_keys.py†L25-L205】【F:src/ibkr_ingestion.py†L623-L698】【F:src/signal_generator.py†L138-L403】
 
 ```
@@ -139,29 +158,20 @@ Each box consumes and publishes Redis keys only; orchestration (`main.py`) wires
 
 Signals published by the dedupe helper now land in both `signals:pending:{symbol}` and `signals:execution:{symbol}` queues so downstream distribution and execution loops progress independently; `SignalDistributor` drains the pending lists for customer delivery while `ExecutionManager` polls the execution lists to stage bracket orders without waiting on distribution throughput.【F:src/signal_deduplication.py†L224-L262】【F:src/execution_manager.py†L256-L292】
 
-## Community Publishing & Automation (In Planning)
-Social distribution, dashboards, and morning automation each ship with scaffolded classes that already accept the shared configuration and Redis handle, but their TODO blocks must be completed before public launch:
 
-- **TwitterBot & SocialMediaAnalytics** – Wire up credential loading, Tweepy clients, posting loops, and engagement tracking so winning trades, teasers, and daily summaries reach external audiences while analytics land back in Redis.【F:src/twitter_bot.py†L25-L206】
-- **DiscordBot** – Finish the webhook session, embed formatting, and queue draining to mirror the premium/basic tiers with delivery/error metrics tracked for dashboards.【F:src/discord_bot.py†L25-L141】
-- **TelegramBot** – Implement command handlers, Stripe subscription flow, tier-aware formatting, and delayed distribution across premium/basic/free channels.【F:src/telegram_bot.py†L25-L218】
-- **Dashboard services** – Populate FastAPI routes, WebSocket broadcasting, log aggregation, alert management, and performance chart generation so operators (and community members) get a real-time control surface.【F:src/dashboard_server.py†L25-L220】【F:src/dashboard_routes.py†L25-L184】【F:src/dashboard_websocket.py†L1-L70】
-- **MorningScanner** – Complete the GPT-4 workflow that gathers overnight data, options positioning, economic events, and distributes the resulting analysis to premium feeds and social teasers.【F:src/morning_scanner.py†L25-L220】
-- **ReportGenerator & MetricsCollector** – Turn the archival, cleanup, and monitoring TODOs into live services so historical exports and dashboard metrics stay fresh.【F:src/report_generator.py†L25-L120】【F:src/dashboard_server.py†L166-L220】
-
-## Analytics Cadence & Aggregation
+### Analytics Cadence & Aggregation
 - **Cadence-aware scheduler** – `AnalyticsEngine` coordinates VPIN, GEX/DEX, and pattern analyzers on configurable intervals, gating execution outside RTH windows and surfacing idle/running state via module heartbeats.【F:src/analytics_engine.py†L400-L556】
 - **Portfolio & sector rollups** – `MetricsAggregator` composes symbol snapshots into `analytics:portfolio:summary`, `analytics:sector:{sector}`, and correlation matrices with TTLs enforced through the schema helpers.【F:src/analytics_engine.py†L35-L205】【F:src/redis_keys.py†L25-L304】
 - **Config-driven controls** – `config/config.yaml` exposes analytics TTLs, update cadences, and sector mappings so operators can tune schedules without code changes.【F:config/config.yaml†L84-L115】
 - **Canonical calculator outputs** – VPIN, GEX/DEX, and pattern analyzers now publish into the canonical `analytics:{symbol}:*` keys via the shared helper layer, aligning all downstream consumers.【F:src/vpin_calculator.py†L31-L144】【F:src/gex_dex_calculator.py†L1-L514】【F:src/pattern_analyzer.py†L1-L460】
 
-## Logging
+### Logging
 - **Structured JSON output** – All modules now emit structured records through `logging_utils.StructuredFormatter`, adding `component`, `subsystem`, and action metadata to every line in `logs/alphatrader.log` for easier searching and ingestion.【F:src/logging_utils.py†L18-L189】【F:main.py†L29-L53】【F:src/analytics_engine.py†L31-L117】【F:src/ibkr_ingestion.py†L40-L215】
 - **Console-friendly view** – Terminal output now renders a compact, color-free key/value line per event while the rotating file handler keeps full JSON payloads for downstream ingestion.【F:src/logging_utils.py†L95-L189】
 - **Centralised configuration** – Logging options (level, rotation, console mirroring) continue to live under the `logging` block in `config/config.yaml`; updating the file and restarting applies without code edits.【F:config/config.yaml†L393-L402】【F:src/logging_utils.py†L120-L189】
 - **Context adapters** – `get_logger` wraps the standard library logger with a context adapter so subsystems automatically annotate events without repeating boilerplate everywhere.【F:src/logging_utils.py†L170-L189】【F:src/signal_generator.py†L46-L181】【F:src/av_ingestion.py†L32-L237】
 
-## Signal Engine Enhancements
+### Signal Engine Enhancements
 - **Dependency-injected strategies** – `SignalGenerator` resolves 0DTE/1DTE/14DTE and MOC handlers through injectable factories, shares a pluggable feature reader, and backs off automatically on repeated failures to protect downstream services.【F:src/signal_generator.py†L51-L209】
 - **Normalized feature payloads** – `DTEFeatureSet` guarantees typed defaults (price, VPIN, gamma, imbalance, flows) before strategies score opportunities, avoiding missing-key crashes and aligning analytics expectations.【F:src/dte_strategies.py†L13-L218】
 - **Options-only contract normalization** – 0/1/14DTE and MOC selectors emit OCC symbols, validated strikes, and IBKR-formatted expiries using the shared option helpers so downstream dedupe/execution never receive stock orders.【F:src/dte_strategies.py†L13-L218】【F:src/moc_strategy.py†L61-L304】【F:src/option_utils.py†L1-L104】
@@ -172,7 +182,7 @@ Social distribution, dashboards, and morning automation each ship with scaffolde
 - **Execution queue fan-out** – Deduped emits now land in both `signals:pending:{symbol}` (for distribution) and `signals:execution:{symbol}` so IBKR routing remains responsive even when downstream customer queues are backlogged.【F:src/signal_deduplication.py†L224-L262】【F:src/execution_manager.py†L256-L292】【F:src/redis_keys.py†L47-L54】
 - **Performance telemetry** – `PerformanceTracker` tallies win/loss counts, equity curves, drawdowns, and daily PnL so strategies can be reviewed without exporting raw fills.【F:src/signal_performance.py†L25-L181】
 
-## Contract-Centric Deduplication
+### Contract-Centric Deduplication
 Signal deduplication was hardened to guarantee idempotency and multi-worker safety:
 - **Stable fingerprints**: `contract_fingerprint` hashes symbol, strategy, expiry, strike, multiplier, and venue into a deterministic key (`sigfp:<hash>`).【F:src/signal_deduplication.py†L21-L47】
 - **Trading-day buckets**: `trading_day_bucket` aligns IDs to the NYSE session instead of UTC to survive overnight trading.【F:src/signal_deduplication.py†L49-L63】
@@ -181,22 +191,22 @@ Signal deduplication was hardened to guarantee idempotency and multi-worker safe
 - **Performance**: The Day-6 hardening achieved 95.2% duplicate suppression with zero race-condition duplicates in backtesting.【F:DEDUPLICATION_CHANGES.md.archived†L1-L85】
 - **Dedicated execution queues**: The Lua script pushes accepted payloads into both pending and execution lists so distribution, dedupe, and IBKR consumers remain decoupled while honoring cooldown semantics.【F:src/signal_deduplication.py†L224-L262】【F:src/execution_manager.py†L256-L292】
 
-## Pattern-Based Toxicity Analytics
+### Pattern-Based Toxicity Analytics
 Because IBKR does not expose market-maker identities, toxicity detection blends VPIN, venue heuristics, trade-size patterns, and order-book imbalance volatility. Suggested scoring weights and venue toxicity tables are documented for further tuning.【F:toxicity_approach.md.archived†L1-L78】 Parameter discovery applies these heuristics during pattern analysis, leveraging odd-lot ratios, sweep detection, and book variance to label flow without requiring dark-pool attribution.【F:src/parameter_discovery.py†L200-L330】【F:toxicity_approach.md.archived†L34-L58】 Sweep detections now persist for 30 seconds in `analytics:{symbol}:sweep`, allowing downstream strategies to respond to bursts of aggressive flow without recomputing heuristics every tick.【F:src/pattern_analyzer.py†L293-L354】
 
-## Installation & Setup
+### Installation & Setup
 1. **Python environment** – Use Python 3.10+ and install core dependencies: `pip install -r requirements.txt`. Optional extras (FastAPI, Discord, Tweepy, OpenAI, etc.) are listed but commented for feature-based installation.【F:requirements.txt†L1-L40】【F:requirements.txt†L40-L64】
 2. **Redis** – Configure Redis using `config/redis.conf` or a managed instance, then update host/port in `config/config.yaml` if needed.【F:config/config.yaml†L12-L21】
 3. **Credentials** – Provide environment variables such as `ALPHA_VANTAGE_API_KEY` before launching; `main.py` loads `.env` and substitutes `${VAR}` placeholders automatically.【F:config/config.yaml†L41-L50】【F:src/main.py†L43-L82】
 4. **Run the orchestrator** – Execute `python main.py` to initialize modules based on configuration flags. Modules marked disabled in `config/config.yaml` will be skipped until ready.【F:config/config.yaml†L58-L160】【F:src/main.py†L97-L192】
 
-## Market Data Enhancements
+### Market Data Enhancements
 - **IBKR normalization & freshness telemetry** – `IBKRIngestion` now routes every depth, trade, and quote update through `IBKRDataProcessor`, which caches DOM snapshots, aggregated top-of-book payloads, and trade buffers for reuse in downstream writers and tests. Staleness and metrics loops surface gaps via Redis so operators can alert before analytics drift.【F:src/ibkr_processor.py†L53-L219】【F:src/ibkr_ingestion.py†L68-L210】【F:src/ibkr_ingestion.py†L560-L748】
 - **Alpha Vantage resilience** – The ingestion loop reuses long-lived option and sentiment processors, wraps fetches in jittered exponential retries, and applies per-symbol/per-feed circuit breakers that back off noisy endpoints while continuing healthy ones. Rolling-window rate limiter stats are exposed for real-time capacity tracking.【F:src/av_ingestion.py†L76-L493】
 - **Option-chain instrumentation** – `OptionsProcessor` emits normalized payloads with expiration summaries, per-contract metadata, and monitoring counters before fanning out optional callbacks over the configurable pub/sub channel (default `events:options:chain`).【F:src/av_options.py†L64-L321】【F:config/config.yaml†L41-L92】
 - **Sentiment & technical metadata** – `SentimentProcessor` respects configurable ETF skip lists, fetches RSI/MACD/BBANDS/ATR in parallel, and stores rich monitoring payloads that capture freshness, article mix, and technical readings for dashboards.【F:src/av_sentiment.py†L29-L339】
 
-## Execution & Risk Enhancements
+### Execution & Risk Enhancements
 - **Shared risk manager cache** – `ExecutionManager` lazily instantiates a shared `RiskManager` via async factory injection so correlation checks reuse a single instance while falling back to on-demand construction when needed.【F:src/execution_manager.py†L59-L312】
 - **Notional-aware sizing & guards** – Order sizing records the computed dollar exposure on each signal, reruns risk checks post-sizing, and persists the notional alongside fills so daily risk and reconciliation reports stay in sync.【F:src/execution_manager.py†L840-L1593】
 - **Commission-normalized P&L** – All fills convert the broker’s negative commission values into absolute costs, ensuring on-ledger P&L and daily reconciliation figures remain accurate to the cent across entry, stop, and scale-out events.【F:src/execution_manager.py†L115-2065】【F:reconcile_daily_pnl.py†L85-L138】
@@ -208,7 +218,7 @@ Because IBKR does not expose market-maker identities, toxicity detection blends 
 - **Structured risk snapshots** – Dataclass-backed VaR and drawdown snapshots flow through `RiskManager`, which aggregates portfolio Greeks, enforces correlation halts, and emits summarized metrics for dashboards and consumers.【F:src/risk_manager.py†L57-L350】
 - **Emergency drain coverage** – `EmergencyManager` drains pending and execution signal queues alongside orders, archives cancel metadata, and toggles breaker state via async Redis primitives before triggering alerts and halts.【F:src/emergency_manager.py†L80-L279】【F:src/emergency_manager.py†L262-L274】
 
-## Telemetry & Monitoring
+### Telemetry & Monitoring
 - `monitoring:ibkr:metrics` – Aggregated IBKR update counts, reconnect attempts, and stale symbol flags refreshed every 10 seconds in lockstep with the ingestion heartbeat.【F:src/ibkr_ingestion.py†L718-L766】
 - `monitoring:data:stale` – Symbol→age hash populated when market data exceeds freshness thresholds, cleared outside market hours or once feeds recover.【F:src/ibkr_ingestion.py†L588-L645】
 - `monitoring:alpha_vantage:metrics` – RollingRateLimiter token levels, average wait times, and circuit-breaker suspensions exported for Alpha Vantage fetch loops.【F:src/av_ingestion.py†L440-L493】
@@ -228,5 +238,26 @@ Because IBKR does not expose market-maker identities, toxicity detection blends 
 
 - **Testing update** – `pytest` remains the primary harness (`python3 -m pytest`), but older day-based suites still import legacy packages such as `src.signals`. Run targeted modules (e.g., `tests/test_analytics_engine.py`) or provide the missing legacy modules when executing the full suite to avoid collection failures like the `ModuleNotFoundError: src.signals` observed on `tests/test_day6.py`.【F:tests/test_day6.py†L18-L36】
 
-## Roadmap Snapshot
+## Open Work
+
+### Community Publishing & Automation (In Planning)
+Social distribution, dashboards, and morning automation each ship with scaffolded classes that already accept the shared configuration and Redis handle, but their TODO blocks must be completed before public launch:
+
+- **TwitterBot & SocialMediaAnalytics** – Wire up credential loading, Tweepy clients, posting loops, and engagement tracking so winning trades, teasers, and daily summaries reach external audiences while analytics land back in Redis.【F:src/twitter_bot.py†L25-L206】
+- **DiscordBot** – Finish the webhook session, embed formatting, and queue draining to mirror the premium/basic tiers with delivery/error metrics tracked for dashboards.【F:src/discord_bot.py†L25-L141】
+- **TelegramBot** – Implement command handlers, Stripe subscription flow, tier-aware formatting, and delayed distribution across premium/basic/free channels.【F:src/telegram_bot.py†L25-L218】
+- **Dashboard services** – Populate FastAPI routes, WebSocket broadcasting, log aggregation, alert management, and performance chart generation so operators (and community members) get a real-time control surface.【F:src/dashboard_server.py†L25-L220】【F:src/dashboard_routes.py†L25-L184】【F:src/dashboard_websocket.py†L1-L70】
+- **MorningScanner** – Complete the GPT-4 workflow that gathers overnight data, options positioning, economic events, and distributes the resulting analysis to premium feeds and social teasers.【F:src/morning_scanner.py†L25-L220】
+- **ReportGenerator & MetricsCollector** – Turn the archival, cleanup, and monitoring TODOs into live services so historical exports and dashboard metrics stay fresh.【F:src/report_generator.py†L25-L120】【F:src/dashboard_server.py†L166-L220】
+
+### Pending Integrations
+- [`src/twitter_bot.py`](src/twitter_bot.py)
+- [`src/discord_bot.py`](src/discord_bot.py)
+- [`src/telegram_bot.py`](src/telegram_bot.py)
+- [`src/dashboard_server.py`](src/dashboard_server.py), [`src/dashboard_routes.py`](src/dashboard_routes.py), [`src/dashboard_websocket.py`](src/dashboard_websocket.py)
+- [`src/morning_scanner.py`](src/morning_scanner.py)
+- [`src/news_analyzer.py`](src/news_analyzer.py)
+- [`src/report_generator.py`](src/report_generator.py)
+
+### Roadmap Snapshot
 Implementation priorities are tracked in `implementation_plan.md`, including module completion percentages, outstanding TODO counts, and integration milestones across execution, social, and dashboard pillars.【F:implementation_plan.md†L1-L40】 Refer to that document before beginning new work to understand dependencies and sequencing.
