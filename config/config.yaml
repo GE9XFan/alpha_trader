@@ -59,7 +59,7 @@ alpha_vantage:
 # Symbols configuration
 symbols:
   level2: ["SPY", "QQQ", "IWM"]
-  standard: ["AAPL", "TSLA", "NVDA", "AMD", "GOOGL", "META", "AMZN", "MSFT", "VXX"]
+  standard: ["AAPL", "TSLA", "NVDA", "AMD", "GOOGL", "META", "AMZN", "MSFT", "PLTR", "VXX"]
 
 # Modules configuration
 modules:
@@ -103,6 +103,8 @@ modules:
       dealer_flows: 60
       flow_clustering: 90
       volatility: 60
+      moc: 30
+      unusual_activity: 60
     sector_map:
       SPY: INDEX
       QQQ: TECH

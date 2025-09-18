@@ -20,7 +20,7 @@ import redis.asyncio as aioredis
 import time
 import asyncio
 import pytz
-from datetime import datetime, time as datetime_time
+from datetime import datetime, time as datetime_time, timedelta
 from typing import Dict, List, Any, Optional
 from collections import defaultdict
 import traceback
@@ -491,6 +491,8 @@ class AnalyticsEngine:
             'dealer_flows': 60,
             'flow_clustering': 90,
             'volatility': 60,
+            'moc': 30,
+            'unusual_activity': 60,
         }
         configured_intervals = analytics_cfg.get('update_intervals', {})
         self.update_intervals = {**default_intervals, **configured_intervals}
@@ -643,6 +645,12 @@ class AnalyticsEngine:
                 await self.aggregator.calculate_cross_asset_correlations()
                 return True
 
+            elif calc_type == 'moc':
+                tasks = [self._calculate_moc_metrics(symbol) for symbol in self.symbols]
+
+            elif calc_type == 'unusual_activity':
+                tasks = [self._calculate_unusual_activity(symbol) for symbol in self.symbols]
+
             if not tasks:
                 return True
 
@@ -664,6 +672,342 @@ class AnalyticsEngine:
             self.logger.error(f"Failed to execute {calc_type}: {exc}")
             self.logger.error(traceback.format_exc())
             return False
+
+    async def _calculate_moc_metrics(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Estimate closing auction imbalance metrics for MOC strategies."""
+
+        ttl = int(self.ttls.get('analytics', get_ttl('analytics')))
+
+        async with self.redis.pipeline(transaction=False) as pipe:
+            pipe.get(rkeys.market_ticker_key(symbol))
+            pipe.get(rkeys.market_book_key(symbol))
+            pipe.get(rkeys.analytics_obi_key(symbol))
+            pipe.lrange(rkeys.market_bars_key(symbol, '1min'), -60, -1)
+            pipe.get(rkeys.analytics_gex_key(symbol))
+            ticker_raw, book_raw, obi_raw, bars_raw, gex_raw = await pipe.execute()
+
+        def _decode(value: Any) -> Any:
+            if value is None:
+                return None
+            if isinstance(value, bytes):
+                value = value.decode('utf-8', errors='ignore')
+            if isinstance(value, str):
+                try:
+                    return json.loads(value)
+                except json.JSONDecodeError:
+                    return None
+            return value
+
+        def _to_float(value: Any, default: float = 0.0) -> float:
+            try:
+                if value is None:
+                    return float(default)
+                return float(value)
+            except (TypeError, ValueError):
+                return float(default)
+
+        ticker = _decode(ticker_raw) or {}
+        book = _decode(book_raw) or {}
+        obi_data = _decode(obi_raw) or {}
+        gex_data = _decode(gex_raw) or {}
+
+        bars: List[Dict[str, Any]] = []
+        if isinstance(bars_raw, list):
+            for entry in bars_raw:
+                parsed = _decode(entry)
+                if isinstance(parsed, dict):
+                    bars.append(parsed)
+
+        price_candidates = [
+            ticker.get('mid'),
+            ticker.get('last'),
+            ticker.get('close'),
+            ticker.get('price'),
+        ]
+        mid_price = 0.0
+        for candidate in price_candidates:
+            mid_price = _to_float(candidate, 0.0)
+            if mid_price > 0:
+                break
+
+        bids = book.get('bids') if isinstance(book, dict) else None
+        asks = book.get('asks') if isinstance(book, dict) else None
+        best_bid = _to_float(bids[0].get('price')) if bids else 0.0
+        best_ask = _to_float(asks[0].get('price')) if asks else 0.0
+        if mid_price <= 0 and best_bid > 0 and best_ask > 0:
+            mid_price = (best_bid + best_ask) / 2.0
+
+        if mid_price <= 0:
+            return None
+
+        volume_window = 0.0
+        for bar in bars:
+            volume_window += max(_to_float(bar.get('volume')), 0.0)
+
+        if volume_window <= 0:
+            volume_window = max(_to_float(ticker.get('volume')), 0.0)
+
+        now = datetime.now(self.market_tz)
+        close_time = now.replace(hour=16, minute=0, second=0, microsecond=0)
+        if now >= close_time:
+            close_time += timedelta(days=1)
+        minutes_to_close = max((close_time - now).total_seconds() / 60.0, 1.0)
+
+        time_factor = min(max(1.0, 45.0 / minutes_to_close), 12.0)
+        projected_volume = volume_window * time_factor
+
+        level5 = _to_float(obi_data.get('level5_imbalance'), 0.0)
+        imbalance_strength = max(0.0, min(abs(level5) * 1.5, 1.0))
+        if imbalance_strength < 0.05:
+            imbalance_side = 'FLAT'
+        else:
+            imbalance_side = 'BUY' if level5 > 0 else 'SELL'
+
+        total_gex = _to_float(gex_data.get('total_gex'))
+        gamma_factor = 1.0 + min(abs(total_gex) / 1e9, 1.5) * 0.25 if total_gex else 1.0
+
+        notional_base = projected_volume * mid_price
+        imbalance_total = max(0.0, notional_base * imbalance_strength * gamma_factor)
+        paired_notional = 0.0
+        if notional_base > 0:
+            residual = max(notional_base * (1.0 - imbalance_strength * 0.9), 0.0)
+            paired_notional = max(residual, notional_base * 0.15)
+
+        denom = imbalance_total + paired_notional
+        imbalance_ratio = (imbalance_total / denom) if denom > 0 else 0.0
+
+        indicative_price = _to_float(obi_data.get('micro_price'), 0.0)
+        if indicative_price <= 0:
+            indicative_price = (best_bid + best_ask) / 2.0 if best_bid > 0 and best_ask > 0 else mid_price
+
+        near_close_offset_bps = 0.0
+        if mid_price > 0 and indicative_price > 0:
+            near_close_offset_bps = ((indicative_price - mid_price) / mid_price) * 10000.0
+
+        payload = {
+            'symbol': symbol,
+            'timestamp': time.time(),
+            'imbalance_total': float(imbalance_total),
+            'imbalance_ratio': float(imbalance_ratio),
+            'imbalance_side': imbalance_side,
+            'imbalance_paired': float(max(paired_notional, 0.0)),
+            'indicative_price': float(indicative_price),
+            'near_close_offset_bps': float(near_close_offset_bps),
+            'projected_volume_shares': float(projected_volume),
+            'window_volume_shares': float(volume_window),
+            'minutes_to_close': float(minutes_to_close),
+            'level5_imbalance': float(level5),
+            'gamma_factor': float(gamma_factor),
+        }
+
+        await self.redis.setex(
+            rkeys.analytics_metric_key(symbol, 'moc'),
+            ttl,
+            json.dumps(payload)
+        )
+
+        if imbalance_total >= 1e9:
+            self.logger.debug(
+                "MOC imbalance computed",
+                extra={
+                    'symbol': symbol,
+                    'imbalance_total': imbalance_total,
+                    'imbalance_ratio': imbalance_ratio,
+                    'projected_volume': projected_volume,
+                },
+            )
+
+        return payload
+
+    async def _calculate_unusual_activity(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Score options chain activity for unusual flow detection."""
+
+        ttl = int(self.ttls.get('analytics', get_ttl('analytics')))
+
+        async with self.redis.pipeline(transaction=False) as pipe:
+            pipe.get(rkeys.options_chain_key(symbol))
+            pipe.get(rkeys.market_ticker_key(symbol))
+            chain_raw, ticker_raw = await pipe.execute()
+
+        def _decode(value: Any) -> Any:
+            if value is None:
+                return None
+            if isinstance(value, bytes):
+                value = value.decode('utf-8', errors='ignore')
+            if isinstance(value, str):
+                try:
+                    return json.loads(value)
+                except json.JSONDecodeError:
+                    return None
+            return value
+
+        def _to_float(value: Any, default: float = 0.0) -> float:
+            try:
+                if value is None:
+                    return float(default)
+                return float(value)
+            except (TypeError, ValueError):
+                return float(default)
+
+        chain = _decode(chain_raw) or {}
+        contracts_iter: List[Dict[str, Any]] = []
+        if isinstance(chain, dict):
+            if isinstance(chain.get('by_contract'), dict):
+                contracts_iter = [c for c in chain['by_contract'].values() if isinstance(c, dict)]
+            elif isinstance(chain.get('raw'), list):
+                contracts_iter = [c for c in chain['raw'] if isinstance(c, dict)]
+
+        ticker = _decode(ticker_raw) or {}
+        spot_price = 0.0
+        for candidate in (ticker.get('mid'), ticker.get('last'), ticker.get('close'), ticker.get('price')):
+            spot_price = _to_float(candidate, 0.0)
+            if spot_price > 0:
+                break
+
+        if not contracts_iter:
+            payload = {
+                'symbol': symbol,
+                'score': 0.0,
+                'classification': 'absent',
+                'timestamp': time.time(),
+            }
+            await self.redis.setex(
+                rkeys.analytics_metric_key(symbol, 'unusual'),
+                ttl,
+                json.dumps(payload)
+            )
+            return payload
+
+        total_volume = 0.0
+        total_open_interest = 0.0
+        max_ratio = 0.0
+        high_ratio_count = 0
+        high_notional_count = 0
+        call_volume = 0.0
+        put_volume = 0.0
+
+        for contract in contracts_iter:
+            volume = max(_to_float(contract.get('volume')), 0.0)
+            open_interest = max(_to_float(contract.get('open_interest')), 0.0)
+            if volume <= 0 and open_interest <= 0:
+                continue
+
+            total_volume += volume
+            total_open_interest += open_interest
+
+            ratio = volume / max(open_interest, 1.0)
+            max_ratio = max(max_ratio, ratio)
+            if ratio >= 1.0:
+                high_ratio_count += 1
+
+            mark_price = _to_float(contract.get('mark'))
+            last_price = _to_float(contract.get('last'))
+            bid_price = _to_float(contract.get('bid'))
+            ask_price = _to_float(contract.get('ask'))
+            strike_price = _to_float(contract.get('strike'))
+            multiplier = max(_to_float(contract.get('multiplier'), 100.0), 1.0)
+
+            option_price = 0.0
+            for candidate in (mark_price, last_price):
+                option_price = candidate
+                if option_price > 0:
+                    break
+            if option_price <= 0 and bid_price > 0 and ask_price > 0:
+                option_price = (bid_price + ask_price) / 2.0
+            if option_price <= 0 and strike_price > 0:
+                option_price = max(strike_price * 0.02, 0.05)
+            if option_price <= 0:
+                option_price = 0.05
+
+            notional = volume * option_price * multiplier
+            if notional >= 5e7:
+                high_notional_count += 1
+
+            option_type = str(contract.get('type') or contract.get('option_type') or '').upper()
+            if option_type == 'CALL':
+                call_volume += volume
+            elif option_type == 'PUT':
+                put_volume += volume
+
+        if total_volume <= 0:
+            payload = {
+                'symbol': symbol,
+                'score': 0.0,
+                'classification': 'inactive',
+                'timestamp': time.time(),
+            }
+            await self.redis.setex(
+                rkeys.analytics_metric_key(symbol, 'unusual'),
+                ttl,
+                json.dumps(payload)
+            )
+            return payload
+
+        volume_oi_ratio = total_volume / max(total_open_interest, 1.0)
+        ratio_score = min(max_ratio / 1.5, 1.0)
+        volume_score = min(volume_oi_ratio / 0.35, 1.0)
+        notional_score = min(high_notional_count / 3.0, 1.0)
+        breadth_score = min(high_ratio_count / 10.0, 1.0)
+
+        score = min(
+            1.0,
+            0.45 * ratio_score + 0.30 * volume_score + 0.15 * notional_score + 0.10 * breadth_score,
+        )
+
+        if call_volume + put_volume > 0:
+            skew_value = (call_volume - put_volume) / (call_volume + put_volume)
+            if skew_value > 0.2:
+                dominant_flow = 'CALL'
+            elif skew_value < -0.2:
+                dominant_flow = 'PUT'
+            else:
+                dominant_flow = 'BALANCED'
+        else:
+            dominant_flow = 'BALANCED'
+
+        if score >= 0.85:
+            classification = 'extreme'
+        elif score >= 0.6:
+            classification = 'elevated'
+        elif score >= 0.3:
+            classification = 'watch'
+        else:
+            classification = 'normal'
+
+        payload = {
+            'symbol': symbol,
+            'timestamp': time.time(),
+            'score': round(score, 4),
+            'classification': classification,
+            'volume_oi_ratio': round(volume_oi_ratio, 4),
+            'max_contract_ratio': round(max_ratio, 4),
+            'high_ratio_contracts': high_ratio_count,
+            'high_notional_contracts': high_notional_count,
+            'total_volume': float(total_volume),
+            'total_open_interest': float(total_open_interest),
+            'dominant_flow': dominant_flow,
+            'spot_price': float(spot_price),
+        }
+
+        await self.redis.setex(
+            rkeys.analytics_metric_key(symbol, 'unusual'),
+            ttl,
+            json.dumps(payload)
+        )
+
+        if score >= 0.6:
+            self.logger.debug(
+                "Unusual options activity",
+                extra={
+                    'symbol': symbol,
+                    'score': score,
+                    'classification': classification,
+                    'volume_oi_ratio': volume_oi_ratio,
+                    'max_contract_ratio': max_ratio,
+                },
+            )
+
+        return payload
 
     async def _update_heartbeat(self, idle: bool = False):
         """Update heartbeat in Redis."""

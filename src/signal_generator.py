@@ -565,7 +565,7 @@ async def default_feature_reader(redis_conn: aioredis.Redis, symbol: str) -> Dic
 
     async with redis_conn.pipeline() as pipe:
         pipe.get(rkeys.market_ticker_key(symbol))
-        pipe.lrange(rkeys.market_bars_key(symbol), -25, -1)
+        pipe.lrange(rkeys.market_bars_key(symbol, '1min'), -25, -1)
         pipe.get(rkeys.analytics_vpin_key(symbol))
         pipe.get(rkeys.analytics_obi_key(symbol))
         pipe.get(rkeys.analytics_gex_key(symbol))
