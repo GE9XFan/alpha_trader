@@ -139,6 +139,16 @@ Each box consumes and publishes Redis keys only; orchestration (`main.py`) wires
 
 Signals published by the dedupe helper now land in both `signals:pending:{symbol}` and `signals:execution:{symbol}` queues so downstream distribution and execution loops progress independently; `SignalDistributor` drains the pending lists for customer delivery while `ExecutionManager` polls the execution lists to stage bracket orders without waiting on distribution throughput.【F:src/signal_deduplication.py†L224-L262】【F:src/execution_manager.py†L256-L292】
 
+## Community Publishing & Automation (In Planning)
+Social distribution, dashboards, and morning automation each ship with scaffolded classes that already accept the shared configuration and Redis handle, but their TODO blocks must be completed before public launch:
+
+- **TwitterBot & SocialMediaAnalytics** – Wire up credential loading, Tweepy clients, posting loops, and engagement tracking so winning trades, teasers, and daily summaries reach external audiences while analytics land back in Redis.【F:src/twitter_bot.py†L25-L206】
+- **DiscordBot** – Finish the webhook session, embed formatting, and queue draining to mirror the premium/basic tiers with delivery/error metrics tracked for dashboards.【F:src/discord_bot.py†L25-L141】
+- **TelegramBot** – Implement command handlers, Stripe subscription flow, tier-aware formatting, and delayed distribution across premium/basic/free channels.【F:src/telegram_bot.py†L25-L218】
+- **Dashboard services** – Populate FastAPI routes, WebSocket broadcasting, log aggregation, alert management, and performance chart generation so operators (and community members) get a real-time control surface.【F:src/dashboard_server.py†L25-L220】【F:src/dashboard_routes.py†L25-L184】【F:src/dashboard_websocket.py†L1-L70】
+- **MorningScanner** – Complete the GPT-4 workflow that gathers overnight data, options positioning, economic events, and distributes the resulting analysis to premium feeds and social teasers.【F:src/morning_scanner.py†L25-L220】
+- **ReportGenerator & MetricsCollector** – Turn the archival, cleanup, and monitoring TODOs into live services so historical exports and dashboard metrics stay fresh.【F:src/report_generator.py†L25-L120】【F:src/dashboard_server.py†L166-L220】
+
 ## Analytics Cadence & Aggregation
 - **Cadence-aware scheduler** – `AnalyticsEngine` coordinates VPIN, GEX/DEX, and pattern analyzers on configurable intervals, gating execution outside RTH windows and surfacing idle/running state via module heartbeats.【F:src/analytics_engine.py†L400-L556】
 - **Portfolio & sector rollups** – `MetricsAggregator` composes symbol snapshots into `analytics:portfolio:summary`, `analytics:sector:{sector}`, and correlation matrices with TTLs enforced through the schema helpers.【F:src/analytics_engine.py†L35-L205】【F:src/redis_keys.py†L25-L304】
