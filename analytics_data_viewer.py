@@ -293,6 +293,8 @@ class AnalyticsDataViewer:
         self._print_dealer_flows(bundle)
         self._print_skew(bundle)
         self._print_flow_clusters(bundle)
+        self._print_moc_metrics(bundle)
+        self._print_unusual_activity(bundle)
         self._print_misc_metrics(bundle)
 
     async def _fetch_symbol_bundle(self, symbol: str) -> Dict[str, Any]:
@@ -310,6 +312,8 @@ class AnalyticsDataViewer:
             ("sweep", rkeys.analytics_metric_key(symbol, "sweep")),
             ("hidden", rkeys.analytics_metric_key(symbol, "hidden")),
             ("gamma_pin", rkeys.analytics_metric_key(symbol, "gamma_pin")),
+            ("moc", rkeys.analytics_metric_key(symbol, "moc")),
+            ("unusual", rkeys.analytics_metric_key(symbol, "unusual")),
         ]
 
         async with self.redis.pipeline(transaction=False) as pipe:
@@ -404,6 +408,46 @@ class AnalyticsDataViewer:
         print("\nFlow Clustering:")
         print(tabulate(strat_rows, headers=["Strategy", "Share"], tablefmt="simple"))
         print(tabulate(part_rows, headers=["Participant", "Share"], tablefmt="simple"))
+
+    def _print_moc_metrics(self, bundle: Mapping[str, Any]) -> None:
+        payload = bundle.get("moc") or {}
+        if not isinstance(payload, Mapping) or not payload:
+            return
+
+        rows = [
+            ["Side", payload.get("imbalance_side", "FLAT")],
+            ["Imbalance", _num(payload.get("imbalance_total"))],
+            ["Ratio", _percent(payload.get("imbalance_ratio"), 2)],
+            ["Paired", _num(payload.get("imbalance_paired"))],
+            ["Level5", _num(payload.get("level5_imbalance"), 3)],
+            ["Indicative", _num(payload.get("indicative_price"))],
+            ["Offset (bps)", _num(payload.get("near_close_offset_bps"), 2)],
+            ["Proj Volume", _num(payload.get("projected_volume_shares"))],
+            ["Time to Close (m)", _num(payload.get("minutes_to_close"), 2)],
+            ["Gamma Factor", _num(payload.get("gamma_factor"), 2)],
+        ]
+
+        print("\nMOC Projection:")
+        print(tabulate(rows, headers=["Metric", "Value"], tablefmt="simple"))
+
+    def _print_unusual_activity(self, bundle: Mapping[str, Any]) -> None:
+        payload = bundle.get("unusual") or {}
+        if not isinstance(payload, Mapping) or not payload:
+            return
+
+        rows = [
+            ["Score", _num(payload.get("score"), 3)],
+            ["Classification", payload.get("classification", "—")],
+            ["Volume/OI", _num(payload.get("volume_oi_ratio"), 3)],
+            ["Max Contract Ratio", _num(payload.get("max_contract_ratio"), 3)],
+            ["High Ratio Contracts", payload.get("high_ratio_contracts")],
+            ["High Notional Contracts", payload.get("high_notional_contracts")],
+            ["Dominant Flow", payload.get("dominant_flow", "—")],
+            ["Spot", _num(payload.get("spot_price"))],
+        ]
+
+        print("\nUnusual Options Activity:")
+        print(tabulate(rows, headers=["Metric", "Value"], tablefmt="simple"))
 
     def _print_misc_metrics(self, bundle: Mapping[str, Any]) -> None:
         rows = []
