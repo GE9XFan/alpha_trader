@@ -20,7 +20,7 @@ Redis Keys Used:
         - positions:summary (portfolio summary)
         - positions:closed:total (closed position counter)
 
-Author: AlphaTrader Pro
+Author: Quantisity Capital
 Version: 3.0.0
 """
 

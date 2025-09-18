@@ -13,7 +13,7 @@ Redis Keys Used:
     Write:
         - signals:last_contract:{symbol}:moc:{side}:{dte_band} (contract memory)
 
-Author: AlphaTrader Pro
+Author: Quantisity Capital
 Version: 3.0.0
 """
 

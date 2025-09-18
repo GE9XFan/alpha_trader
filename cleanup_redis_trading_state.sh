@@ -1,8 +1,8 @@
 #!/bin/bash
-# Complete Redis cleanup for AlphaTrader Pro trading state
+# Complete Redis cleanup for Quantisity Capital trading state
 
 echo "==================================================="
-echo "COMPLETE REDIS CLEANUP - AlphaTrader Pro"
+echo "COMPLETE REDIS CLEANUP - Quantisity Capital"
 echo "==================================================="
 echo ""
 echo "This will DELETE:"

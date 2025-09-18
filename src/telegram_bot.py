@@ -18,7 +18,7 @@ Redis Keys Used:
         - telegram:signal:{signal_id} (signal tracking)
         - telegram:distribution:metrics (distribution metrics)
 
-Author: AlphaTrader Pro
+Author: Quantisity Capital
 Version: 3.0.0
 """
 
@@ -64,9 +64,9 @@ class TelegramBot:
 
         # Channel configuration
         self.channels = {
-            'public': '@alphatrader_public',
-            'premium': '@alphatrader_premium',
-            'basic': '@alphatrader_basic'
+            'public': '@quantisitycapital_public',
+            'premium': '@quantisitycapital_premium',
+            'basic': '@quantisitycapital_basic'
         }
 
         self.logger = logging.getLogger(__name__)

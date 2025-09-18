@@ -17,7 +17,7 @@ Redis Keys Used:
         - distribution:scheduled:basic (scheduled basic signals)
         - distribution:scheduled:free (scheduled free signals)
 
-Author: AlphaTrader Pro
+Author: Quantisity Capital
 Version: 3.0.0
 """
 

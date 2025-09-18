@@ -1,4 +1,4 @@
-# AlphaTrader Pro
+# Quantisity Capital
 
 ## Document Map
 - [Overview](#overview)
@@ -17,7 +17,13 @@
 
 ## Overview
 
-AlphaTrader Pro is a Redis-centric institutional options trading platform that ingests real-time market structure, performs high-frequency analytics, generates contract-level signals, and coordinates execution, risk controls, and downstream distribution. The platform never routes equity orders—option selectors, signal emitters, and execution flows enforce normalized option payloads with validated strikes/expiries so the system remains strictly derivatives-only. Every production module exchanges state exclusively through Redis, allowing services to scale and recover independently while sharing a consistent data fabric.【F:src/main.py†L97-L192】【F:src/redis_keys.py†L1-L141】 The latest iteration decouples signal distribution from order intake by writing deduped payloads into dedicated `signals:execution` queues and wiring bracket-style stop/target management into the execution stack while keeping the emergency breaker fully async-safe.【F:src/signal_deduplication.py†L224-L262】【F:src/execution_manager.py†L256-L292】【F:src/execution_manager.py†L828-L972】【F:src/position_manager.py†L741-L773】【F:src/emergency_manager.py†L211-L279】
+Quantisity Capital is a Redis-centric institutional options trading platform that ingests real-time market structure, performs high-frequency analytics, generates contract-level signals, and coordinates execution, risk controls, and downstream distribution. The platform never routes equity orders—option selectors, signal emitters, and execution flows enforce normalized option payloads with validated strikes/expiries so the system remains strictly derivatives-only. Every production module exchanges state exclusively through Redis, allowing services to scale and recover independently while sharing a consistent data fabric.【F:src/main.py†L97-L192】【F:src/redis_keys.py†L1-L141】 The latest iteration decouples signal distribution from order intake by writing deduped payloads into dedicated `signals:execution` queues and wiring bracket-style stop/target management into the execution stack while keeping the emergency breaker fully async-safe.【F:src/signal_deduplication.py†L224-L262】【F:src/execution_manager.py†L256-L292】【F:src/execution_manager.py†L828-L972】【F:src/position_manager.py†L741-L773】【F:src/emergency_manager.py†L211-L279】
+
+### Release Status (September 2025)
+- **Completed (Phases 1‑6)** – Schema/configuration, dealer-flow analytics, flow clustering & volatility regimes, signal integration, replay/monitoring infrastructure, and execution/distribution hardening are production ready. Live services cover market ingestion, analytics orchestration, signal generation with deduplication, execution with bracket maintenance, position lifecycle management, risk controls, and reconciliation scripts.
+- **Outstanding (Phase 7 – Community Publishing & Automation)** – Social bots (`twitter_bot`, `telegram_bot`, `discord_bot`), operator dashboards (`dashboard_server`, `dashboard_routes`, `dashboard_websocket`), morning automation (`morning_scanner`, `news_analyzer`), and archival/reporting (`report_generator`) remain scaffolds filled with TODOs. These modules are **disabled by default** until fully implemented and tested.
+- **Validation Gaps** – Regression suites still point at legacy aggregate modules (e.g., `tests/test_day6.py` imports `src.signals`). Modern, module-level tests for execution, distribution, and forthcoming automation work must be added before production rollout.
+- **Operational Requirements** – Running the platform in production still requires provisioning the optional dependency stack (Tweepy, python-telegram-bot, FastAPI, Stripe, OpenAI, etc.), securing API credentials, and wiring observability for Redis, IBKR, and Alpha Vantage.
 
 ## Current Capabilities
 
@@ -166,7 +172,7 @@ Signals published by the dedupe helper now land in both `signals:pending:{symbol
 - **Canonical calculator outputs** – VPIN, GEX/DEX, and pattern analyzers now publish into the canonical `analytics:{symbol}:*` keys via the shared helper layer, aligning all downstream consumers.【F:src/vpin_calculator.py†L31-L144】【F:src/gex_dex_calculator.py†L1-L514】【F:src/pattern_analyzer.py†L1-L460】
 
 ### Logging
-- **Structured JSON output** – All modules now emit structured records through `logging_utils.StructuredFormatter`, adding `component`, `subsystem`, and action metadata to every line in `logs/alphatrader.log` for easier searching and ingestion.【F:src/logging_utils.py†L18-L189】【F:main.py†L29-L53】【F:src/analytics_engine.py†L31-L117】【F:src/ibkr_ingestion.py†L40-L215】
+- **Structured JSON output** – All modules now emit structured records through `logging_utils.StructuredFormatter`, adding `component`, `subsystem`, and action metadata to every line in `logs/quantisity_capital.log` for easier searching and ingestion.【F:src/logging_utils.py†L18-L189】【F:main.py†L29-L53】【F:src/analytics_engine.py†L31-L117】【F:src/ibkr_ingestion.py†L40-L215】
 - **Console-friendly view** – Terminal output now renders a compact, color-free key/value line per event while the rotating file handler keeps full JSON payloads for downstream ingestion.【F:src/logging_utils.py†L95-L189】
 - **Centralised configuration** – Logging options (level, rotation, console mirroring) continue to live under the `logging` block in `config/config.yaml`; updating the file and restarting applies without code edits.【F:config/config.yaml†L393-L402】【F:src/logging_utils.py†L120-L189】
 - **Context adapters** – `get_logger` wraps the standard library logger with a context adapter so subsystems automatically annotate events without repeating boilerplate everywhere.【F:src/logging_utils.py†L170-L189】【F:src/signal_generator.py†L46-L181】【F:src/av_ingestion.py†L32-L237】
@@ -246,14 +252,20 @@ Because IBKR does not expose market-maker identities, toxicity detection blends 
 ## Open Work
 
 ### Community Publishing & Automation (In Planning)
-Social distribution, dashboards, and morning automation each ship with scaffolded classes that already accept the shared configuration and Redis handle, but their TODO blocks must be completed before public launch:
+Phase 7 is the remaining functional gap. The orchestrator leaves the following modules **disabled** until their TODO blocks are implemented and tested. Each class already ingests the shared configuration and Redis client so wiring will not require structural changes once features land:
 
-- **TwitterBot & SocialMediaAnalytics** – Wire up credential loading, Tweepy clients, posting loops, and engagement tracking so winning trades, teasers, and daily summaries reach external audiences while analytics land back in Redis.【F:src/twitter_bot.py†L25-L206】
-- **DiscordBot** – Finish the webhook session, embed formatting, and queue draining to mirror the premium/basic tiers with delivery/error metrics tracked for dashboards.【F:src/discord_bot.py†L25-L141】
-- **TelegramBot** – Implement command handlers, Stripe subscription flow, tier-aware formatting, and delayed distribution across premium/basic/free channels.【F:src/telegram_bot.py†L25-L218】
-- **Dashboard services & analytics monitoring** – Populate FastAPI routes, WebSocket broadcasting, log aggregation, alert management, performance chart generation, and the new backfill/analytics dashboards so operators (and community members) get a real-time control surface.【F:src/dashboard_server.py†L25-L220】【F:src/dashboard_routes.py†L25-L184】【F:src/dashboard_websocket.py†L1-L70】
-- **MorningScanner** – Complete the GPT-4 workflow that gathers overnight data, options positioning, economic events, and distributes the resulting analysis to premium feeds and social teasers.【F:src/morning_scanner.py†L25-L220】
-- **ReportGenerator & MetricsCollector** – Turn the archival, cleanup, and monitoring TODOs into live services so historical exports and dashboard metrics stay fresh.【F:src/report_generator.py†L25-L120】【F:src/dashboard_server.py†L166-L220】
+- **TwitterBot & social analytics** – Load credentials, stand up Tweepy clients, monitor `signals:distribution:*` queues, enforce tier delays, collect engagement metrics, and publish back into `social:analytics:*` keys.【F:src/twitter_bot.py†L25-L206】
+- **DiscordBot** – Establish long-lived aiohttp sessions, drain premium/basic queues, generate embeds per tier, capture delivery errors, and persist metrics for dashboard surfaces.【F:src/discord_bot.py†L25-L141】
+- **TelegramBot** – Build subscription UX (commands, Stripe checkout, entitlements), implement tier-aware broadcasting with scheduled delays, and maintain `users:telegram:*` records for billing and compliance.【F:src/telegram_bot.py†L25-L218】
+- **Dashboard services & analytics monitoring** – Implement FastAPI app wiring, authentication, REST routes, WebSocket streaming, log aggregation, performance dashboards, and operator controls before enabling the dashboard toggle in `config/config.yaml`.【F:src/dashboard_server.py†L25-L220】【F:src/dashboard_routes.py†L25-L184】【F:src/dashboard_websocket.py†L1-L70】
+- **MorningScanner & NewsAnalyzer** – Finish data gathering (futures, international indices, econ calendar), options positioning synthesis, GPT-4 prompt orchestration, preview generation, and publishing into premium/public queues.【F:src/morning_scanner.py†L25-L220】【F:src/news_analyzer.py†L25-L138】
+- **ReportGenerator & MetricsCollector** – Implement archival exports, retention cleanup, historical report generation, and long-horizon metrics aggregation so dashboards can surface risk/performance history and compliance exports on demand.【F:src/report_generator.py†L25-L120】【F:src/dashboard_server.py†L166-L220】
+
+### Cross-Cutting Tasks
+- **Modernize regression coverage** – Update the test suite to import the refactored modules (`analytics_engine`, `signal_generator`, `execution_manager`, etc.) and add integration tests for execution/distribution flows to replace the legacy `src.signals` fixtures.【F:tests/test_day6.py†L21-L39】
+- **Optional dependency packaging** – Split requirements for social, dashboard, AI, and payment adapters into extras (e.g., `pip install .[social]`) and document the deployment prerequisites (Tweepy, python-telegram-bot, FastAPI, Uvicorn, Stripe, OpenAI).
+- **Secrets & configuration management** – Document required environment variables (IBKR credentials, Redis, Alpha Vantage, GPT-4, Stripe) and build sample `.env` templates for each optional module to streamline onboarding.
+- **Observability & alert routing** – Extend monitoring to scrape the new queued distribution metrics, stalled-job counters, and upcoming dashboard WebSocket heartbeat once those services are enabled.
 
 ### Pending Integrations
 - [`src/twitter_bot.py`](src/twitter_bot.py)

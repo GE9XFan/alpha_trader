@@ -15,7 +15,7 @@ Redis Keys Used:
         - analytics:morning:levels (technical levels)
         - analytics:morning:preview (public preview)
 
-Author: AlphaTrader Pro
+Author: Quantisity Capital
 Version: 3.0.0
 """
 

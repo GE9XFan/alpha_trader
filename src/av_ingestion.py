@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Alpha Vantage Ingestion - Main AlphaVantage REST API Client
-Part of AlphaTrader Pro System
+Part of Quantisity Capital System
 
 This module operates independently and communicates only via Redis.
 Redis keys used:

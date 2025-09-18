@@ -1,4 +1,4 @@
-"""Backfill utilities for AlphaTrader Pro Phase 5."""
+"""Backfill utilities for Quantisity Capital Phase 5."""
 
 from .jobs import (
     BackfillResult,

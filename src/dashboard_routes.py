@@ -17,7 +17,7 @@ Redis Keys Used:
         - monitoring:alerts:* (alert metrics)
         - performance:charts:* (chart data cache)
 
-Author: AlphaTrader Pro
+Author: Quantisity Capital
 Version: 3.0.0
 """
 

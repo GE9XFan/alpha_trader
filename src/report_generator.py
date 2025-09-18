@@ -16,7 +16,7 @@ Redis Keys Used:
         - archive:history:* (historical data)
         - reports:generated:* (generated reports)
 
-Author: AlphaTrader Pro
+Author: Quantisity Capital
 Version: 3.0.0
 """
 

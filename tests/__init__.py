@@ -1,1 +1,1 @@
-# AlphaTrader Pro Test Suite
+# Quantisity Capital Test Suite

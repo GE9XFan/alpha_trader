@@ -39,7 +39,7 @@ Redis Keys Used:
         - metrics:risk:* (various risk metrics)
         - alerts:critical (critical alerts)
 
-Author: AlphaTrader Pro
+Author: Quantisity Capital
 Version: 3.0.0
 """
 

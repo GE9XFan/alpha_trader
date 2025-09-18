@@ -12,7 +12,7 @@ Redis Keys Used:
         - dashboard:ws:connections (active WebSocket connections)
         - dashboard:ws:metrics (WebSocket metrics)
 
-Author: AlphaTrader Pro
+Author: Quantisity Capital
 Version: 3.0.0
 """
 

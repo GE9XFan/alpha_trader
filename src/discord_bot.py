@@ -16,7 +16,7 @@ Redis Keys Used:
         - discord:sent:{message_id} (sent message tracking)
         - discord:metrics:* (delivery metrics)
 
-Author: AlphaTrader Pro
+Author: Quantisity Capital
 Version: 3.0.0
 """
 

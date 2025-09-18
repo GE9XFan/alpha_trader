@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
 import redis
-from main import AlphaTrader
+from main import QuantisityCapital
 from dotenv import load_dotenv
 
 
@@ -61,7 +61,7 @@ async def test_main_application():
     try:
         # Test configuration loading
         print("\n1. Testing configuration loading...")
-        trader = AlphaTrader()
+        trader = QuantisityCapital()
         assert trader.config is not None, "Config not loaded"
         assert 'redis' in trader.config, "Redis config missing"
         assert 'ibkr' in trader.config, "IBKR config missing"
@@ -202,7 +202,7 @@ async def test_module_stubs():
 def main():
     """Run all Day 1 tests"""
     print("\n" + "=" * 60)
-    print("AlphaTrader Pro - Day 1 Test Suite")
+    print("Quantisity Capital - Day 1 Test Suite")
     print("=" * 60)
     
     # Test prerequisites
@@ -222,7 +222,7 @@ def main():
         print("SUCCESS! Day 1 implementation is complete and working!")
         print("🎉 " * 20)
         print("\nNext steps:")
-        print("1. Review the logs in logs/alphatrader.log")
+        print("1. Review the logs in logs/quantisity_capital.log")
         print("2. Check Redis keys with: redis-cli keys '*'")
         print("3. Proceed to Day 2: IBKR Data Ingestion")
     else:

@@ -1,4 +1,4 @@
-# AlphaTrader Pro – Implementation Plan
+# Quantisity Capital – Implementation Plan
 
 ## Document Map
 - [Overview](#overview)
@@ -16,9 +16,9 @@ This plan tracks the delivery status for every major platform phase, highlightin
 - **Phase 2 – Dealer-flow analytics** (Complete): DealerFlowCalculator derives Vanna, Charm, skew, and hedging elasticity from the normalized option chain and persists rolling histories that the analytics engine aggregates into symbol, sector, and portfolio snapshots.【F:src/dealer_flow_calculator.py†L52-L206】【F:src/analytics_engine.py†L73-L220】【F:src/analytics_engine.py†L500-L660】
 - **Phase 3 – Flow clustering & volatility regimes** (Complete): FlowClusterModel classifies recent trade prints into participant archetypes while VolatilityMetrics maintains VIX1D history and regime tags, both orchestrated by the analytics scheduler and folded into downstream aggregates.【F:src/flow_clustering.py†L30-L199】【F:src/volatility_metrics.py†L19-L190】【F:src/analytics_engine.py†L500-L660】
 - **Phase 4 – Signal integration & scoring** (Complete): The default feature reader and DTE/MOC playbooks ingest dealer-flow, clustering, VIX1D, imbalance, and unusual-activity features and rebalance confidence scoring weights so emissions align with the new analytics payloads.【F:src/signal_generator.py†L542-L803】【F:src/dte_strategies.py†L68-L209】【F:src/moc_strategy.py†L55-L214】【F:config/config.yaml†L143-L250】
-- **Phase 5 – Backfills, monitoring, and regression coverage** (Complete): Backfill utilities replay dealer-flow, flow-cluster, and VIX1D series through dedicated jobs with regression suites covering replay paths; monitoring dashboards for these analytics have been shifted into Phase 7 alongside the broader operator UI work.
-- **Phase 6 – Execution & distribution hardening** (Complete): Risk gating, commission normalization, bracket maintenance, and social publishing now depend on confirmed IBKR fills, preventing dual-side order rejections and ensuring outbound messaging reflects real positions.
-- **Phase 7 – Community publishing & automation** (In Planning): Finish the social bots, dashboard services, and morning automation modules so executed trades, analytics, and pre-market briefs reach every external channel with engagement telemetry fed back into Redis.【F:src/twitter_bot.py†L25-L206】【F:src/discord_bot.py†L25-L141】【F:src/telegram_bot.py†L25-L218】【F:src/dashboard_server.py†L25-L220】【F:src/dashboard_routes.py†L25-L184】【F:src/morning_scanner.py†L25-L220】
+- **Phase 5 – Backfills, monitoring, and regression coverage** (Complete): Backfill utilities replay dealer-flow, flow-cluster, and VIX1D series through dedicated jobs with regression suites covering replay paths; monitoring dashboards for these analytics have been shifted into Phase 7 alongside the broader operator UI work. Migration of legacy tests onto the refactored module surfaces remains a follow-up item.
+- **Phase 6 – Execution & distribution hardening** (Complete): Risk gating, commission normalization, bracket maintenance, and the executed-only distribution pipeline are live. Social publishing modules will reuse this pipeline once implemented, but remain disabled until the Phase 7 backlog is delivered.【F:src/execution_manager.py†L828-L1593】【F:src/signal_deduplication.py†L200-L280】【F:src/signal_distributor.py†L71-L229】
+- **Phase 7 – Community publishing & automation** (In Planning): Build the social bots, dashboard services, morning automation, and archival/reporting utilities so executed trades, analytics, and pre-market briefs reach every external channel with engagement telemetry fed back into Redis.【F:src/twitter_bot.py†L25-L206】【F:src/discord_bot.py†L25-L141】【F:src/telegram_bot.py†L25-L218】【F:src/dashboard_server.py†L25-L220】【F:src/dashboard_routes.py†L25-L184】【F:src/morning_scanner.py†L25-L220】【F:src/report_generator.py†L25-L120】
 
 ## Detailed Phase Notes
 
@@ -43,6 +43,7 @@ The default feature reader batches Redis fetches for dealer-flow, hedging, skew,
 - **Commission-normalized P&L** – All fills convert IBKR’s negative commissions into absolute costs before updating positions, metrics, and reconciliation outputs. Daily P&L scripts mirror the same convention so realized totals match broker statements exactly.【F:src/execution_manager.py†L115-L2065】【F:reconcile_daily_pnl.py†L85-L138】
 - **Resilient bracket workflow** – Trailing-stop updates tear down and recreate the entire OCA group, scale-outs pause active protection while partial fills route, and reduced positions immediately receive right-sized stops and targets, eliminating IBKR’s dual-side rejection.【F:src/position_manager.py†L70-L1140】【F:src/execution_manager.py†L828-L1593】
 - **Executed-only distribution** – Fills enqueue an enriched payload on `signals:distribution:pending`, and the distributor only fans out premium/basic/free messages once execution status is `FILLED`, preserving the 0s/60s/300s tier delays without leaking rejected signals.【F:src/execution_manager.py†L1333-L1593】【F:src/signal_distributor.py†L71-L229】【F:src/redis_keys.py†L55-L64】
+
 ### Phase 7 – Community Publishing & Automation (In Planning)
 The communication and automation layer ships with scaffolding but still depends on extensive TODO lists before production launch. Constructor signatures across these modules already accept the shared config dict and Redis handle, so they can be wired into the live queues without refactoring when their TODOs are addressed.
 
@@ -55,7 +56,15 @@ The communication and automation layer ships with scaffolding but still depends 
 
 
 ## Open Work
-- [Phase 7 – Community Publishing & Automation (In Planning)](#phase-7--community-publishing--automation-in-planning)
+
+| Area | Status | Next Actions |
+| --- | --- | --- |
+| Social publishing (`twitter_bot`, `discord_bot`, `telegram_bot`) | Not started | Implement credential management, queue draining, tier-aware formatting, delivery metrics, and configure dependency extras. |
+| Operator dashboard (`dashboard_server`, `dashboard_routes`, `dashboard_websocket`) | Scaffolding only | Build FastAPI app, auth, REST + WebSocket endpoints, metrics aggregation, alert routing, and front-end payloads before enabling module flag. |
+| Morning automation (`morning_scanner`, `news_analyzer`) | Scaffolding only | Gather overnight data, compute key levels/options positioning, orchestrate GPT-4 prompts, persist premium/public previews, and schedule distribution jobs. |
+| Archival & reporting (`report_generator`) | Scaffolding only | Implement daily exports, retention cleanup, long-horizon metrics, and operator-triggered report generation. |
+| Regression coverage | Needs update | Shift pytest suites to import refactored modules, add integration tests for execution/distribution, and validate Phase 7 services once implemented. |
+| Deployment hygiene | In progress | Split optional requirements into extras, document full credential matrix, and extend monitoring/alerting for new queues and dashboard services. |
 
 ## Pending Integrations
 - [`src/twitter_bot.py`](src/twitter_bot.py)

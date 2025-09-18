@@ -16,7 +16,7 @@ Redis Keys Used:
         - dashboard:connections:* (active connections)
         - dashboard:metrics:* (dashboard metrics)
 
-Author: AlphaTrader Pro
+Author: Quantisity Capital
 Version: 3.0.0
 """
 
@@ -50,7 +50,7 @@ class Dashboard:
         """
         self.config = config  # Loaded from config.yaml
         self.redis = redis_conn
-        self.app = FastAPI(title="AlphaTrader Dashboard")
+        self.app = FastAPI(title="Quantisity Capital Dashboard")
 
         # WebSocket connection manager
         self.active_connections = []

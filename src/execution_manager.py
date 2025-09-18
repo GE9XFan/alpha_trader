@@ -28,7 +28,7 @@ Redis Keys Used:
         - alerts:critical (critical alerts)
         - contracts:qualified:* (qualified contract cache)
 
-Author: AlphaTrader Pro
+Author: Quantisity Capital
 Version: 3.0.0
 """
 
