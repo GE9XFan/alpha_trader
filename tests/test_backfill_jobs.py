@@ -158,6 +158,105 @@ async def test_dealer_flow_backfill_respects_checkpoint():
     assert latest is not None
 
 
+@pytest.mark.asyncio
+async def test_backfill_runner_respects_time_window():
+    redis = AsyncFakeRedis()
+    with open('config/config.yaml', 'r', encoding='utf-8') as handle:
+        config = yaml.safe_load(handle)
+
+    dealer_calc = DealerFlowCalculator(config, redis)
+    flow_model = FlowClusterModel(config, redis)
+    vol_metrics = VolatilityMetrics(config, redis)
+
+    symbol = 'SPY'
+    base_ts = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+
+    dealer_snapshots = [
+        _build_dealer_snapshot(symbol, base_ts + timedelta(minutes=idx))
+        for idx in range(4)
+    ]
+    flow_slices = [
+        FlowSlice(
+            symbol=symbol,
+            timestamp=dealer_snapshots[idx].timestamp,
+            trades=_build_trades(dealer_snapshots[idx].timestamp),
+        )
+        for idx in range(4)
+    ]
+    vix_snapshots = [
+        VixSnapshot(
+            timestamp=dealer_snapshots[idx].timestamp,
+            value=15.0 + idx,
+            source='windowed',
+        )
+        for idx in range(4)
+    ]
+
+    runner = BackfillRunner([
+        DealerFlowBackfillJob(
+            redis_conn=redis,
+            calculator=dealer_calc,
+            provider=InMemoryDealerFlowProvider(dealer_snapshots),
+        ),
+        FlowClusterBackfillJob(
+            redis_conn=redis,
+            model=flow_model,
+            provider=InMemoryFlowSliceProvider(flow_slices),
+        ),
+        VixBackfillJob(
+            redis_conn=redis,
+            metrics=vol_metrics,
+            provider=InMemoryVixProvider(vix_snapshots),
+        ),
+    ])
+
+    start = dealer_snapshots[1].timestamp
+    end = dealer_snapshots[2].timestamp
+    results = await runner.run([symbol], start=start, end=end)
+
+    for result in results:
+        assert result.snapshots_processed == 2
+        assert result.metrics_written >= 1
+        assert not result.errors
+
+
+@pytest.mark.asyncio
+async def test_flow_cluster_backfill_handles_sparse_trades():
+    redis = AsyncFakeRedis()
+    with open('config/config.yaml', 'r', encoding='utf-8') as handle:
+        config = yaml.safe_load(handle)
+
+    model = FlowClusterModel(config, redis)
+    symbol = 'SPY'
+    timestamp = datetime.now(timezone.utc)
+
+    sparse_trades = [
+        {
+            'price': 430.0,
+            'size': 50,
+            'timestamp': int(timestamp.timestamp()) + idx,
+            'side': 'buy' if idx % 2 == 0 else 'sell',
+        }
+        for idx in range(5)
+    ]
+
+    flow_slice = FlowSlice(symbol=symbol, timestamp=timestamp, trades=sparse_trades)
+    job = FlowClusterBackfillJob(
+        redis_conn=redis,
+        model=model,
+        provider=InMemoryFlowSliceProvider([flow_slice]),
+    )
+
+    result = await job.run([symbol])
+
+    assert result.snapshots_processed == 1
+    assert result.metrics_written == 0
+    clusters_raw = await redis.get(rkeys.analytics_flow_clusters_key(symbol))
+    assert clusters_raw is not None
+    payload = json.loads(clusters_raw)
+    assert payload.get('samples') == 0
+
+
 def _build_dealer_snapshot(symbol: str, timestamp: datetime) -> DealerFlowSnapshot:
     expiry_today = timestamp.astimezone(timezone.utc).date().isoformat()
     expiry_later = (timestamp + timedelta(days=2)).astimezone(timezone.utc).date().isoformat()
