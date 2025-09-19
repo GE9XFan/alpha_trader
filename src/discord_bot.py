@@ -177,6 +177,110 @@ class SignalEnvelope:
         return self.action_type == 'SCALE_OUT'
 
 
+@dataclass
+class AnalysisSymbol:
+    symbol: str
+    imbalance_total: float
+    imbalance_ratio: float
+    imbalance_side: str
+    indicative_price: Optional[float]
+    near_close_offset_bps: Optional[float]
+    projected_volume_shares: Optional[float]
+    gamma_factor: Optional[float]
+    minutes_to_close: Optional[float]
+    change_vs_yesterday: Optional[float]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "AnalysisSymbol":
+        def _float(value: Any) -> Optional[float]:
+            try:
+                if value is None:
+                    return None
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        symbol = str(data.get('symbol') or '').upper()
+        return cls(
+            symbol=symbol,
+            imbalance_total=float(data.get('imbalance_total') or 0.0),
+            imbalance_ratio=float(data.get('imbalance_ratio') or 0.0),
+            imbalance_side=str(data.get('imbalance_side') or 'FLAT').upper(),
+            indicative_price=_float(data.get('indicative_price')),
+            near_close_offset_bps=_float(data.get('near_close_offset_bps')),
+            projected_volume_shares=_float(data.get('projected_volume_shares')),
+            gamma_factor=_float(data.get('gamma_factor')),
+            minutes_to_close=_float(data.get('minutes_to_close')),
+            change_vs_yesterday=_float(data.get('change_vs_yesterday')),
+        )
+
+
+@dataclass
+class AnalysisEnvelope:
+    id: str
+    payload_type: str
+    status: str
+    slot_label: str
+    timestamp: datetime
+    featured: List[AnalysisSymbol]
+    watchlist: List[AnalysisSymbol]
+    note: Optional[str]
+    next_update_text: str
+    mention_everyone: bool
+    dedupe_token: str
+    extreme: bool
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "AnalysisEnvelope":
+        payload_type = str(data.get('type') or 'analysis.moc')
+        status = str(data.get('status') or 'ok').lower()
+        slot_label = str(data.get('slot_label') or '')
+        timestamp_value = data.get('timestamp')
+
+        if isinstance(timestamp_value, (int, float)):
+            timestamp = datetime.fromtimestamp(float(timestamp_value), tz=timezone.utc)
+        elif isinstance(timestamp_value, str):
+            try:
+                parsed = datetime.fromisoformat(timestamp_value)
+                if parsed.tzinfo is None:
+                    timestamp = parsed.replace(tzinfo=timezone.utc)
+                else:
+                    timestamp = parsed.astimezone(timezone.utc)
+            except ValueError:
+                timestamp = datetime.now(timezone.utc)
+        else:
+            timestamp = datetime.now(timezone.utc)
+
+        featured_raw = data.get('featured') or []
+        watchlist_raw = data.get('watchlist') or []
+        featured = [AnalysisSymbol.from_dict(item) for item in featured_raw if isinstance(item, dict)]
+        watchlist = [AnalysisSymbol.from_dict(item) for item in watchlist_raw if isinstance(item, dict)]
+
+        note = data.get('note')
+        if note is not None:
+            note = str(note)
+
+        next_update = str(data.get('next_update_text') or '')
+        mention_everyone = bool(data.get('mention_everyone'))
+        dedupe_token = str(data.get('dedupe_token') or f"{payload_type}:{slot_label or timestamp.isoformat()}" )
+        extreme = bool(data.get('extreme'))
+
+        return cls(
+            id=str(data.get('id') or f"moc:{timestamp.timestamp():.0f}"),
+            payload_type=payload_type,
+            status=status,
+            slot_label=slot_label,
+            timestamp=timestamp,
+            featured=featured,
+            watchlist=watchlist,
+            note=note,
+            next_update_text=next_update,
+            mention_everyone=mention_everyone,
+            dedupe_token=dedupe_token,
+            extreme=extreme,
+        )
+
+
 def _safe_float(value: Any) -> Optional[float]:
     try:
         if value is None:
@@ -268,7 +372,7 @@ class DiscordMessageBuilder:
 
     def _build_basic_entry(self, envelope: SignalEnvelope, tier: TierConfig) -> DiscordMessage:
         mention = (tier.mention_text or '').strip()
-        confidence = envelope.confidence_band or 'UNSPECIFIED'
+        confidence = self._confidence_label(envelope)
         drivers = self._format_reasons([], self.basic_tags)
         upgrade_text = self.basic_upgrade_text or 'Premium members receive instant alerts.'
 
@@ -525,6 +629,25 @@ class DiscordMessageBuilder:
             return envelope.confidence_band
         return None
 
+    def _confidence_label(self, envelope: SignalEnvelope) -> str:
+        if envelope.confidence_band:
+            return str(envelope.confidence_band).upper()
+
+        if envelope.confidence is not None:
+            raw = envelope.confidence if envelope.confidence > 1 else envelope.confidence * 100
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                return 'UNSPECIFIED'
+
+            if value >= 90:
+                return 'HIGH'
+            if value >= 75:
+                return 'MEDIUM'
+            return 'LOW'
+
+        return 'UNSPECIFIED'
+
     @staticmethod
     def _format_reasons(reasons: List[str], tag_map: Dict[str, str]) -> Optional[str]:
         if reasons:
@@ -591,6 +714,143 @@ class DiscordMessageBuilder:
             return str(value)
 
 
+class AnalysisMessageBuilder:
+    """Render Discord payloads for premium analysis drops."""
+
+    def __init__(self, formatting_config: Dict[str, Any]):
+        analysis_cfg = (formatting_config or {}).get('analysis') or {}
+        color_fallback = (formatting_config or {}).get('colors') or {}
+        neutral_default = int(color_fallback.get('neutral', 0x4C6EF5))
+        self.neutral_color = int(analysis_cfg.get('neutral', neutral_default))
+        self.extreme_color = int(analysis_cfg.get('extreme', self.neutral_color))
+        try:
+            self.market_tz = ZoneInfo("US/Eastern")
+        except Exception:  # pragma: no cover - fallback if zoneinfo missing
+            self.market_tz = timezone.utc
+
+    def build(self, envelope: AnalysisEnvelope, tier: TierConfig) -> DiscordMessage:
+        mention_parts: List[str] = []
+        if envelope.mention_everyone:
+            mention_parts.append('@everyone')
+        elif tier.mention_text:
+            mention_parts.append(tier.mention_text)
+
+        slot_text = envelope.slot_label or self._format_slot(envelope.timestamp)
+        headline = f"Premium Analysis • MOC Imbalance Update — {slot_text}"
+        if mention_parts:
+            content = f"{' '.join(mention_parts)} {headline}".strip()
+        else:
+            content = headline
+
+        embed: Dict[str, Any] = {
+            'title': self._build_title(envelope.timestamp),
+            'color': self.extreme_color if envelope.extreme else self.neutral_color,
+            'fields': [],
+            'timestamp': envelope.timestamp.astimezone(timezone.utc).isoformat(),
+            'footer': {'text': envelope.next_update_text or 'Next update timing TBA'},
+        }
+
+        if envelope.note:
+            embed['description'] = envelope.note
+
+        if envelope.status != 'ok':
+            if 'description' not in embed:
+                embed['description'] = 'Market close data temporarily unavailable.'
+            return DiscordMessage(content=content, embeds=[embed])
+
+        for symbol in envelope.featured:
+            embed['fields'].append(self._build_feature_field(symbol))
+
+        watchlist_field = self._build_watchlist_field(envelope.watchlist)
+        if watchlist_field:
+            embed['fields'].append(watchlist_field)
+
+        if not embed['fields']:
+            description = embed.get('description') or ''
+            suffix = 'No qualifying imbalances detected.'
+            embed['description'] = (description + ('\n' if description else '') + suffix)
+
+        return DiscordMessage(content=content, embeds=[embed])
+
+    def _build_title(self, timestamp: datetime) -> str:
+        local_dt = timestamp.astimezone(self.market_tz)
+        return f"Closing Imbalance Projection (as of {local_dt.strftime('%H:%M:%S ET')})"
+
+    def _build_feature_field(self, symbol: AnalysisSymbol) -> Dict[str, Any]:
+        side_label = symbol.imbalance_side.title()
+        header = f"{symbol.symbol} — {side_label} Bias"
+        lines: List[str] = []
+        lines.append(
+            f"• Unpaired Notional: {_format_currency(symbol.imbalance_total)} ({self._format_ratio(symbol.imbalance_ratio)})"
+        )
+
+        if symbol.near_close_offset_bps is not None:
+            lines.append(f"• Indicative vs Mid: {self._format_bps(symbol.near_close_offset_bps)}")
+        if symbol.projected_volume_shares is not None:
+            lines.append(f"• Projected Volume: {self._format_shares(symbol.projected_volume_shares)}")
+        if symbol.gamma_factor is not None:
+            lines.append(f"• Gamma Factor: {symbol.gamma_factor:.2f}×")
+        if symbol.minutes_to_close is not None:
+            try:
+                minutes = int(float(symbol.minutes_to_close))
+                lines.append(f"• Minutes to Close: {minutes}")
+            except (TypeError, ValueError):
+                pass
+        if symbol.change_vs_yesterday is not None:
+            lines.append(f"• vs Yesterday: {self._format_change(symbol.change_vs_yesterday)}")
+
+        value = '\n'.join(lines) if lines else 'No additional context available.'
+        return {'name': header, 'value': value, 'inline': False}
+
+    def _build_watchlist_field(self, symbols: List[AnalysisSymbol]) -> Optional[Dict[str, Any]]:
+        if not symbols:
+            return None
+
+        entries: List[str] = []
+        for symbol in symbols:
+            offset = self._format_bps(symbol.near_close_offset_bps) if symbol.near_close_offset_bps is not None else '0 bps'
+            entries.append(
+                f"{symbol.symbol} {symbol.imbalance_side.title()} {_format_currency(symbol.imbalance_total)} ({self._format_ratio(symbol.imbalance_ratio)}) · {offset}"
+            )
+
+        value = '\n'.join(entries)
+        return {'name': 'Watchlist', 'value': value, 'inline': False}
+
+    def _format_slot(self, timestamp: datetime) -> str:
+        local_dt = timestamp.astimezone(self.market_tz)
+        return local_dt.strftime('%H:%M ET')
+
+    @staticmethod
+    def _format_ratio(value: float) -> str:
+        return f"{value * 100:.0f}%"
+
+    @staticmethod
+    def _format_bps(value: float) -> str:
+        if value is None:
+            return '0 bps'
+        sign = '+' if value > 0 else ''
+        return f"{sign}{value:.0f} bps"
+
+    @staticmethod
+    def _format_shares(value: float) -> str:
+        try:
+            amount = float(value)
+        except (TypeError, ValueError):
+            return str(value)
+        if abs(amount) >= 1_000_000_000:
+            return f"{amount/1_000_000_000:.2f}B sh"
+        if abs(amount) >= 1_000_000:
+            return f"{amount/1_000_000:.1f}M sh"
+        if abs(amount) >= 1_000:
+            return f"{amount/1_000:.1f}K sh"
+        return f"{amount:.0f} sh"
+
+    @staticmethod
+    def _format_change(value: float) -> str:
+        sign = '+' if value > 0 else ''
+        return f"{sign}{_format_currency(value)}"
+
+
 def _format_currency(value: Any) -> str:
     try:
         amount = float(value)
@@ -623,6 +883,7 @@ class DiscordBot:
         webhooks_config = load_discord_webhooks(discord_config.get('webhooks_file'))
         self.tiers = self._build_tier_configs(discord_config.get('tiers', {}), webhooks_config)
         self.message_builder = DiscordMessageBuilder(discord_config.get('formatting', {}))
+        self.analysis_builder = AnalysisMessageBuilder(discord_config.get('formatting', {}))
 
         self.dead_letter_key = 'discord:dead_letter'
         self.metrics_prefix = 'discord:metrics'
@@ -674,19 +935,30 @@ class DiscordBot:
                     await self.redis.lpush(self.dead_letter_key, raw_payload)
                     continue
 
-                envelope = SignalEnvelope.from_dict(payload, tier.name)
+                payload_type = str(payload.get('type') or '').lower()
+                payload_id = str(payload.get('id') or '')
 
-                dedupe_key = f"discord:sent:{tier.name}:{envelope.id}:{envelope.action_type}"
+                if payload_type.startswith('analysis'):
+                    analysis_envelope = AnalysisEnvelope.from_dict(payload)
+                    dedupe_token = payload.get('dedupe_token') or analysis_envelope.dedupe_token
+                    payload_id = analysis_envelope.id
+                    message = self.analysis_builder.build(analysis_envelope, tier)
+                else:
+                    signal_envelope = SignalEnvelope.from_dict(payload, tier.name)
+                    dedupe_token = payload.get('dedupe_token') or f"{signal_envelope.id}:{signal_envelope.action_type}"
+                    payload_id = signal_envelope.id
+                    message = self.message_builder.build(signal_envelope, tier)
+
+                dedupe_key = f"discord:sent:{tier.name}:{dedupe_token}"
                 if not await self.redis.setnx(dedupe_key, int(time.time())):
                     self.logger.debug(
                         "Duplicate Discord payload suppressed",
-                        extra={'tier': tier.name, 'signal_id': envelope.id, 'action_type': envelope.action_type}
+                        extra={'tier': tier.name, 'payload_type': payload_type or 'signal', 'payload_id': payload_id}
                     )
                     continue
                 await self.redis.expire(dedupe_key, self.dedupe_ttl)
 
-                message = self.message_builder.build(envelope, tier)
-                await self._dispatch_message(tier, envelope, message, raw_payload)
+                await self._dispatch_message(tier, payload, message, raw_payload)
 
                 await self.redis.incr(f"{self.metrics_prefix}:delivered:{tier.name}")
                 backoff_attempts = 0
@@ -705,7 +977,7 @@ class DiscordBot:
     async def _dispatch_message(
         self,
         tier: TierConfig,
-        envelope: SignalEnvelope,
+        _payload_meta: Dict[str, Any],
         message: DiscordMessage,
         raw_payload: str,
     ) -> None:
@@ -798,6 +1070,9 @@ class DiscordBot:
 __all__ = [
     'DiscordBot',
     'DiscordMessageBuilder',
+    'AnalysisMessageBuilder',
+    'AnalysisEnvelope',
+    'AnalysisSymbol',
     'SignalEnvelope',
     'TierConfig',
     'WebhookTarget',

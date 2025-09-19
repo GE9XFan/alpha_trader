@@ -415,7 +415,7 @@ class CircuitBreakers:
         self.breakers = {
             'daily_loss': {
                 'enabled': circuit_config.get('daily_loss', True),
-                'limit': risk_config.get('max_daily_loss_pct', 2.0),
+                'limit': risk_config.get('max_daily_loss_pct', 20.0),
                 'current': 0,
                 'triggered': False,
                 'last_triggered': None,

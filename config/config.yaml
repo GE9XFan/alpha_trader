@@ -267,6 +267,21 @@ modules:
   social_media:
     enabled: true  # Day 7+
 
+  analysis_publisher:
+    enabled: true
+    moc:
+      symbols: ["SPY", "QQQ", "IWM"]
+      schedule: ["08:00", "10:00", "12:00", "14:00", "15:45"]
+      window_start: "08:00"
+      min_notional: 500000000       # $500M minimum to feature
+      min_watchlist_ratio: 0.40
+      stale_after_seconds: 180
+      historical_ttl_hours: 72
+      ping_thresholds:
+        extreme_notional: 5000000000
+        final_notional: 2000000000
+      market_holidays: []           # Optional list of YYYY-MM-DD strings
+
 discord:
   enabled: true
   queue_processing:
@@ -291,11 +306,19 @@ discord:
       webhook_key: "free-signals-5min"
       detail_level: "teaser"
       mention: "@everyone"
+    premium_analysis:
+      queue: "analysis:premium:moc"
+      webhook_key: "premium-analysis"
+      detail_level: "analysis"
+      mention: null
   formatting:
     colors:
       long: 3066993      # 0x2ecc71
       short: 15158332    # 0xe74c3c
       neutral: 40447     # 0x009ddf
+    analysis:
+      neutral: 40447
+      extreme: 15158332
     premium_rationale_tags:
       flow: "Flow imbalance + dealer hedge unwind alignment"
       volatility: "Volatility regime supportive"
@@ -314,12 +337,24 @@ discord:
 # Risk Management configuration (Day 7)
 risk_management:
   enabled: true
-  max_daily_loss_pct: 2.0          # 2% of account value
+  max_daily_loss_pct: 20.0         # 20% of account value (paper mode)
   max_position_loss_pct: 1.0        # 1% max loss per position
   consecutive_loss_limit: 3         # Halt after 3 consecutive losses
   correlation_limit: 0.7            # Max portfolio correlation
   margin_buffer: 1.25               # 25% margin buffer required
   max_drawdown_pct: 10.0           # 10% max drawdown from HWM
+  
+  # Trailing stop behaviour can be tuned per instrument type or strategy
+  trailing_stops:
+    option:
+      profit_trigger: 0.1          # Begin trailing after ~10% move in option value
+      trail_percent: 0.6           # Lock in 60% of gains once active
+    stock:
+      profit_trigger: 0.02         # Trail equity positions after ~2% move
+      trail_percent: 0.5           # Keep half of the captured gains
+    default:
+      profit_trigger: 0.2
+      trail_percent: 0.5
   
   # Circuit breakers
   circuit_breakers:
@@ -341,7 +376,7 @@ risk_management:
 risk:
   circuit_breakers:
     enabled: false
-    max_daily_loss: 5000
+    max_daily_loss: 20000
     max_position_loss: 1000
     max_correlation: 0.7
     halt_on_disconnect: true

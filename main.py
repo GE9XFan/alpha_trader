@@ -241,6 +241,23 @@ class QuantiCityCapital:
             except Exception as e:
                 self.logger.warning(f"Error loading social media modules: {e}")
 
+        if self.config.get('modules', {}).get('analysis_publisher', {}).get('enabled', False):
+            try:
+                from src.moc_analysis_publisher import MOCAnalysisPublisher
+
+                self.modules['moc_analysis_publisher'] = MOCAnalysisPublisher(self.config, self.redis)
+                self.logger.info(
+                    "module_initialized",
+                    extra={"action": "module_init", "module": "analysis_publisher"}
+                )
+            except ImportError:
+                self.logger.info(
+                    "module_unavailable",
+                    extra={"action": "module_init", "module": "analysis_publisher", "reason": "import_error"}
+                )
+            except Exception as e:
+                self.logger.warning(f"Error loading analysis publisher modules: {e}")
+
         # OPTIONAL: Dashboard modules
         if self.config.get('modules', {}).get('dashboard', {}).get('enabled', False):
             try:
@@ -349,6 +366,12 @@ class QuantiCityCapital:
                 task = asyncio.create_task(self.modules[module_name].start())
                 task.set_name(f"module_{module_name}")
                 tasks.append(task)
+
+        if 'moc_analysis_publisher' in self.modules:
+            self.logger.info("Starting moc_analysis_publisher...")
+            task = asyncio.create_task(self.modules['moc_analysis_publisher'].start())
+            task.set_name("module_moc_analysis_publisher")
+            tasks.append(task)
 
         # Start execution modules if present
         execution_modules = ['execution_manager', 'position_manager', 'risk_manager']

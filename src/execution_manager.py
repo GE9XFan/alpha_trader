@@ -35,14 +35,15 @@ Version: 3.0.0
 import asyncio
 import inspect
 import json
+import math
 import time
 import uuid
 import re
 import logging
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 import redis.asyncio as aioredis
-from ib_insync import IB, Stock, Option, MarketOrder, LimitOrder, StopOrder
+from ib_insync import IB, Stock, Option, MarketOrder, LimitOrder, StopOrder, ExecutionFilter, util
 
 from src.option_utils import normalize_expiry
 from logging_utils import get_logger
@@ -104,6 +105,10 @@ class ExecutionManager:
         self.max_reconnect_attempts = 10
 
         self.logger = get_logger(__name__, component="execution", subsystem="manager")
+
+        # Tracking for manual fills to detect missing execution events
+        self._manual_fill_positions: Set[str] = set()
+        self._missing_manual_fill_alerted: Set[str] = set()
 
     @staticmethod
     def _normalize_strategy(strategy: Optional[str]) -> str:
@@ -203,6 +208,20 @@ class ExecutionManager:
         if sec_type == 'OPT':
             return avg_cost / 100.0
         return avg_cost
+
+    @staticmethod
+    def _safe_price(value: Any) -> Optional[float]:
+        """Return a finite positive float price when available."""
+
+        try:
+            price = float(value)
+        except (TypeError, ValueError):
+            return None
+
+        if price <= 0 or math.isnan(price) or math.isinf(price):
+            return None
+
+        return price
 
     def _create_position_snapshot_from_ib(
         self,
@@ -348,6 +367,333 @@ class ExecutionManager:
         except Exception:
             return fill_price
 
+    @staticmethod
+    def _compute_holding_minutes(entry_time: Optional[str], exit_time: Optional[str]) -> Optional[float]:
+        if not entry_time or not exit_time:
+            return None
+
+        try:
+            start = datetime.fromisoformat(entry_time)
+            end = datetime.fromisoformat(exit_time)
+        except ValueError:
+            return None
+
+        delta_seconds = (end - start).total_seconds()
+        if delta_seconds < 0:
+            return None
+        return round(delta_seconds / 60.0, 2)
+
+    @staticmethod
+    def _classify_result(realized_pnl: Optional[float]) -> str:
+        if realized_pnl is None:
+            return 'FLAT'
+        if realized_pnl > 0:
+            return 'WIN'
+        if realized_pnl < 0:
+            return 'LOSS'
+        return 'FLAT'
+
+    def _calculate_return_pct(
+        self,
+        position: Dict[str, Any],
+        realized_pnl: Optional[float],
+        closed_quantity: float,
+    ) -> Optional[float]:
+        try:
+            base_notional = float(position.get('position_notional') or 0.0)
+        except (TypeError, ValueError):
+            base_notional = 0.0
+
+        if base_notional <= 0:
+            entry_price = 0.0
+            try:
+                entry_price = float(position.get('entry_price') or 0.0)
+            except (TypeError, ValueError):
+                entry_price = 0.0
+            multiplier = self._position_multiplier(position)
+            base_notional = abs(entry_price) * abs(closed_quantity) * multiplier
+
+        if base_notional <= 0:
+            return None
+
+        try:
+            pnl_value = float(realized_pnl or 0.0)
+        except (TypeError, ValueError):
+            return None
+
+        return pnl_value / base_notional
+
+    async def _publish_exit_distribution(
+        self,
+        position: Dict[str, Any],
+        exit_price: Optional[float],
+        closed_quantity: float,
+        reason: str,
+    ) -> None:
+        symbol = position.get('symbol')
+        position_id = position.get('id')
+        if not symbol or not position_id:
+            return
+
+        payload = {
+            'id': position.get('signal_id') or position_id,
+            'symbol': symbol,
+            'side': position.get('side'),
+            'strategy': self._normalize_strategy(position.get('strategy')),
+            'action_type': 'EXIT',
+            'ts': int(time.time() * 1000),
+            'position_id': position_id,
+            'position_notional': position.get('position_notional'),
+            'entry': position.get('entry_price'),
+            'stop': position.get('stop_loss'),
+            'targets': position.get('targets', []),
+            'contract': position.get('contract'),
+        }
+
+        exit_time = position.get('exit_time') or datetime.utcnow().isoformat()
+        realized_total = position.get('realized_pnl', 0.0)
+        return_pct = self._calculate_return_pct(position, realized_total, closed_quantity)
+        holding_minutes = self._compute_holding_minutes(position.get('entry_time'), exit_time)
+
+        lifecycle = {
+            'executed_at': exit_time,
+            'exit_price': round(float(exit_price), 4) if exit_price is not None else None,
+            'quantity': closed_quantity,
+            'realized_pnl': round(float(realized_total or 0.0), 2),
+            'return_pct': return_pct,
+            'holding_period_minutes': holding_minutes,
+            'reason': reason,
+            'result': self._classify_result(realized_total),
+            'remaining_quantity': position.get('quantity', 0),
+        }
+
+        execution_snapshot = {
+            'status': 'FILLED',
+            'avg_fill_price': round(float(exit_price), 4) if exit_price is not None else None,
+            'filled_quantity': closed_quantity,
+            'executed_at': exit_time,
+            'order_id': position.get('order_id'),
+            'position_id': position_id,
+        }
+
+        lifecycle = {k: v for k, v in lifecycle.items() if v is not None}
+        execution_snapshot = {k: v for k, v in execution_snapshot.items() if v is not None}
+        if lifecycle:
+            payload['lifecycle'] = lifecycle
+        if execution_snapshot:
+            payload['execution'] = execution_snapshot
+
+        payload = {k: v for k, v in payload.items() if v is not None}
+
+        try:
+            self.logger.info(
+                "exit_distribution_enqueued",
+                extra={
+                    "action": "exit_distribution",
+                    "symbol": symbol,
+                    "position_id": position_id,
+                    "reason": reason,
+                    "quantity": closed_quantity,
+                    "realized": lifecycle.get('realized_pnl'),
+                },
+            )
+            await self.redis.lpush('signals:distribution:pending', json.dumps(payload))
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self.logger.error(
+                "Failed to enqueue exit distribution payload",
+                extra={'position_id': position_id, 'error': str(exc), 'symbol': symbol}
+            )
+
+    async def _prime_execution_stream(self) -> None:
+        """Ensure IBKR sends execution events for manual trades."""
+
+        if not self.ib.isConnected():
+            return
+
+        try:
+            executions = await self.ib.reqExecutionsAsync(ExecutionFilter())
+            count = len(executions) if executions is not None else 0
+            self.logger.info(
+                "execution_stream_primed",
+                extra={"action": "prime_executions", "count": count},
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "execution_stream_prime_failed",
+                extra={"action": "prime_executions", "error": str(exc)},
+            )
+
+    @staticmethod
+    def _parse_datetime(value: Any) -> Optional[datetime]:
+        """Best-effort conversion of various datetime representations to ``datetime``."""
+
+        if isinstance(value, datetime):
+            return value
+
+        if isinstance(value, (int, float)):
+            try:
+                return datetime.fromtimestamp(float(value))
+            except (OverflowError, OSError, ValueError):
+                return None
+
+        if isinstance(value, str):
+            normalized = value.strip()
+            if not normalized:
+                return None
+            try:
+                # Handle ISO format, including "Z" suffix
+                return datetime.fromisoformat(normalized.replace('Z', '+00:00'))
+            except ValueError:
+                try:
+                    return util.parseIBDatetime(normalized)
+                except Exception:
+                    return None
+
+        return None
+
+    async def _backfill_realized_from_ib(
+        self,
+        position: Dict[str, Any],
+        reason: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Pull execution history for ``position`` and compute realized P&L."""
+
+        if not self.ib.isConnected():
+            return None
+
+        account = position.get('ib_account')
+        con_id = position.get('ib_con_id')
+        if not account or con_id in (None, ''):
+            return None
+
+        try:
+            con_id_int = int(con_id)
+        except (TypeError, ValueError):
+            return None
+
+        filt = ExecutionFilter()
+        filt.acctCode = account
+        filt.conId = con_id_int
+
+        entry_time = self._parse_datetime(position.get('entry_time'))
+        if entry_time:
+            filt.time = entry_time.strftime('%Y%m%d %H:%M:%S')
+
+        try:
+            executions = await self.ib.reqExecutionsAsync(filt)
+        except Exception as exc:
+            self.logger.warning(
+                "execution_backfill_failed",
+                extra={
+                    "action": "execution_backfill",
+                    "position_id": position.get('id'),
+                    "symbol": position.get('symbol'),
+                    "error": str(exc),
+                },
+            )
+            return None
+
+        if not executions:
+            return None
+
+        side = (position.get('side') or '').upper()
+        entry_price = float(position.get('entry_price', 0.0) or 0.0)
+        multiplier = self._position_multiplier(position)
+        existing_commission = float(position.get('commission') or 0.0)
+
+        total_realized = 0.0
+        total_commission = existing_commission
+        closed_quantity = 0.0
+        weighted_exit = 0.0
+        exit_time_obj: Optional[datetime] = None
+        events: List[Dict[str, Any]] = []
+
+        for detail in executions:
+            contract = getattr(detail, 'contract', None)
+            if contract is not None:
+                detail_con_id = getattr(contract, 'conId', None)
+                if detail_con_id not in (None, con_id_int):
+                    continue
+
+            execution = getattr(detail, 'execution', None)
+            if execution is None:
+                continue
+
+            fill_side = str(getattr(execution, 'side', '')).upper()
+            shares = abs(float(getattr(execution, 'shares', 0) or 0.0))
+            price = float(getattr(execution, 'price', 0.0) or 0.0)
+            if shares <= 0 or price <= 0:
+                continue
+
+            is_reduction = (
+                (side == 'LONG' and fill_side == 'SLD') or
+                (side == 'SHORT' and fill_side == 'BOT')
+            )
+            if not is_reduction:
+                continue
+
+            commission_report = getattr(detail, 'commissionReport', None)
+            fill_commission = 0.0
+            fill_realized: Optional[float] = None
+            if commission_report is not None:
+                try:
+                    fill_commission = abs(float(getattr(commission_report, 'commission', 0.0) or 0.0))
+                except (TypeError, ValueError):
+                    fill_commission = 0.0
+
+                realized_value = getattr(commission_report, 'realizedPNL', None)
+                if realized_value is not None:
+                    try:
+                        fill_realized = float(realized_value)
+                    except (TypeError, ValueError):
+                        fill_realized = None
+
+            if fill_realized is None:
+                if side == 'LONG':
+                    fill_realized = (price - entry_price) * shares * multiplier
+                else:
+                    fill_realized = (entry_price - price) * shares * multiplier
+
+            total_realized += fill_realized
+            total_commission += fill_commission
+            closed_quantity += shares
+            weighted_exit += shares * price
+
+            timestamp_str = getattr(execution, 'time', None)
+            timestamp_dt = util.parseIBDatetime(timestamp_str) if timestamp_str else None
+            if timestamp_dt:
+                exit_time_obj = (
+                    max(exit_time_obj, timestamp_dt)
+                    if exit_time_obj else timestamp_dt
+                )
+
+            events.append(
+                {
+                    'type': f'{reason}_BACKFILL',
+                    'quantity': shares,
+                    'price': price,
+                    'commission': fill_commission,
+                    'realized': fill_realized,
+                    'timestamp': (timestamp_dt or datetime.utcnow()).isoformat(),
+                    'exec_id': getattr(execution, 'execId', None),
+                    'side': fill_side,
+                }
+            )
+
+        if closed_quantity <= 0:
+            return None
+
+        exit_price = weighted_exit / closed_quantity if closed_quantity else None
+
+        return {
+            'realized': total_realized,
+            'commission': total_commission,
+            'exit_price': exit_price,
+            'exit_time': exit_time_obj.isoformat() if exit_time_obj else None,
+            'events': events,
+            'closed_quantity': closed_quantity,
+        }
+
     async def _cancel_bracket_orders(self, position: Dict[str, Any]) -> None:
         position_id = position.get('id')
         stop_trade = self.stop_orders.pop(position_id, None)
@@ -368,12 +714,94 @@ class ExecutionManager:
         position['target_order_ids'] = []
         position['oca_group'] = None
 
+    async def _cancel_trade_safe(self, trade, *, context: str = "") -> None:
+        """Cancel an IB trade object if it is still active."""
+        if not trade:
+            return
+
+        try:
+            if not trade.isDone():
+                self.ib.cancelOrder(trade.order)
+        except Exception as exc:
+            detail = f" ({context})" if context else ""
+            self.logger.warning(f"Failed to cancel trade{detail}: {exc}")
+
+    async def _cancel_order_id_safe(self, order_id: Optional[int], *, context: str = "") -> None:
+        """Attempt to cancel an order by ID even if we don't have the trade handle."""
+        if order_id is None:
+            return
+
+        trade = None
+        for existing in self.ib.trades():
+            if getattr(existing.order, 'orderId', None) == order_id:
+                trade = existing
+                break
+
+        if trade is None:
+            try:
+                await self.ib.reqOpenOrdersAsync()
+            except Exception as exc:
+                detail = f" ({context})" if context else ""
+                self.logger.debug(
+                    "Failed to refresh open orders%s for cancellation of %s: %s",
+                    detail,
+                    order_id,
+                    exc,
+                )
+            else:
+                for existing in self.ib.trades():
+                    if getattr(existing.order, 'orderId', None) == order_id:
+                        trade = existing
+                        break
+
+        if trade is not None:
+            await self._cancel_trade_safe(trade, context=context)
+        else:
+            detail = f" ({context})" if context else ""
+            self.logger.debug(f"Unable to locate trade{detail} for cancellation of order {order_id}")
+
+    async def _retire_previous_bracket(
+        self,
+        position_id: str,
+        *,
+        stop_trade,
+        target_trades,
+        stop_order_id,
+        target_order_ids,
+    ) -> None:
+        """Cancel legacy bracket orders after new protection is in place."""
+
+        seen_ids = set()
+
+        if stop_trade:
+            order_id = getattr(stop_trade.order, 'orderId', None)
+            if order_id is not None:
+                seen_ids.add(order_id)
+            await self._cancel_trade_safe(stop_trade, context=f"{position_id} stop")
+
+        if stop_order_id is not None and stop_order_id not in seen_ids:
+            seen_ids.add(stop_order_id)
+            await self._cancel_order_id_safe(stop_order_id, context=f"{position_id} stop")
+
+        for trade in target_trades or []:
+            order_id = getattr(trade.order, 'orderId', None)
+            if order_id is not None:
+                seen_ids.add(order_id)
+            await self._cancel_trade_safe(trade, context=f"{position_id} target")
+
+        for order_id in target_order_ids or []:
+            if order_id in seen_ids:
+                continue
+            seen_ids.add(order_id)
+            await self._cancel_order_id_safe(order_id, context=f"{position_id} target")
+
     async def _finalize_position_close(
         self,
         position: Dict[str, Any],
         exit_price: float,
         realized_pnl_delta: float,
         reason: str,
+        closed_quantity: float,
     ) -> None:
         symbol = position.get('symbol')
         position_id = position.get('id')
@@ -426,6 +854,8 @@ class ExecutionManager:
             },
         )
 
+        await self._publish_exit_distribution(position, exit_price, closed_quantity, reason)
+
 
     async def _archive_position(self, position: Dict[str, Any], reason: str) -> None:
         """Move a stale Redis position to the closed bucket."""
@@ -441,6 +871,72 @@ class ExecutionManager:
         position.setdefault('close_reason', reason)
         position.setdefault('exit_time', now_iso)
         position.setdefault('exit_price', position.get('current_price'))
+
+        pre_close_quantity = float(position.get('quantity') or 0.0)
+        closed_quantity_override: Optional[float] = None
+
+        if reason == 'SYNCED_CLOSED':
+            if (
+                position_id not in self._manual_fill_positions
+                and position_id not in self._missing_manual_fill_alerted
+            ):
+                alert_payload = {
+                    'type': 'execution_manual_fill_missing',
+                    'symbol': symbol,
+                    'position_id': position_id,
+                    'reason': reason,
+                    'account': position.get('ib_account'),
+                    'timestamp': now_iso,
+                }
+                await self.redis.publish('alerts:critical', json.dumps(alert_payload))
+                self._missing_manual_fill_alerted.add(position_id)
+                self.logger.error(
+                    "Position sync archived %s (%s) without execution event; attempting backfill",
+                    symbol,
+                    position_id,
+                )
+
+            backfill = await self._backfill_realized_from_ib(position, reason)
+            if backfill:
+                realized_val = backfill.get('realized')
+                if realized_val is not None:
+                    position['realized_pnl'] = float(realized_val)
+                commission_val = backfill.get('commission')
+                if commission_val is not None:
+                    position['commission'] = float(commission_val)
+                exit_price_val = backfill.get('exit_price')
+                if exit_price_val is not None:
+                    position['exit_price'] = float(exit_price_val)
+                exit_time_val = backfill.get('exit_time')
+                if exit_time_val:
+                    position['exit_time'] = exit_time_val
+                events = backfill.get('events') or []
+                if events:
+                    position.setdefault('realized_events', [])
+                    position['realized_events'].extend(events)
+                if backfill.get('closed_quantity') is not None:
+                    closed_quantity_override = float(backfill['closed_quantity'] or 0.0)
+
+                self.logger.info(
+                    "execution_backfill_applied",
+                    extra={
+                        "action": "execution_backfill",
+                        "symbol": symbol,
+                        "position_id": position_id,
+                        "realized": backfill.get('realized'),
+                        "commission": backfill.get('commission'),
+                    },
+                )
+            else:
+                self.logger.warning(
+                    "execution_backfill_unavailable",
+                    extra={
+                        "action": "execution_backfill",
+                        "symbol": symbol,
+                        "position_id": position_id,
+                    },
+                )
+
         realized_total = float(position.get('realized_pnl', 0.0) or 0.0)
         position.pop('realized_unposted', None)
         position['commission'] = float(position.get('commission') or 0.0)
@@ -448,6 +944,11 @@ class ExecutionManager:
             await self.redis.incrbyfloat('positions:pnl:realized:total', realized_total)
             await self.redis.incrbyfloat('risk:daily_pnl', realized_total)
 
+        closed_quantity = (
+            closed_quantity_override
+            if closed_quantity_override is not None
+            else pre_close_quantity
+        )
         position['quantity'] = 0
 
         redis_key = f'positions:open:{symbol}:{position_id}'
@@ -465,10 +966,22 @@ class ExecutionManager:
         self.stop_orders.pop(position_id, None)
         self.target_orders.pop(position_id, None)
 
-        self.logger.warning(
-            f"Position sync: Archived {symbol} position {position_id[:8]} ({reason}); "
-            "realized P&L may be incomplete"
-        )
+        self._manual_fill_positions.discard(position_id)
+        self._missing_manual_fill_alerted.discard(position_id)
+
+        if reason == 'SYNCED_CLOSED' and realized_total:
+            log_msg = (
+                f"Position sync: Archived {symbol} position {position_id[:8]} ({reason}); "
+                f"realized={realized_total:.2f}"
+            )
+            self.logger.info(log_msg)
+        else:
+            self.logger.warning(
+                f"Position sync: Archived {symbol} position {position_id[:8]} ({reason}); "
+                "realized P&L may be incomplete"
+            )
+
+        await self._publish_exit_distribution(position, position.get('exit_price'), closed_quantity, reason)
 
     async def start(self):
         """
@@ -557,6 +1070,7 @@ class ExecutionManager:
                             await self.redis.set('account:buying_power', av.value)
 
                     await self.redis.set('execution:connection:status', 'connected')
+                    await self._prime_execution_stream()
                     return True
 
             except Exception as e:
@@ -878,7 +1392,7 @@ class ExecutionManager:
 
             # Check daily loss limit
             daily_pnl = float(await self.redis.get('risk:daily_pnl') or 0)
-            if daily_pnl < -2000:  # $2000 daily loss limit
+            if daily_pnl < -20000:  # $20,000 daily loss limit (paper)
                 self.logger.warning(f"Daily loss limit exceeded: {daily_pnl}")
                 return False
 
@@ -957,7 +1471,15 @@ class ExecutionManager:
                 return
 
             # Determine order type and price
-            action = 'BUY' if side == 'LONG' else 'SELL'
+            contract_type = str(contract_info.get('type') or '').strip().lower()
+            option_types = {'option', 'options', 'opt'}
+            side_upper = (side or '').upper()
+
+            if contract_type in option_types:
+                # Directional options trades are opened with long premium (buy puts/calls)
+                action = 'BUY'
+            else:
+                action = 'BUY' if side_upper == 'LONG' else 'SELL'
 
             if confidence > 85 and strategy_code != '0DTE':  # Never use market for 0DTE
                 # Market order for high confidence (except 0DTE)
@@ -965,23 +1487,46 @@ class ExecutionManager:
                 order_type = 'MARKET'
             else:
                 # Limit order
-                if ticker.bid and ticker.ask:
-                    spread = ticker.ask - ticker.bid
-                    if confidence >= 70:
-                        # Limit at mid
-                        limit_price = round((ticker.bid + ticker.ask) / 2, 2)
-                    else:
-                        # Limit closer to favorable side
-                        if action == 'BUY':
-                            limit_price = round(ticker.bid + spread * 0.33, 2)
-                        else:
-                            limit_price = round(ticker.ask - spread * 0.33, 2)
-                else:
-                    # Fallback to last price
-                    limit_price = ticker.last or signal.get('entry', 0)
+                limit_price = None
+                bid = self._safe_price(getattr(ticker, 'bid', None))
+                ask = self._safe_price(getattr(ticker, 'ask', None))
 
-                order = LimitOrder(action, order_size, limit_price)
-                order_type = 'LIMIT'
+                if bid is not None and ask is not None:
+                    spread = max(ask - bid, 0)
+                    if confidence >= 70:
+                        limit_price = (bid + ask) / 2
+                    else:
+                        if action == 'BUY':
+                            limit_price = bid + spread * 0.33
+                        else:
+                            limit_price = ask - spread * 0.33
+
+                if limit_price is None:
+                    for candidate in (
+                        self._safe_price(getattr(ticker, 'last', None)),
+                        self._safe_price(signal.get('entry')),
+                    ):
+                        if candidate is not None:
+                            limit_price = candidate
+                            break
+
+                if limit_price is not None:
+                    limit_price = round(limit_price, 2)
+
+                if limit_price is None:
+                    self.logger.warning(
+                        "Falling back to market order due to missing price",
+                        extra={
+                            "symbol": symbol,
+                            "reason": "no_valid_limit_price",
+                            "strategy": strategy_code,
+                        },
+                    )
+                    order = MarketOrder(action, order_size)
+                    order_type = 'MARKET'
+                else:
+                    order = LimitOrder(action, order_size, limit_price)
+                    order_type = 'LIMIT'
 
             # Place order
             trade = self.ib.placeOrder(ib_contract, order)
@@ -1635,6 +2180,14 @@ class ExecutionManager:
                 self.logger.warning("Cannot place bracket orders without quantity")
                 return
 
+            position_id = position.get('id')
+            symbol = position.get('symbol')
+
+            existing_stop_trade = self.stop_orders.get(position_id)
+            existing_target_trades = self.target_orders.get(position_id, [])
+            existing_stop_id = position.get('stop_order_id')
+            existing_target_ids = list(position.get('target_order_ids') or [])
+
             entry_price = float(position.get('entry_price') or 0)
             strategy = position.get('strategy')
             strategy_code = self._normalize_strategy(strategy)
@@ -1678,9 +2231,10 @@ class ExecutionManager:
             else:
                 target_prices = [tp for tp in target_prices if tp <= stop_price]
 
-            position_id = position.get('id')
-            symbol = position.get('symbol')
-            oca_group = f"OCA_{position_id}"
+            sanitized_position = re.sub(r'[^A-Za-z0-9]+', '_', str(position_id or 'UNKNOWN'))
+            base_group = position.get('oca_group') or f"OCA_{sanitized_position}"
+            base_group = re.sub(r'[^A-Za-z0-9_]+', '_', base_group)
+            oca_group = f"{base_group}_{int(time.time())}"
 
             # Create and submit stop order
             stop_order = StopOrder(close_action, quantity, stop_price)
@@ -1727,6 +2281,8 @@ class ExecutionManager:
             self.stop_orders[position_id] = stop_trade
             if target_trades:
                 self.target_orders[position_id] = target_trades
+            else:
+                self.target_orders.pop(position_id, None)
 
             self.logger.info(
                 "execution_stop_order",
@@ -1738,6 +2294,15 @@ class ExecutionManager:
                     "stop_price": round(stop_price, 4),
                 },
             )
+
+            if any((existing_stop_trade, existing_target_trades, existing_stop_id, existing_target_ids)):
+                await self._retire_previous_bracket(
+                    position_id,
+                    stop_trade=existing_stop_trade,
+                    target_trades=existing_target_trades,
+                    stop_order_id=existing_stop_id,
+                    target_order_ids=existing_target_ids,
+                )
 
         except Exception as e:
             self.logger.error(f"Error placing stop loss: {e}")
@@ -1962,7 +2527,7 @@ class ExecutionManager:
                             'side': getattr(fill.execution, 'side', None),
                         }
                     )
-                    await self._finalize_position_close(position, fill_price, realized_pnl, reason)
+                    await self._finalize_position_close(position, fill_price, realized_pnl, reason, filled_qty)
                     return True
 
         except Exception as e:
@@ -1993,6 +2558,11 @@ class ExecutionManager:
         fill_side = (getattr(fill.execution, 'side', '') or '').upper()
         filled_qty = abs(getattr(fill.execution, 'shares', 0))
         fill_price = getattr(fill.execution, 'price', 0.0)
+
+        position_id = position.get('id')
+        if position_id:
+            self._manual_fill_positions.add(position_id)
+            self._missing_manual_fill_alerted.discard(position_id)
 
         commission = 0.0
         realized_override = None
@@ -2041,6 +2611,11 @@ class ExecutionManager:
 
         current_qty = float(position.get('quantity', 0) or 0.0)
         new_qty = current_qty + added_qty
+        if new_qty <= 0:
+            return
+
+        # Cancel existing protective orders before resizing them
+        await self._cancel_bracket_orders(position)
 
         position['entry_price'] = self._weighted_entry_price(
             current_qty,
@@ -2071,6 +2646,8 @@ class ExecutionManager:
             f'positions:open:{symbol}:{position_id}',
             json.dumps(position)
         )
+
+        await self._place_bracket_orders(position, quantity=int(new_qty))
 
     async def _apply_position_reduction(
         self,
@@ -2106,7 +2683,8 @@ class ExecutionManager:
             if commission:
                 realized_delta -= commission
 
-        position['quantity'] = max(current_qty - closed_qty, 0)
+        new_quantity = max(current_qty - closed_qty, 0)
+        position['quantity'] = new_quantity
         prior_realized = float(position.get('realized_pnl') or 0.0)
         position['realized_pnl'] = prior_realized + realized_delta
         unposted = float(position.get('realized_unposted', 0.0) or 0.0) + realized_delta
@@ -2139,13 +2717,15 @@ class ExecutionManager:
                 }
             )
 
-        if position['quantity'] <= 0:
-            await self._finalize_position_close(position, fill_price, realized_delta, reason)
+        if new_quantity <= 0:
+            await self._finalize_position_close(position, fill_price, realized_delta, reason, closed_qty)
         else:
+            await self._cancel_bracket_orders(position)
             await self.redis.set(
                 f'positions:open:{symbol}:{position_id}',
                 json.dumps(position)
             )
+            await self._place_bracket_orders(position, quantity=int(new_quantity))
 
     async def update_fill_metrics(self, fill):
         """

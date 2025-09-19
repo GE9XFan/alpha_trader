@@ -176,6 +176,9 @@ class RiskManager:
         self.var_confidence = 0.95  # 95% confidence level
         self.var_lookback_days = 30
 
+        # Timezone handling
+        self.eastern = pytz.timezone('US/Eastern')
+
         self.logger = logging.getLogger(__name__)
 
     async def start(self):
@@ -632,12 +635,30 @@ class RiskManager:
                 await self.redis.set('risk:new_positions_allowed', 'true')
                 await self.redis.set('risk:position_size_multiplier', 1.0)
 
-            # Track consecutive losing days
+            # Track consecutive losing days (increment at most once per trading day)
             if daily_pnl < 0:
-                losing_days = await self.redis.incr('risk:consecutive_losing_days')
+                now_et = datetime.utcnow().replace(tzinfo=pytz.utc).astimezone(self.eastern)
+                today_str = now_et.strftime('%Y%m%d')
+
+                last_loss_day_raw = await self.redis.get('risk:last_loss_increment_day')
+                if isinstance(last_loss_day_raw, bytes):
+                    last_loss_day_raw = last_loss_day_raw.decode('utf-8')
+                last_loss_day = last_loss_day_raw
+
+                new_loss_day = last_loss_day != today_str
+                if new_loss_day:
+                    losing_days = await self.redis.incr('risk:consecutive_losing_days')
+                    await self.redis.set('risk:last_loss_increment_day', today_str)
+                else:
+                    current_raw = await self.redis.get('risk:consecutive_losing_days')
+                    if isinstance(current_raw, bytes):
+                        current_raw = current_raw.decode('utf-8')
+                    losing_days = int(current_raw) if current_raw else 0
+
                 if losing_days >= 3:
-                    self.logger.warning(f"Alert: {losing_days} consecutive losing days")
-                    # Reduce risk after consecutive losses
+                    if new_loss_day:
+                        self.logger.warning(f"Alert: {losing_days} consecutive losing days")
+                    # Reduce risk after consecutive losses (maintain setting each loop)
                     await self.redis.set('risk:position_size_multiplier', 0.5)
 
             # Update metrics
@@ -947,16 +968,23 @@ class RiskManager:
         Actually reset daily risk metrics.
         """
         try:
+            # Capture yesterday's P&L before resetting intraday counters
+            previous_daily_raw = await self.redis.get('risk:daily_pnl')
+            if isinstance(previous_daily_raw, bytes):
+                previous_daily_raw = previous_daily_raw.decode('utf-8')
+            previous_daily_pnl = float(previous_daily_raw) if previous_daily_raw else 0.0
+            await self.redis.set('risk:yesterday_pnl', previous_daily_pnl)
+
+            if previous_daily_pnl >= 0:
+                await self.redis.set('risk:consecutive_losses', 0)
+                await self.redis.set('risk:consecutive_losing_days', 0)
+
+            await self.redis.delete('risk:last_loss_increment_day')
+
             # Reset daily P&L and trades
             await self.redis.set('risk:daily_pnl', 0)
             await self.redis.set('risk:daily_trades', 0)
             await self.redis.set('risk:daily:reset_time', time.time())
-
-            # Reset consecutive losses if profitable day
-            yesterday_pnl = await self.redis.get('risk:yesterday_pnl')
-            if yesterday_pnl and float(yesterday_pnl) > 0:
-                await self.redis.set('risk:consecutive_losses', 0)
-                await self.redis.set('risk:consecutive_losing_days', 0)
 
             # Clear circuit breakers (except system errors)
             self.circuit_breakers_tripped.discard('daily_loss')

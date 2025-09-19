@@ -77,7 +77,9 @@ class PositionManager:
             '0DTE': {'profit_trigger': 0.5, 'trail_percent': 0.5},  # Trail at 50% profit, keep 50%
             '1DTE': {'profit_trigger': 0.75, 'trail_percent': 0.75},  # Trail at 75% profit, keep 75%
             '14DTE': {'profit_trigger': 0.25, 'trail_percent': 0.25},  # Trail at 25% profit, keep 25%
-            'default': {'profit_trigger': 0.3, 'trail_percent': 0.5}
+            'OPTION': {'profit_trigger': 0.2, 'trail_percent': 0.6},  # Default option trailing behaviour
+            'STOCK': {'profit_trigger': 0.02, 'trail_percent': 0.5},  # Stocks trail after ~2%
+            'default': {'profit_trigger': 0.2, 'trail_percent': 0.5},
         }
 
         risk_config = self.config.get('risk_management', {})
@@ -87,6 +89,31 @@ class PositionManager:
         ]
         # Copy rules to avoid mutating shared config structures
         self.eod_rules = [dict(rule) for rule in default_eod_rules]
+
+        trailing_overrides = risk_config.get('trailing_stops', {})
+        if isinstance(trailing_overrides, dict):
+            for label, settings in trailing_overrides.items():
+                if not isinstance(settings, dict):
+                    continue
+                profit_trigger = settings.get('profit_trigger')
+                trail_percent = settings.get('trail_percent')
+                if profit_trigger is None or trail_percent is None:
+                    continue
+
+                try:
+                    profit_val = float(profit_trigger)
+                    trail_val = float(trail_percent)
+                except (TypeError, ValueError):
+                    continue
+
+                key = str(label).upper()
+                if key == 'DEFAULT':
+                    key = 'default'
+
+                self.trail_config[key] = {
+                    'profit_trigger': profit_val,
+                    'trail_percent': trail_val,
+                }
 
     async def _increment_position_count(self, amount: int = 1) -> None:
         """Increase the cached open-position count."""
@@ -921,7 +948,8 @@ class PositionManager:
                 unrealized_pnl = position.get('unrealized_pnl', 0)
                 entry_price = position.get('entry_price', 0)
                 current_price = position.get('current_price', 0)
-                strategy = position.get('strategy', 'default')
+                strategy_code = self._normalize_strategy(position.get('strategy'))
+                contract_type = str(position.get('contract', {}).get('type', 'stock')).upper()
                 side = position.get('side')
 
                 # Skip positions without an active stop order (e.g., reconciled without brackets)
@@ -931,10 +959,17 @@ class PositionManager:
                 if unrealized_pnl <= 0:
                     continue  # Only trail profitable positions
 
-                # Get trail configuration for strategy
-                trail_config = self.trail_config.get(strategy, self.trail_config['default'])
-                profit_trigger = trail_config['profit_trigger']
-                trail_percent = trail_config['trail_percent']
+                # Get trail configuration (strategy -> contract type -> default)
+                trail_config = (
+                    self.trail_config.get(strategy_code)
+                    or self.trail_config.get(contract_type)
+                    or self.trail_config['default']
+                )
+                profit_trigger = trail_config.get('profit_trigger', self.trail_config['default']['profit_trigger'])
+                trail_percent = trail_config.get('trail_percent', self.trail_config['default']['trail_percent'])
+
+                if profit_trigger <= 0 or trail_percent <= 0:
+                    continue
 
                 # Calculate profit percentage
                 notional = self._calculate_notional(position)
