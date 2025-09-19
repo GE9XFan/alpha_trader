@@ -98,6 +98,7 @@ class IBKRIngestion:
         self.last_tob_ts = {}  # Track last TOB update timestamp to prevent stale overwrites
         self.update_counts = {'depth': 0, 'trades': 0, 'bars': 0}
         self.subscriptions = {}  # Track all subscriptions
+        self.minute_bar_state: Dict[str, Dict[str, Any]] = {}
         
         self.logger.info(
             "ibkr_ingestion_initialized",
@@ -273,50 +274,74 @@ class IBKRIngestion:
             # Set market data type to live
             self.ib.reqMarketDataType(1)  # 1=Live
             
-            # Request SMART L2 depth
-            depth_ticker = await self._request_exchange_depth(symbol, exchange, contract)
-            
-            if depth_ticker:
+            depth_ticker, has_depth = await self._request_exchange_depth(symbol, exchange, contract)
+
+            if has_depth and depth_ticker:
                 # CRITICAL: Store reference to prevent GC
-                key = f"{symbol}:SMART"
+                key = f"{symbol}:{exchange}"
                 self.depth_tickers[key] = depth_ticker
-                
-                # Also request market data with RTVolume for trades
+
                 trade_ticker = self.ib.reqMktData(
                     contract,
                     genericTickList='233',
                     snapshot=False,
                     regulatorySnapshot=False
                 )
-                
-                # CRITICAL: Also request 5-second bars for L2 symbols
-                # Analytics needs bar data from ALL symbols including L2
+
                 bars = self.ib.reqRealTimeBars(
                     contract,
                     barSize=5,
                     whatToShow='TRADES',
                     useRTH=False
                 )
-                
-                # Track subscription with depth ticker, trade ticker and bars
+
                 self.subscriptions[symbol] = {
-                    'type': 'LEVEL2', 
+                    'type': 'LEVEL2',
                     'depth': depth_ticker,
-                    'ticker': trade_ticker, 
-                    'exchange': 'SMART',
-                    'bars': bars  # Add bars reference
+                    'ticker': trade_ticker,
+                    'exchange': exchange,
+                    'bars': bars
                 }
-                
-                self.logger.info(f"L2 subscription successful: {symbol} on SMART (with venue codes)")
+
+                self.logger.info(f"L2 subscription successful: {symbol} on {exchange} (with venue codes)")
                 return
-                
+
+            if depth_ticker:
+                # Fallback to standard TOB-only data for this symbol
+                self.depth_tickers.pop(f"{symbol}:{exchange}", None)
+
+                bars = self.ib.reqRealTimeBars(
+                    contract,
+                    barSize=5,
+                    whatToShow='TRADES',
+                    useRTH=False
+                )
+
+                self.subscriptions[symbol] = {
+                    'type': 'STANDARD',
+                    'ticker': depth_ticker,
+                    'exchange': exchange,
+                    'bars': bars
+                }
+
+                self.logger.info(f"L2 fallback engaged for {symbol}: using TOB only on {exchange}")
+                return
+
+            # No depth available and no fallback ticker returned; subscribe as standard
+            await self._subscribe_standard_symbol(symbol)
+            return
+
         except Exception as e:
             self.logger.warning(f"L2 subscription failed for {symbol}: {e}")
             # Fall back to standard market data
             await self._subscribe_standard_symbol(symbol)
     
-    async def _request_exchange_depth(self, symbol: str, exchange: str, contract):
-        """Request depth with automatic fallback to TOB on failure."""
+    async def _request_exchange_depth(self, symbol: str, exchange: str, contract) -> Tuple[Optional[Any], bool]:
+        """Request depth with automatic fallback to TOB on failure.
+
+        Returns (ticker, has_depth) where has_depth indicates whether the
+        returned ticker represents true depth data.
+        """
         try:
             # Get configured depth rows
             num_rows = self.config['ibkr'].get('l2_num_rows', 10)
@@ -329,7 +354,7 @@ class IBKRIngestion:
                 isSmartDepth=is_smart  # True for SMART to get venue codes
             )
             
-            return depth_ticker
+            return depth_ticker, True
             
         except Exception as e:
             error_code = getattr(e, 'errorCode', None)
@@ -338,7 +363,7 @@ class IBKRIngestion:
             if error_code == 309 or '309' in error_msg:
                 # Max depth requests reached
                 self.logger.warning(f"Max L2 depth limit reached for {symbol} on {exchange}")
-                return None  # Signal to try next exchange or fall back to TOB
+                return None, False  # Signal to try next exchange or fall back to TOB
                 
             elif error_code == 2152 or '2152' in error_msg:
                 # No L2 permission - fallback to TOB
@@ -356,7 +381,7 @@ class IBKRIngestion:
                 # Note: TOB updates are handled by pendingTickersEvent globally
                 # Bars will be requested by the caller when this ticker is returned
                 
-                return ticker
+                return ticker, False
             
             # Other errors - let them propagate
             raise
@@ -537,10 +562,10 @@ class IBKRIngestion:
             # Only push new trades from buffer
             if self.processor.trades_buffer[symbol]:
                 # Push the latest trade
-                pipe.rpush(trades_key, json.dumps(trade))
+                await pipe.rpush(trades_key, json.dumps(trade))
                 # Keep only last 1000 trades
-                pipe.ltrim(trades_key, -1000, -1)
-                pipe.expire(trades_key, self.ttls.get('trades', 3600))
+                await pipe.ltrim(trades_key, -1000, -1)
+                await pipe.expire(trades_key, self.ttls.get('trades', 3600))
 
             await pipe.execute()
     
@@ -576,24 +601,116 @@ class IBKRIngestion:
             }
             
             # Add to buffer
-            self.processor.record_bar(symbol, bar_data)
-            
-            # Update Redis - APPEND without deleting!
-            async with self.redis.pipeline(transaction=False) as pipe:
-                bars_key = rkeys.market_bars_key(symbol, '1min')
-                
-                # Push new bar without deleting existing ones
-                pipe.rpush(bars_key, json.dumps(bar_data))
-                # Keep only last 500 bars for analysis
-                pipe.ltrim(bars_key, -500, -1)
-                pipe.expire(bars_key, self.ttls['bars'])
-                
-                await pipe.execute()
+            self.processor.record_bar(symbol, bar_data, timeframe='5s')
+
+            await self._store_raw_bar(symbol, bar_data)
+            await self._accumulate_minute_bar(symbol, bar_data)
             
             # Update monitoring
             self.update_counts['bars'] += 1
             self.last_update_times[symbol] = time.time()
-    
+
+    async def _store_raw_bar(self, symbol: str, bar_data: Dict[str, Any]) -> None:
+        """Store 5-second raw bar samples while keeping the list bounded."""
+        try:
+            bars_key = rkeys.market_bars_key(symbol, '5s')
+            async with self.redis.pipeline(transaction=False) as pipe:
+                await pipe.rpush(bars_key, json.dumps(bar_data))
+                await pipe.ltrim(bars_key, -500, -1)
+                await pipe.expire(bars_key, self.ttls['bars'])
+                await pipe.execute()
+        except Exception as exc:
+            self.logger.error(f"Failed to store raw bar for {symbol}: {exc}")
+
+    async def _accumulate_minute_bar(self, symbol: str, bar_data: Dict[str, Any]) -> None:
+        """Aggregate 5-second bars into 1-minute candles."""
+        try:
+            bar_ts = bar_data['time'] // 1000
+            minute_start = (bar_ts // 60) * 60
+
+            state = self.minute_bar_state.get(symbol)
+            if state and state['minute_start'] != minute_start:
+                await self._flush_minute_bar(symbol, state)
+                state = None
+
+            if not state:
+                volume = bar_data.get('volume') or 0
+                wap = bar_data.get('wap')
+                state = {
+                    'minute_start': minute_start,
+                    'open': bar_data['open'],
+                    'high': bar_data['high'],
+                    'low': bar_data['low'],
+                    'close': bar_data['close'],
+                    'volume': volume,
+                    'count': bar_data.get('count') or 0,
+                    'wap_sum': (wap * volume) if (wap is not None and volume) else 0.0,
+                    'wap_volume': volume if (wap is not None and volume) else 0,
+                }
+            else:
+                state['high'] = max(state['high'], bar_data['high'])
+                state['low'] = min(state['low'], bar_data['low'])
+                state['close'] = bar_data['close']
+                state['volume'] += bar_data.get('volume') or 0
+                state['count'] += bar_data.get('count') or 0
+
+                wap = bar_data.get('wap')
+                volume = bar_data.get('volume') or 0
+                if wap is not None and volume:
+                    state['wap_sum'] += wap * volume
+                    state['wap_volume'] += volume
+
+            self.minute_bar_state[symbol] = state
+
+        except Exception as exc:
+            self.logger.error(f"Failed to accumulate minute bar for {symbol}: {exc}")
+
+    async def _flush_minute_bar(self, symbol: str, state: Dict[str, Any]) -> None:
+        """Flush the aggregated minute bar to Redis."""
+        if not state:
+            return
+
+        try:
+            minute_start_ms = state['minute_start'] * 1000
+            volume = state.get('volume', 0)
+            count = state.get('count', 0)
+
+            wap = None
+            wap_volume = state.get('wap_volume', 0)
+            if wap_volume:
+                wap = round(state['wap_sum'] / wap_volume, 6)
+
+            minute_payload = {
+                'time': minute_start_ms,
+                'open': state['open'],
+                'high': state['high'],
+                'low': state['low'],
+                'close': state['close'],
+                'volume': volume,
+                'wap': wap,
+                'count': count,
+            }
+
+            async with self.redis.pipeline(transaction=False) as pipe:
+                bars_key = rkeys.market_bars_key(symbol, '1min')
+                await pipe.rpush(bars_key, json.dumps(minute_payload))
+                await pipe.ltrim(bars_key, -500, -1)
+                await pipe.expire(bars_key, self.ttls['bars'])
+                await pipe.execute()
+
+            self.processor.record_bar(symbol, minute_payload, timeframe='1min')
+
+        except Exception as exc:
+            self.logger.error(f"Failed to flush minute bar for {symbol}: {exc}")
+        finally:
+            self.minute_bar_state.pop(symbol, None)
+
+    async def _flush_all_minute_bars(self) -> None:
+        """Flush any buffered minute bars (used during shutdown)."""
+        for symbol, state in list(self.minute_bar_state.items()):
+            await self._flush_minute_bar(symbol, state)
+        self.minute_bar_state.clear()
+
     def is_market_hours(self, extended: bool = False) -> bool:
         """Check if currently in market hours."""
         now = datetime.now(self.market_tz)
@@ -875,6 +992,7 @@ class IBKRIngestion:
 
         try:
             await self._cancel_background_tasks()
+            await self._flush_all_minute_bars()
 
             # Only try to cancel if we're connected
             if self.ib.isConnected():

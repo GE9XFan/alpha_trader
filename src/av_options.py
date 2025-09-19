@@ -168,6 +168,48 @@ class OptionsProcessor:
         try:
             # Process and store options - Alpha Vantage uses 'data' array
             contracts = data.get('data', [])
+            timestamp_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+
+            if not contracts:
+                empty_payload = {
+                    'symbol': symbol,
+                    'source': 'alpha_vantage',
+                    'as_of': timestamp_ms,
+                    'contract_count': 0,
+                    'schema_version': 1,
+                    'expiration_summary': [],
+                    'by_contract': {},
+                    'raw': data,
+                    'status': 'empty'
+                }
+
+                async with self.redis.pipeline(transaction=False) as pipe:
+                    await pipe.delete(rkeys.options_calls_key(symbol))
+                    await pipe.delete(rkeys.options_puts_key(symbol))
+                    await pipe.setex(
+                        rkeys.options_chain_key(symbol),
+                        ttls['options_chain'],
+                        json.dumps(empty_payload)
+                    )
+                    await pipe.execute()
+
+                monitoring_payload = {
+                    'symbol': symbol,
+                    'as_of': timestamp_ms,
+                    'contracts': 0,
+                    'skipped_contracts': 0,
+                    'missing_greeks': 0,
+                    'status': 'empty'
+                }
+                await self.redis.setex(
+                    f'monitoring:options:{symbol}',
+                    ttls.get('monitoring', 60),
+                    json.dumps(monitoring_payload)
+                )
+
+                await self._notify_chain(symbol, empty_payload)
+                self.logger.warning(f"Alpha Vantage returned empty options chain for {symbol}; cleared cached data")
+                return empty_payload
 
             # Separate calls and puts - AV uses 'type' not 'option_type'
             calls = [c for c in contracts if c.get('type') == 'call']
@@ -184,6 +226,8 @@ class OptionsProcessor:
                         ttls['options_chain'],
                         json.dumps(calls)
                     )
+                else:
+                    await pipe.delete(rkeys.options_calls_key(symbol))
 
                 if puts:
                     await pipe.setex(
@@ -191,9 +235,10 @@ class OptionsProcessor:
                         ttls['options_chain'],
                         json.dumps(puts)
                     )
+                else:
+                    await pipe.delete(rkeys.options_puts_key(symbol))
 
                 # Build normalized chain payload alongside raw response
-                timestamp_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
                 by_contract = {}
                 expirations = {}
 

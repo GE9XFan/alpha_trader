@@ -363,8 +363,8 @@ class SentimentProcessor:
             if tech_key in data:
                 values = data[tech_key]
 
-                # Get latest date
-                latest_date = sorted(values.keys())[0]
+                # Get latest timestamp (Alpha Vantage dictionaries are keyed by ISO timestamp)
+                latest_date = max(values.keys())
                 latest_values = values[latest_date]
 
                 metadata = {

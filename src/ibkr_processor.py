@@ -70,8 +70,8 @@ class IBKRDataProcessor:
         self.trades_buffer: DefaultDict[str, Deque[Dict[str, Any]]] = defaultdict(
             lambda: deque(maxlen=5000)
         )
-        self.bars_buffer: DefaultDict[str, Deque[Dict[str, Any]]] = defaultdict(
-            lambda: deque(maxlen=500)
+        self.bars_buffer: DefaultDict[str, DefaultDict[str, Deque[Dict[str, Any]]]] = defaultdict(
+            lambda: defaultdict(lambda: deque(maxlen=500))
         )
         self.last_trade: Dict[str, float] = {}
         self.last_tob_ts: Dict[str, int] = {}
@@ -117,21 +117,23 @@ class IBKRDataProcessor:
 
         best_bid = 0.0
         best_ask = math.inf
-        bid_exchange = ""
-        ask_exchange = ""
+        best_bid_exchange = ""
+        best_ask_exchange = ""
 
         for book in related_books:
             if book["bids"]:
-                price = float(book["bids"][0]["price"])
+                top_bid = book["bids"][0]
+                price = float(top_bid["price"])
                 if price > best_bid:
                     best_bid = price
-                    bid_exchange = book.get("exchange", "")
+                    best_bid_exchange = top_bid.get("venue") or top_bid.get("mm") or book.get("exchange", "")
 
             if book["asks"]:
-                price = float(book["asks"][0]["price"])
+                top_ask = book["asks"][0]
+                price = float(top_ask["price"])
                 if price < best_ask:
                     best_ask = price
-                    ask_exchange = book.get("exchange", "")
+                    best_ask_exchange = top_ask.get("venue") or top_ask.get("mm") or book.get("exchange", "")
 
         if best_bid <= 0 or not math.isfinite(best_ask):
             return None
@@ -164,8 +166,8 @@ class IBKRDataProcessor:
             "mid": mid,
             "spread": spread,
             "spread_bps": spread_bps,
-            "bid_exchange": bid_exchange,
-            "ask_exchange": ask_exchange,
+            "bid_exchange": best_bid_exchange,
+            "ask_exchange": best_ask_exchange,
             "timestamp": now_ms,
         }
 
@@ -240,10 +242,10 @@ class IBKRDataProcessor:
             "timestamp": int(time.time() * 1000),
         }
 
-    def record_bar(self, symbol: str, bar_data: Dict[str, Any]) -> None:
+    def record_bar(self, symbol: str, bar_data: Dict[str, Any], timeframe: str = "5s") -> None:
         """Append a bar sample to the local buffer for reuse in tests."""
 
-        self.bars_buffer[symbol].append(bar_data)
+        self.bars_buffer[symbol][timeframe].append(bar_data)
 
     # ------------------------------------------------------------------
     # Maintenance helpers
@@ -300,4 +302,3 @@ class IBKRDataProcessor:
         except (TypeError, ValueError):
             return None
         return number
-

@@ -1,118 +1,141 @@
 # QuantiCity Capital – Implementation Plan
 
-## Document Map
-- [Overview](#overview)
-- [Phase Summaries](#phase-summaries)
-- [Detailed Phase Notes](#detailed-phase-notes)
-- [Open Work](#open-work)
-- [Pending Integrations](#pending-integrations)
-- [Operational Notes](#operational-notes)
+## Phase Scoreboard
+| Phase | Status | Delivered Scope Summary | Verification Evidence | Remaining Gaps |
+|-------|--------|-------------------------|-----------------------|----------------|
+| **1 – Schema & Configuration** | ✅ Complete | Canonical Redis key helpers, unified module toggles, cadence/TTL controls, bootstrap wiring in `main.py` | `redis_keys.py`, `config/config.yaml`, config load path in `main.py` | Expand schema docs, `.env` templates, automated config validation |
+| **2 – Dealer-Flow Analytics** | ✅ Complete | DealerFlowCalculator, metrics aggregation into symbol/sector/portfolio snapshots, hedging elasticity metrics, analytics scheduler | `src/dealer_flow_calculator.py`, `src/analytics_engine.py`, dashboards TTL checks | Regression coverage for edge cases, performance profiling |
+| **3 – Flow Clustering & Volatility Regimes** | ✅ Complete | FlowClusterModel, VolatilityMetrics, VIX1D regime tagging, analytics integration | `src/flow_clustering.py`, `src/volatility_metrics.py`, scheduler logs | Validate clustering on expanded universes, regime calibration tooling |
+| **4 – Signal Integration & Scoring** | ✅ Complete | Feature reader refresh, 0/1/14DTE + MOC playbooks, contract normalization, dedupe fan-out to execution/distribution | `src/signal_generator.py`, `src/dte_strategies.py`, `src/moc_strategy.py`, `src/signal_deduplication.py` | Strategy unit/backtest harness, tuning guidance |
+| **5 – Backfills & Monitoring** | ✅ Complete | Replay utilities for analytics history, monitoring scaffolds, regression coverage for replay paths | Replay scripts, monitoring heartbeats in Redis | Update legacy tests, automate replay validation, alerting for stalled jobs |
+| **6 – Execution & Distribution Hardening** | ✅ Complete | Notional-aware sizing, commission normalization, bracket/trailing rebuilds, executed-only distribution, daily P&L reconciliation | `src/execution_manager.py`, `src/position_manager.py`, `src/signal_distributor.py`, `reconcile_daily_pnl.py` | Automated reconciliation checks, expanded risk regression coverage, execution dashboards |
+| **7 – Community Publishing & Automation** | ⚠️ In Planning | Scaffolds for social bots, dashboards, morning automation, reporting wired to config + Redis | `src/discord_bot.py`, `src/telegram_bot.py`, `src/twitter_bot.py`, `src/morning_scanner.py`, `src/report_generator.py` | Implement publishing logic, provision credentials, observability, integration tests |
 
-## Overview
-This plan tracks the delivery status for every major platform phase, highlighting completed milestones, pending work, and supporting modules.
+## Delivered Implementation Detail
 
-## Phase Summaries
-- **Phase 1 – Schema & configuration** (Complete): Redis key helpers now expose dedicated namespaces for dealer-flow metrics, flow clusters, VIX1D data, and the newly introduced MOC/unusual scorecards, while `config/config.yaml` surfaces cadence, TTL, weighting, and interval controls for the expanded analytics pipeline.【F:src/redis_keys.py†L37-L141】【F:config/config.yaml†L84-L210】
-- **Phase 2 – Dealer-flow analytics** (Complete): DealerFlowCalculator derives Vanna, Charm, skew, and hedging elasticity from the normalized option chain and persists rolling histories that the analytics engine aggregates into symbol, sector, and portfolio snapshots.【F:src/dealer_flow_calculator.py†L52-L206】【F:src/analytics_engine.py†L73-L220】【F:src/analytics_engine.py†L500-L660】
-- **Phase 3 – Flow clustering & volatility regimes** (Complete): FlowClusterModel classifies recent trade prints into participant archetypes while VolatilityMetrics maintains VIX1D history and regime tags, both orchestrated by the analytics scheduler and folded into downstream aggregates.【F:src/flow_clustering.py†L30-L199】【F:src/volatility_metrics.py†L19-L190】【F:src/analytics_engine.py†L500-L660】
-- **Phase 4 – Signal integration & scoring** (Complete): The default feature reader and DTE/MOC playbooks ingest dealer-flow, clustering, VIX1D, imbalance, and unusual-activity features and rebalance confidence scoring weights so emissions align with the new analytics payloads.【F:src/signal_generator.py†L542-L803】【F:src/dte_strategies.py†L68-L209】【F:src/moc_strategy.py†L55-L214】【F:config/config.yaml†L143-L250】
-- **Phase 5 – Backfills, monitoring, and regression coverage** (Complete): Backfill utilities replay dealer-flow, flow-cluster, and VIX1D series through dedicated jobs with regression suites covering replay paths; monitoring dashboards for these analytics have been shifted into Phase 7 alongside the broader operator UI work. Migration of legacy tests onto the refactored module surfaces remains a follow-up item.
-- **Phase 6 – Execution & distribution hardening** (Complete): Risk gating, commission normalization, executed-only distribution, manual execution stream priming/backfill, and config-driven trailing/bracket rebuilds are live; missing manual fills now raise alerts so exit distributions carry IB-sourced realized P&L instead of zeros.【F:src/execution_manager.py†L507-L939】【F:src/execution_manager.py†L2537-L2728】【F:config/config.yaml†L347-L356】【F:src/signal_distributor.py†L71-L229】
-- **Phase 7 – Community publishing & automation** (In Planning): Build the social bots, dashboard services, morning automation, and archival/reporting utilities so executed trades, analytics, and pre-market briefs reach every external channel with engagement telemetry fed back into Redis.【F:src/twitter_bot.py†L25-L206】【F:src/discord_bot.py†L25-L141】【F:src/telegram_bot.py†L25-L218】【F:src/dashboard_server.py†L25-L220】【F:src/dashboard_routes.py†L25-L184】【F:src/morning_scanner.py†L25-L220】【F:src/report_generator.py†L25-L120】
+### Schema, Configuration & Bootstrapping (Phase 1)
+- **Unified keyspace helpers**: `redis_keys.py` formalizes namespaces for market data, analytics, signals, risk, monitoring, and system status; every module now uses typed helper functions (`market_book_key`, `analytics_symbol_key`, etc.).
+- **Configuration surface**: `config/config.yaml` exposes toggles (`modules.*`), cadences (`analytics.cadence`, `modules.data_ingestion.store_ttls`), thresholds (risk, trailing stops), and distribution tier delays. YAML schema aligns with `.env` expectations.
+- **Bootstrap flow**: `main.py` loads config, instantiates Redis clients, and wires module factories so individual services can be enabled/disabled without code edits.
+- **Operational artifacts**: Logging defaults defined in `logging_utils.py`, CLI utilities (`clear_distribution_queues.py`, `provision_discord.py`) consume the same config to avoid drift.
 
-## Detailed Phase Notes
+### Dealer-Flow Analytics (Phase 2)
+- **DealerFlowCalculator** (`src/dealer_flow_calculator.py`): Computes Vanna, Charm, hedging elasticity, skew, and maintains rolling statistics stored under `analytics:{symbol}:{metric}`.
+- **Aggregation layer** (`src/analytics_engine.py`): Schedules calculator execution, consolidates contract-level readings into symbol, sector, and portfolio snapshots, and enforces TTLs outlined in config.
+- **Cache hygiene**: Analytics outputs respect `modules.data_ingestion.store_ttls.analytics`, ensuring downstream modules (signals, dashboards) consume consistent payloads.
+- **Monitoring**: Heartbeats and state flags updated via `analytics_engine` for operations observability.
 
-### Phase 1 – Schema & Configuration
-The Redis schema now dedicates stable helpers for dealer-flow buckets (`analytics:vanna`, `analytics:charm`, `analytics:hedging`, `analytics:skew`), flow-cluster payloads, and VIX1D volatility state to keep all producers and consumers aligned on key formats.【F:src/redis_keys.py†L37-L141】 Configuration exposes cadence, TTLs, and weighting knobs for each analytics family—including cluster windows, VIX1D thresholds, and dealer-flow history depth—allowing operators to retune behaviour without code changes.【F:config/config.yaml†L84-L141】 These settings are loaded during bootstrap alongside existing module toggles so every service shares a single source of truth.【F:main.py†L100-L176】
+### Flow Clustering & Volatility Regimes (Phase 3)
+- **FlowClusterModel** (`src/flow_clustering.py`): Consumes trade prints to categorize flow (momentum, dealer hedging, reversion) using KMeans; publishes distribution histograms.
+- **VolatilityMetrics** (`src/volatility_metrics.py`): Maintains VIX1D history, computes regimes, and tracks transitions; surfaces regime metadata for signals and dashboards.
+- **Integration**: Analytics engine coordinates cadence, gating within RTH, and merges clustering/regime outputs into the same symbol snapshots consumed by signal scoring.
 
-### Phase 2 – Dealer-Flow Analytics
-`DealerFlowCalculator` walks the normalized options chain, filters liquid near-dated contracts, and computes per-contract Greeks before aggregating Vanna, Charm, 0DTE skew, and hedging elasticity into Redis payloads with rolling history/z-score stats that downstream consumers can query.【F:src/dealer_flow_calculator.py†L75-L206】 The analytics engine schedules the calculator on a configurable cadence, writing results into symbol snapshots and portfolio/sector rollups so execution, monitoring, and research services share the same dealer-flow view without recomputing histories.【F:src/analytics_engine.py†L73-L220】【F:src/analytics_engine.py†L500-L660】
+### Signal Integration & Scoring (Phase 4)
+- **Feature reader** (`src/signal_generator.py`): Merges dealer-flow, flow clustering, volatility regimes, order imbalance, and unusual activity metrics into strategy-ready payloads with sane defaults.
+- **Strategies**: 0/1/14 DTE (`src/dte_strategies.py`) and MOC (`src/moc_strategy.py`) re-tuned to new analytics, including contract hysteresis, strike memory, and liquidity filters.
+- **Deduplication** (`src/signal_deduplication.py`): Normalizes contract fingerprints, avoids duplicate emissions, and writes to both `signals:pending:*` (distribution) and `signals:execution:*` (execution loop) queues.
+- **Backpressure handling**: Signal generator implements exponential backoff on repeated failures to protect downstream services.
 
-### Phase 3 – Flow Clustering & Volatility Regimes
-`FlowClusterModel` ingests the latest trade prints, assembles feature vectors (size, direction, sweep velocity, notional, gap), and runs a three-cluster KMeans to infer participant and strategy distributions before persisting them to Redis.【F:src/flow_clustering.py†L30-L199】 The TTL is now tied to the configured cadence so downstream rollups retain probabilities between refreshes instead of aging out mid-interval.【F:src/flow_clustering.py†L37-L78】【F:config/config.yaml†L139-L141】 `VolatilityMetrics` promotes a multi-source VIX1D pipeline that prefers CBOE’s CSV feed, caches history, falls back to IBKR, and only hits Yahoo once backoff gates allow, keeping regime classifications visible even during vendor outages.【F:src/volatility_metrics.py†L24-L222】【F:config/config.yaml†L127-L138】 AnalyticsEngine triggers both calculators through its interval map and drops the outputs directly into the symbol snapshots consumed by portfolio and sector aggregations.【F:src/analytics_engine.py†L500-L660】
+### Backfills & Monitoring (Phase 5)
+- **Replay utilities**: Backfill scripts rehydrate dealer-flow, flow-cluster, and VIX1D histories to accelerate warm-up for new symbols or cold starts.
+- **Monitoring scaffolds**: Redis heartbeats (`heartbeat:*`), metrics hashes (`monitoring:analytics:*`, `monitoring:data:*`), and alert queues seeded for future dashboards (Phase 7) with TTL governance.
+- **Regression coverage**: Legacy replay paths ported to new module interfaces to ensure analytics stay consistent after refactors.
 
-### Phase 4 – Signal Integration & Scoring
-The default feature reader batches Redis fetches for dealer-flow, hedging, skew, flow-cluster, VIX1D, and now the synthesized MOC and unusual-activity metrics, normalizing each payload and attaching them to the feature map consumed by the strategies.【F:src/signal_generator.py†L542-L803】 The 0DTE/1DTE playbooks incorporate the new metrics into their confidence gates—e.g., requiring minimum Vanna/Charm balance, flow-momentum thresholds, and volatility regime alignment—while the MOC strategy consumes the freshly published imbalance projections to score auction opportunities.【F:src/dte_strategies.py†L391-L540】【F:src/moc_strategy.py†L55-L214】 Configuration holds the weighting tables and per-strategy thresholds, making tuning quick and consistent across deployments.【F:config/config.yaml†L143-L250】 Signals therefore reflect the broader dealer, volatility, imbalance, and options-flow backdrop instead of relying solely on VPIN and GEX.
+### Execution, Risk & Distribution (Phase 6)
+- **ExecutionManager** (`src/execution_manager.py`): Implements notional-aware sizing, risk gating (25% buying power guardrail), bracket placement, trailing stop maintenance, manual fill backfill, and automated archive alerts for missing executions.
+- **PositionManager & RiskManager**: Trailing-stop orchestration, circuit breaker for consecutive losses, timezone-aware daily loss streak resets.
+- **Distribution** (`src/signal_distributor.py`): Routes executed signals to premium/basic/free queues, enforces tiered delays, and records delivery metrics; only emits after confirmed fills to prevent leakage.
+- **Reconciliation** (`reconcile_daily_pnl.py`): Normalizes commissions, syncs realized P&L with IBKR statements, stores results for downstream reporting.
 
-### Phase 5 – Completed Deliverables
-- **Historical backfill jobs** – Delivered via the `backfill` package and CLI, enabling dealer-flow, flow clustering, and VIX1D replays with resumable checkpoints and regression coverage that verifies replay behaviour and time-window filtering.【F:src/backfill/cli.py†L14-L162】【F:tests/test_backfill_jobs.py†L48-L210】
-- **Regression suite expansion** – Added targeted pytest coverage for backfill workflows, checkpoint resume, time-window bounds, and sparse flow scenarios to guard the new analytics integration paths.【F:tests/test_backfill_jobs.py†L48-L210】
+### Community Publishing & Automation Scaffolds (Phase 7)
+- **Social bots** (`src/discord_bot.py`, `src/twitter_bot.py`, `src/telegram_bot.py`): Constructor wiring for shared config/Redis, TODO placeholders for credential loading, tiered messaging, retry logic, and metrics.
+- **Dashboards** (`src/dashboard_server.py`, `src/dashboard_routes.py`, `src/dashboard_websocket.py`): FastAPI skeletons, route placeholders, websocket scaffolding, logging hooks.
+- **Morning automation** (`src/morning_scanner.py`, `src/news_analyzer.py`): GPT-driven analysis workflow outlines, data ingestion placeholders, queue publishing stubs.
+- **Archival/reporting** (`src/report_generator.py`): Stubs for retention management, historical exports, compliance-ready reporting.
 
-### Phase 6 – Execution & Distribution Hardening
-- **Notional-aware sizing** – `ExecutionManager.calculate_order_size` stores the computed dollar exposure on each signal and reruns `passes_risk_checks` after sizing so the 25 % buying-power guardrail applies to the true post-sizing notional. The notional is persisted with pending orders and positions for downstream reconciliation.【F:src/execution_manager.py†L840-L1593】
-- **Commission-normalized P&L** – All fills convert IBKR’s negative commissions into absolute costs before updating positions, metrics, and reconciliation outputs. Daily P&L scripts mirror the same convention so realized totals match broker statements exactly.【F:src/execution_manager.py†L115-L2065】【F:reconcile_daily_pnl.py†L85-L138】
-- **Manual execution backfill & alerting** – `_prime_execution_stream` hydrates IBKR’s execution cache on connect, `_backfill_realized_from_ib` enriches `SYNCED_CLOSED` archives with realized/commission/exit metadata, and `_archive_position` emits `alerts:critical` events whenever a manual fill never arrived so operators can intervene immediately.【F:src/execution_manager.py†L507-L706】【F:src/execution_manager.py†L860-L939】
-- **Resilient bracket workflow** – Trailing-stop updates tear down and recreate the entire OCA group, manual scale-ins/-outs cancel stale protection before calling `_place_bracket_orders`, and reduced positions immediately receive right-sized stops and targets, eliminating IBKR’s dual-side rejection.【F:src/position_manager.py†L68-L117】【F:src/execution_manager.py†L2537-L2728】
-- **Config-driven trailing stops** – `risk_management.trailing_stops` in `config.yaml` exposes per-instrument profit triggers and retention percentages (10%/60% for options by default), and `PositionManager.manage_trailing_stops` merges those overrides with strategy defaults to ensure protection follows profitable moves automatically.【F:config/config.yaml†L347-L356】【F:src/position_manager.py†L68-L117】【F:src/position_manager.py†L942-L980】
-- **Executed-only distribution** – Fills enqueue an enriched payload on `signals:distribution:pending`, and the distributor only fans out premium/basic/free messages once execution status is `FILLED`, preserving the 0s/60s/300s tier delays without leaking rejected signals.【F:src/execution_manager.py†L1333-L1593】【F:src/signal_distributor.py†L71-L229】【F:src/redis_keys.py†L55-L64】
-- **Daily loss streak hygiene** – The risk manager caches the US/Eastern timezone, increments `risk:consecutive_losing_days` once per trading day, and resets the streak when the prior session ends flat/green so the consecutive-loss circuit breaker and position-size multiplier remain accurate.【F:src/risk_manager.py†L179-L662】【F:src/risk_manager.py†L971-L993】
+## Remaining Implementation Backlog
 
-### Phase 7 – Community Publishing & Automation (In Planning)
-The communication and automation layer ships with scaffolding but still depends on extensive TODO lists before production launch. Constructor signatures across these modules already accept the shared config dict and Redis handle, so they can be wired into the live queues without refactoring when their TODOs are addressed.
+### 1. Schema & Configuration
+- Publish `.env` templates per optional module (social, dashboards, automation) with documented variable descriptions.
+- Implement config validation CLI to detect missing toggles/thresholds before deployment.
+- Generate schema reference doc from `redis_keys.py` to keep documentation synchronized with code.
 
-- **TwitterBot & SocialMediaAnalytics** – Implement credential loading, Tweepy client initialization, and the posting/analytics loops so winning trades, teasers, daily summaries, and morning previews leave `signals:distribution:pending` and write engagement metrics back to Redis.【F:src/twitter_bot.py†L25-L206】
-- **DiscordBot** – Tier workers drain premium/basic/free queues, render the updated embed templates, enforce webhook retries, and persist delivery/dead-letter metrics for dashboards. Summaries/analysis/performance posts remain outstanding for the next milestone.【F:src/discord_bot.py†L200-L579】
-- **TelegramBot** – Stand up the command handlers, Stripe subscription flow, tier-aware formatting, and delayed distribution to match the premium/basic/free cadence in Redis.【F:src/telegram_bot.py†L25-L218】
-- **Dashboard services & analytics monitoring** – Flesh out the FastAPI routes/WebSocket broadcasting, log aggregation, alert management, performance chart builders, and the newly scoped backfill/analytics dashboards so operators (and community members, if desired) have a real-time lens on health, replay progress, and risk.【F:src/dashboard_server.py†L25-L220】【F:src/dashboard_routes.py†L25-L184】【F:src/dashboard_websocket.py†L1-L70】
-- **MorningScanner** – Complete the GPT-4 powered morning analysis workflow (data gathering, key levels, options positioning, distribution) so premium channels receive pre-open briefs and social queues get teasers automatically.【F:src/morning_scanner.py†L25-L220】
-- **ReportGenerator & MetricsCollector** – Promote the archival, cleanup, and metrics collection TODOs into working services so historical exports, retention policies, and dashboard metrics stay up to date.【F:src/report_generator.py†L25-L120】【F:src/dashboard_server.py†L166-L220】
+### 2. Dealer-Flow Analytics
+- Expand unit tests for edge cases (illiquid strikes, empty greeks, missing chain snapshots).
+- Benchmark calculator performance with expanded symbol universe (sector ETFs, single names) and adjust cadence if required.
+- Add analytics drift detection (alert if Vanna/Charm deviates beyond configurable z-score thresholds).
 
+### 3. Flow Clustering & Volatility Regimes
+- Validate clustering accuracy on new datasets; consider adaptive clustering (online updates) if symbol mix changes intraday.
+- Surface regime transition alerts into monitoring system with operator notifications.
+- Build calibration tool for regime thresholds with historical Monte Carlo simulations.
 
-## Open Work
+### 4. Signal Engine & Strategies
+- Develop automated backtest harness covering 0/1/14 DTE and MOC strategies with historical replay datasets.
+- Add per-strategy unit tests for gating, weighting, and fallback logic.
+- Document tuning guidelines (confidence weight sliders, imbalance thresholds, liquidity filters) and include operator playbooks.
+- Implement real-time feature drift detection to trigger safe-mode reductions when inputs degrade.
 
-| Area | Status | Next Actions |
-| --- | --- | --- |
-| Social publishing (`twitter_bot`, `discord_bot`, `telegram_bot`) | In progress | Discord relay implemented (tier embeds + simulator); next wire Twitter/Telegram credentials and add summary/analysis/performance drops for Discord. |
-| Operator dashboard (`dashboard_server`, `dashboard_routes`, `dashboard_websocket`) | Scaffolding only | Build FastAPI app, auth, REST + WebSocket endpoints, metrics aggregation, alert routing, and front-end payloads before enabling module flag. |
-| Morning automation (`morning_scanner`, `news_analyzer`) | Scaffolding only | Gather overnight data, compute key levels/options positioning, orchestrate GPT-4 prompts, persist premium/public previews, and schedule distribution jobs. |
-| Archival & reporting (`report_generator`) | Scaffolding only | Implement daily exports, retention cleanup, long-horizon metrics, and operator-triggered report generation. |
-| Regression coverage | Needs update | Shift pytest suites to import refactored modules, add integration tests for execution/distribution, and validate Phase 7 services once implemented. |
-| Deployment hygiene | In progress | Split optional requirements into extras, document full credential matrix, and extend monitoring/alerting for new queues and dashboard services. |
-| Execution incident follow-up | In progress | Pull 11:05:49 execution logs to confirm the missing `execution_fill_received`, schedule intraday `python3 reconcile_daily_pnl.py` runs until live backfill is proven, add coverage around `_backfill_realized_from_ib`, and monitor the new manual-fill alerts/bracket rebuild telemetry. |
+### 5. Backfills & Monitoring
+- Migrate remaining legacy tests importing deprecated modules (e.g., `tests/test_day6.py`) to new interfaces.
+- Automate replay validation in CI (seed Redis with fixtures, run backfill, assert key outputs).
+- Add alerts for stalled backfill jobs and heartbeat monitors for replay workers.
+- Integrate monitoring metrics into forthcoming dashboards (Phase 7) with charts/thresholds.
 
-## Pending Integrations
-- [`src/twitter_bot.py`](src/twitter_bot.py)
-- [`src/discord_bot.py`](src/discord_bot.py)
-- [`src/telegram_bot.py`](src/telegram_bot.py)
-- [`src/dashboard_server.py`](src/dashboard_server.py), [`src/dashboard_routes.py`](src/dashboard_routes.py), [`src/dashboard_websocket.py`](src/dashboard_websocket.py)
-- [`src/morning_scanner.py`](src/morning_scanner.py)
-- [`src/news_analyzer.py`](src/news_analyzer.py)
-- [`src/report_generator.py`](src/report_generator.py)
+### 6. Execution & Risk
+- Automate daily reconciliation checks with diff reports and Slack/alert notifications for discrepancies.
+- Expand regression coverage for risk scenarios (loss streak breaker, exposure guardrail, manual override flows).
+- Instrument execution metrics (fill latency, slippage, failure rates) for dashboards and weekly reports.
+- Implement safe shutdown/restart procedure tooling to snapshot pending orders/positions before maintenance windows.
 
+### 7. Distribution & Client Channels
+- Build entitlement-aware tier management (premium/basic/free) with retry and dead-letter handling for each queue.
+- Implement delivery metrics dashboard (per channel success/fail counts, retry rates, subscriber analytics).
+- Add content templating system for distribution modules to ensure consistent messaging formats.
 
-### September 2025 Enhancements
-- Hardened the `SYNCED_CLOSED` archive path with IB execution backfill, critical alerts for missing manual fills, and enriched exit payloads so downstream consumers receive correct realized P&L immediately.【F:src/execution_manager.py†L507-L939】【F:src/execution_manager.py†L2537-L2728】
-- Rebuilt trailing-stop configuration around `risk_management.trailing_stops`, allowing per-instrument profit triggers and retention settings (10 %/60 % default for options, 2 %/50 % for stocks) that `PositionManager` now enforces when the unrealized P&L clears the threshold.【F:config/config.yaml†L347-L356】【F:src/position_manager.py†L68-L117】【F:src/position_manager.py†L942-L980】
-- Fixed the consecutive losing-day tracker so the risk manager only increments once per trading session, caches the Eastern timezone, and resets streak counters when the prior day closes flat/green, keeping circuit-breaker multipliers in sync.【F:src/risk_manager.py†L179-L662】【F:src/risk_manager.py†L971-L993】
-- Added neutral VPIN fallbacks so toxicity and sector summaries always have data, even during low-volume windows.【F:src/vpin_calculator.py†L52-L150】
-- Updated analytics viewers to reflect the canonical Redis schema, surfacing dealer-flow totals, toxicity levels, and order-book imbalance without manual reconciliation.
-- Swapped the correlation matrix loader to consume the same 1-minute bars written by IBKR ingestion, eliminating empty matrices caused by timeframe suffixes.【F:src/analytics_engine.py†L391-L420】【F:src/ibkr_ingestion.py†L583-L589】
-- Introduced synthetic MOC imbalance and unusual-options activity scoring inside AnalyticsEngine so signal modules have dependable inputs when exchanges or venues lack dedicated feeds.【F:src/analytics_engine.py†L676-L1010】
-- Expanded the ingestion universe to include PLTR, ensuring 14DTE strategies evaluate fresh analytics for every configured symbol.【F:config/config.yaml†L60-L66】
+### 8. Community Publishing & Automation (Phase 7 Execution)
+- **DiscordBot**: Implement webhook rotation, message templating, rate-limit backoff, delivery metrics, SLA alerts.
+- **TelegramBot**: Stripe subscription integration, entitlement store, tiered broadcast scheduling, command handlers.
+- **TwitterBot**: Credential management, tweet scheduling, media handling, compliance logging.
+- **Dashboard**: Complete FastAPI endpoints, authentication (JWT or OAuth), WebSocket streaming for real-time metrics, frontend integration (if applicable).
+- **Morning Automation**: Data ingestion (macro, futures, options positioning), GPT orchestration with prompt templating, premium/public queue publication, compliance review logging.
+- **Reporting**: Historical archives, retention policies, compliance exports, weekly/monthly performance packages, S3 (or equivalent) storage integration.
+- **Observability**: Add heartbeats, metrics, and alerts for all new services before toggling them on.
 
-### Incident Review – Manual Close Realized P&L
-- **Findings** – `_publish_exit_distribution` consumed `position['realized_pnl']` with a default of `0.0`, and the `SYNCED_CLOSED` branch archived snapshots without recomputing realized/commission values, so manual or out-of-band closes published zero P&L unless `_handle_untracked_fill` had fired. Offline reconciliation via `reconcile_daily_pnl.py` was the only safety net after the fact.【F:src/execution_manager.py†L438-L506】【F:src/execution_manager.py†L878-L939】【F:src/execution_manager.py†L2537-L2597】【F:reconcile_daily_pnl.py†L152-L209】
-- **Remediation status** – Implemented `_prime_execution_stream`, `_backfill_realized_from_ib`, and the enriched `_archive_position` path so exit payloads now include IBKR-sourced realized, commission, and event metadata, with critical alerts issued when a manual fill never arrives. Manual scale-ins/-outs rebuild brackets immediately and trailing protection starts once the updated config thresholds are met.【F:src/execution_manager.py†L507-L939】【F:src/execution_manager.py†L2537-L2728】【F:config/config.yaml†L347-L356】
-- **Follow-up tasks** – Review execution logs around 11:05:49 to confirm the missing `execution_fill_received`, schedule intraday `python3 reconcile_daily_pnl.py` runs until the live backfill is validated in production, add a unit test harness around `_backfill_realized_from_ib`, and rerun a manual close that fully fills (the prior IWM limit remained 0/2) to observe the alert trail and enriched exit distribution.
+### 9. Infrastructure & Tooling
+- Provision optional dependency installation extras (`.[social]`, `.[dashboard]`, etc.) with documentation.
+- Establish credentials management process (Vault/SSM) for API keys and webhook secrets.
+- Extend CI pipeline to run linting, unit/integration tests, and packaging checks across optional modules.
+- Plan observability stack integration (Grafana/Loki/Prometheus) once dashboards are live.
 
-## Operational Notes
+## Upcoming Milestones (Detailed)
+| Target | Description | Owner(s) | Dependencies | Exit Criteria | Status |
+|--------|-------------|----------|--------------|---------------|--------|
+| **Sprint +1** | Discord channel live (premium + basic tiers) with retries & metrics | Distribution Squad | Discord credentials, config toggles, monitoring hooks | Messages flow from `signals:distribution:*` to Discord webhooks with <1% failure, metrics populated | Planned |
+| **Sprint +1** | Regression modernization (analytics + signal + execution tests) | QA & Core Eng | Replay fixtures, CI pipeline | Legacy tests replaced, coverage ≥70% for critical modules, CI green | In progress |
+| **Sprint +2** | Dashboard MVP (REST auth, WebSocket telemetry, operator views) | Platform Squad | FastAPI infra, auth decision, monitoring metrics | Operator dashboard shows ingestion/execution metrics, auth enforced, heartbeat alerts visible | Scoped |
+| **Sprint +2** | Morning automation (GPT summaries + queue delivery) | Research & Automation | GPT access, data feeds, distribution queues | Pre-market report published to premium queue by 08:30 ET with fallback if GPT unavailable | Scoped |
+| **Sprint +3** | Reporting & archival pipeline | Platform & Compliance | Storage backend, reconciliation outputs | Daily/weekly exports stored, retention policy automated, manual trigger CLI available | Backlog |
 
-### Operational Orchestration
-`main.py` validates the environment, connects to Redis, and instantiates the analytics engine alongside ingestion, parameter discovery, and optional signal/execution stacks. During startup it schedules the analytics engine asynchronously so DealerFlowCalculator, FlowClusterModel, and VolatilityMetrics run continuously without blocking other services.【F:main.py†L111-L326】 Health monitoring keeps the analytics heartbeat fresh in Redis, ensuring operator dashboards can confirm the new calculators are live.【F:main.py†L327-L438】
+## Risk Register
+| Risk | Impact | Likelihood | Mitigation | Owner |
+|------|--------|------------|-----------|-------|
+| IBKR/Alpha Vantage entitlement or rate-limit changes | Loss of market/analytics feeds | Medium | Monitor `monitoring:ibkr:metrics` & `monitoring:alpha_vantage:metrics`, auto-escalate when tokens <10, maintain fallback data sources | Ingestion Lead |
+| Optional modules misconfigured when enabled | Signal leakage, failed deliveries | Medium | `.env` templates, config validation CLI, smoke tests for disabled modules, staged rollout | Platform Lead |
+| Monitoring coverage gaps post Phase 7 | Blind spots for new services | High | Instrument heartbeats + delivery metrics before enabling toggles, integrate with dashboard alerts | SRE |
+| GPT dependency for morning automation | Blocked content generation | Medium | Implement cached fallback summaries, monitor usage quotas, maintain manual override | Research Lead |
+| Credential sprawl for social integrations | Security audit risk | Medium | Adopt centralized secret management (Vault/SSM), audit access quarterly | Security Officer |
 
-### Execution Stream & Manual Fill Alerts
-`ExecutionManager` primes IBKR executions on connect via `_prime_execution_stream`, logging `execution_stream_primed` (or `execution_stream_prime_failed`) so operators know the manual trade pipeline is hydrated before the session begins.【F:src/execution_manager.py†L507-L525】 When a `SYNCED_CLOSED` snapshot appears without any fills, `_archive_position` publishes `execution_manual_fill_missing` on `alerts:critical`, attempts a live `_backfill_realized_from_ib`, and logs success/failure so the desk can confront IB quickly instead of discovering zeros downstream.【F:src/execution_manager.py†L878-L939】 Track these alerts after restarts or manual trades to ensure brackets and realized P&L stay trustworthy.
+## Dependency & Resource Tracker
+- **Credentials**: Discord webhooks, Telegram bot tokens, Stripe API keys, OpenAI API keys, Twitter/X API credentials.
+- **Infrastructure**: FastAPI/Uvicorn deployment target, persistent storage (S3 or equivalent) for archives, observability stack integration.
+- **Data feeds**: Additional macro/economic data vendors for morning automation (TBD).
+- **Tooling**: CI enhancements (containers for optional deps), monitoring dashboards (Grafana), alert routing (PagerDuty/Slack).
+- **Human resources**: Distribution squad, Platform squad, SRE, Research & Automation, Compliance liaison.
 
-### Trailing Stops & Bracket Rebuild Monitoring
-Manual fills flow through `_handle_untracked_fill`, which flags the position as manually touched, clears any stale missing-fill alerts, and either reduces or scales the position before delegating to `_apply_position_addition/_apply_position_reduction`. Those helpers tear down previous OCA groups with `_cancel_bracket_orders`, persist the resized state, and invoke `_place_bracket_orders` so protection re-arms immediately after a scale event—even when the trade originated in TWS.【F:src/execution_manager.py†L2537-L2728】 Trailing stops now honour the new config overrides, so once unrealized gains cross the configured profit trigger the stop price ratchets higher while retaining the requested portion of gains.【F:config/config.yaml†L347-L356】【F:src/position_manager.py†L68-L117】【F:src/position_manager.py†L942-L980】 Monitor the log for `execution_stop_order` and trailing stop messages whenever a position turns profitable.
-
-### Risk Manager Daily Reset
-`RiskManager` caches the Eastern timezone, increments `risk:consecutive_losing_days` at most once per calendar session, and resets the streak during `reset_daily_metrics` whenever the prior day’s P&L is flat or positive, preventing the runaway 1,930-count that surfaced earlier. The daily reset also stores yesterday’s P&L and clears `risk:last_loss_increment_day` so the next loss correctly restarts the tally.【F:src/risk_manager.py†L179-L662】【F:src/risk_manager.py†L971-L993】 Keep an eye on `risk:position_size_multiplier` after each reset to confirm it snaps back to `1.0` when the streak clears.
-
-### Redis Hygiene
-After deploying the risk-manager fixes, flush `risk:consecutive_losing_days` and `risk:last_loss_increment_day` (now expected to read `1` and the current trade date) to remove stale state. The service repopulates both keys immediately on the next loop, so this reset can be automated post-deploy if the counters drift again.
-
-### Verification Status
-- `python3 -m py_compile src/execution_manager.py`
-- `python3 -m compileall src/execution_manager.py src/position_manager.py`
-- `pytest tests/test_day7.py::TestRiskManager::test_circuit_breakers_consecutive_losses` (fails: `ModuleNotFoundError: No module named 'src.execution'` because the legacy package is still referenced).【F:tests/test_day7.py†L18-L40】
+## Reference Surface
+- **Ingestion stack**: `src/ibkr_ingestion.py`, `src/ibkr_processor.py`, `src/av_ingestion.py`, `src/av_options.py`, `src/av_sentiment.py`
+- **Analytics suite**: `src/analytics_engine.py`, `src/dealer_flow_calculator.py`, `src/flow_clustering.py`, `src/volatility_metrics.py`, `src/gex_dex_calculator.py`, `src/vpin_calculator.py`
+- **Signal pipeline**: `src/signal_generator.py`, `src/dte_strategies.py`, `src/moc_strategy.py`, `src/signal_deduplication.py`
+- **Execution & risk**: `src/execution_manager.py`, `src/position_manager.py`, `src/risk_manager.py`, `src/emergency_manager.py`, `reconcile_daily_pnl.py`
+- **Distribution & comms**: `src/signal_distributor.py`, `src/discord_bot.py`, `src/telegram_bot.py`, `src/twitter_bot.py`, `src/morning_scanner.py`, `src/news_analyzer.py`, `src/report_generator.py`
