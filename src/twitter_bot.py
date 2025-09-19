@@ -15,7 +15,7 @@ Redis Keys Used:
         - twitter:tweet:{tweet_id} (tweet tracking)
         - social:analytics:twitter:{post_id} (analytics)
 
-Author: Quantisity Capital
+Author: QuantiCity Capital
 Version: 3.0.0
 """
 

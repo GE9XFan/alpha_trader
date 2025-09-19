@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 VPIN Calculator - Volume-Synchronized Probability of Informed Trading
-Part of Quantisity Capital System
+Part of QuantiCity Capital System
 
 This module operates independently and communicates only via Redis.
 Redis keys used:

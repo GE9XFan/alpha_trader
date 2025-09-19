@@ -47,7 +47,7 @@ Redis Keys Used:
         - circuit_breakers:last_reset (last reset info)
         - metrics:circuit_breakers:{breaker}:trips (trip counters)
 
-Author: Quantisity Capital
+Author: QuantiCity Capital
 Version: 3.0.0
 """
 

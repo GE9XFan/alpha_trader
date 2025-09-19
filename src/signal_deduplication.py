@@ -15,7 +15,7 @@ Redis Keys Used:
         - metrics:signals:thin_update_blocked (metrics)
         - metrics:signals:duplicate_blocked (metrics)
 
-Author: Quantisity Capital
+Author: QuantiCity Capital
 Version: 3.0.0
 """
 

@@ -15,7 +15,7 @@ Redis Keys Used:
         - scheduled:tasks:history (task history)
         - daily:report:* (daily reports)
 
-Author: Quantisity Capital
+Author: QuantiCity Capital
 Version: 3.0.0
 """
 

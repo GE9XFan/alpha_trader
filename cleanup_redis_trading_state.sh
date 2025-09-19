@@ -1,8 +1,8 @@
 #!/bin/bash
-# Complete Redis cleanup for Quantisity Capital trading state
+# Complete Redis cleanup for QuantiCity Capital trading state
 
 echo "==================================================="
-echo "COMPLETE REDIS CLEANUP - Quantisity Capital"
+echo "COMPLETE REDIS CLEANUP - QuantiCity Capital"
 echo "==================================================="
 echo ""
 echo "This will DELETE:"

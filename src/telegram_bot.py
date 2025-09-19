@@ -18,7 +18,7 @@ Redis Keys Used:
         - telegram:signal:{signal_id} (signal tracking)
         - telegram:distribution:metrics (distribution metrics)
 
-Author: Quantisity Capital
+Author: QuantiCity Capital
 Version: 3.0.0
 """
 
@@ -64,9 +64,9 @@ class TelegramBot:
 
         # Channel configuration
         self.channels = {
-            'public': '@quantisitycapital_public',
-            'premium': '@quantisitycapital_premium',
-            'basic': '@quantisitycapital_basic'
+            'public': '@quanticitycapital_public',
+            'premium': '@quanticitycapital_premium',
+            'basic': '@quanticitycapital_basic'
         }
 
         self.logger = logging.getLogger(__name__)

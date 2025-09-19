@@ -16,7 +16,7 @@ Redis Keys Used:
         - archive:history:* (historical data)
         - reports:generated:* (generated reports)
 
-Author: Quantisity Capital
+Author: QuantiCity Capital
 Version: 3.0.0
 """
 

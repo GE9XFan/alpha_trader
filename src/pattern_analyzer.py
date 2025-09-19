@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Pattern Analyzer - Toxicity Detection and Order Book Analysis
-Part of Quantisity Capital System
+Part of QuantiCity Capital System
 
 This module operates independently and communicates only via Redis.
 Redis keys used:

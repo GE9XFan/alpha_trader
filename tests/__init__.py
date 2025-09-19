@@ -1,1 +1,1 @@
-# Quantisity Capital Test Suite
+# QuantiCity Capital Test Suite

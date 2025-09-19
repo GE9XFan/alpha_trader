@@ -10,7 +10,7 @@ Redis Keys Used:
         - performance:strategy:{strategy}:wins (win counter)
         - performance:strategy:{strategy}:losses (loss counter)
 
-Author: Quantisity Capital
+Author: QuantiCity Capital
 Version: 3.0.0
 """
 

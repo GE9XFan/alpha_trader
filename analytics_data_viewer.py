@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Interactive analytics viewer for Quantisity Capital Redis data."""
+"""Interactive analytics viewer for QuantiCity Capital Redis data."""
 
 from __future__ import annotations
 

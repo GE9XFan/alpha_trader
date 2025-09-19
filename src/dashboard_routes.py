@@ -17,7 +17,7 @@ Redis Keys Used:
         - monitoring:alerts:* (alert metrics)
         - performance:charts:* (chart data cache)
 
-Author: Quantisity Capital
+Author: QuantiCity Capital
 Version: 3.0.0
 """
 

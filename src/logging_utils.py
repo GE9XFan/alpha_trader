@@ -1,4 +1,4 @@
-"""Centralized logging helpers for Quantisity Capital.
+"""Centralized logging helpers for QuantiCity Capital.
 
 Provides structured JSON logging with contextual adapters so that every
 subsystem emits consistent, machine-parseable records.
@@ -195,7 +195,7 @@ def setup_logging(config: Mapping[str, Any], *, environment: str = "development"
     logging_config = dict(config.get("logging", {})) if config else {}
 
     log_level = logging_config.get("level", "INFO").upper()
-    file_path = logging_config.get("file_path", "logs/quantisity_capital.log")
+    file_path = logging_config.get("file_path", "logs/quanticity_capital.log")
     max_bytes = int(logging_config.get("max_bytes", 10 * 1024 * 1024))
     backup_count = int(logging_config.get("backup_count", 5))
     console_enabled = bool(logging_config.get("console", True))

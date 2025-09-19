@@ -475,6 +475,6 @@ async def main():
         await viewer.display_all()
 
 if __name__ == "__main__":
-    print("🔍 Redis Data Viewer for Quantisity Capital")
+    print("🔍 Redis Data Viewer for QuantiCity Capital")
     print("-" * 40)
     asyncio.run(main())

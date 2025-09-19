@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Quantisity Capital - Main Application Entry Point
+QuantiCity Capital - Main Application Entry Point
 Day 4 Implementation with async Redis and graceful module initialization
 """
 
@@ -21,14 +21,14 @@ sys.path.insert(0, str(Path(__file__).parent / 'src'))
 from logging_utils import get_logger, setup_logging
 
 
-class QuantisityCapital:
+class QuantiCityCapital:
     """
-    Main application coordinator for the Quantisity Capital platform.
+    Main application coordinator for the QuantiCity Capital platform.
     Manages initialization, startup, and shutdown of all modules.
     """
 
     def __init__(self, config_path: str = 'config/config.yaml'):
-        """Initialize the Quantisity Capital platform."""
+        """Initialize the QuantiCity Capital platform."""
         setup_logging({}, environment="bootstrap")
         self.logger = get_logger(__name__, component="bootstrap", subsystem="main")
 
@@ -293,7 +293,7 @@ class QuantisityCapital:
     
     async def start(self):
         """Start all system modules asynchronously."""
-        self.logger.info("quantisity_capital_start", extra={"action": "start"})
+        self.logger.info("quanticity_capital_start", extra={"action": "start"})
         
         # Schedule parameter discovery after data collection if enabled
         pd_config = self.config.get('parameter_discovery', {})
@@ -618,14 +618,14 @@ class QuantisityCapital:
 async def main():
     """Main entry point for the application."""
     logger = get_logger(__name__, component="bootstrap", subsystem="main")
-    logger.info("quantisity_capital_startup", extra={"action": "startup"})
+    logger.info("quanticity_capital_startup", extra={"action": "startup"})
     
     # Initialize the system
     trader = None
     
     try:
-        # Initialize Quantisity Capital
-        trader = QuantisityCapital()
+        # Initialize QuantiCity Capital
+        trader = QuantiCityCapital()
         
         # Validate environment
         await trader.validate_environment()
@@ -643,7 +643,7 @@ async def main():
         await trader.start()
         
     except KeyboardInterrupt:
-        logger.info("quantisity_capital_interrupt", extra={"action": "interrupt", "signal": "keyboard"})
+        logger.info("quanticity_capital_interrupt", extra={"action": "interrupt", "signal": "keyboard"})
         if trader:
             await trader.shutdown()
     except Exception as e:

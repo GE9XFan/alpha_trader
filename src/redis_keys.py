@@ -1,5 +1,5 @@
 """
-Redis Key Schema - Standardized keys for Quantisity Capital
+Redis Key Schema - Standardized keys for QuantiCity Capital
 This module defines the canonical Redis key patterns used across all modules.
 """
 

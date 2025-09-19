@@ -1,4 +1,4 @@
-# Quantisity Capital – Implementation Plan
+# QuantiCity Capital – Implementation Plan
 
 ## Document Map
 - [Overview](#overview)

@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
 import redis
-from main import QuantisityCapital
+from main import QuantiCityCapital
 from data_ingestion import IBKRIngestion
 from dotenv import load_dotenv
 from ib_insync import IB, Stock
@@ -29,7 +29,7 @@ class TestDay2IBKR:
     
     def __init__(self):
         self.redis: Optional[redis.Redis] = None
-        self.trader: Optional[QuantisityCapital] = None
+        self.trader: Optional[QuantiCityCapital] = None
         self.ibkr: Optional[IBKRIngestion] = None
         self.results = {
             'connection': False,
@@ -62,7 +62,7 @@ class TestDay2IBKR:
             raise ConnectionError("Redis not running - start with: redis-server config/redis.conf")
         
         # Initialize trader with config
-        self.trader = QuantisityCapital()
+        self.trader = QuantiCityCapital()
         self.trader.setup_redis()
         
         print("✓ Test environment initialized")
@@ -511,7 +511,7 @@ class TestDay2IBKR:
 async def main():
     """Main test runner for Day 2"""
     print("\n" + "🚀 " * 20)
-    print("Quantisity Capital - Day 2 IBKR Data Ingestion Test Suite")
+    print("QuantiCity Capital - Day 2 IBKR Data Ingestion Test Suite")
     print("🚀 " * 20)
     
     # Check prerequisites

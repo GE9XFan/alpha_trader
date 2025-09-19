@@ -1,6 +1,11 @@
 # Environment files
 .env
 config/discovered.yaml
+config/discovered_*.yaml
+config/discord_webhooks.yaml
+
+# Provisioning scripts
+provision_discord.py
 
 # API Keys and Secrets - NEVER commit actual config.yaml with keys
 # config/config.yaml  # Uncomment after adding real keys

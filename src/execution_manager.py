@@ -28,7 +28,7 @@ Redis Keys Used:
         - alerts:critical (critical alerts)
         - contracts:qualified:* (qualified contract cache)
 
-Author: Quantisity Capital
+Author: QuantiCity Capital
 Version: 3.0.0
 """
 

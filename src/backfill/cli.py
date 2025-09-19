@@ -142,7 +142,7 @@ def _parse_symbols(raw: Optional[str]) -> Sequence[str]:
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description='Quantisity Capital Phase 5 backfill runner')
+    parser = argparse.ArgumentParser(description='QuantiCity Capital Phase 5 backfill runner')
     parser.add_argument('--config', type=str, default=str(DEFAULT_CONFIG_PATH), help='Path to config.yaml')
     parser.add_argument('--symbols', type=str, help='Comma-separated symbol list (optional for VIX only)')
     parser.add_argument('--start', type=str, help='Inclusive ISO timestamp for backfill window')
