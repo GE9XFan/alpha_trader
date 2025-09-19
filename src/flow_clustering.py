@@ -169,9 +169,19 @@ class FlowClusterModel:
         return np.asarray(features, dtype=float)
 
     def _cluster(self, features: np.ndarray) -> (np.ndarray, np.ndarray):
-        kmeans = KMeans(n_clusters=3, random_state=self.seed, n_init='auto', max_iter=100)
-        assignments = kmeans.fit_predict(features)
-        return assignments, kmeans.cluster_centers_
+        try:
+            kmeans = KMeans(n_clusters=3, random_state=self.seed, n_init='auto', max_iter=100)
+            assignments = kmeans.fit_predict(features)
+            return assignments, kmeans.cluster_centers_
+        except ValueError as exc:
+            self.logger.debug("KMeans fallback for %s features: %s", features.shape, exc)
+            assignments = np.zeros(features.shape[0], dtype=int)
+            if features.size:
+                centroid = np.mean(features, axis=0, keepdims=True)
+            else:
+                centroid = np.zeros((1, features.shape[1]))
+            centroids = np.vstack([centroid] * 3)
+            return assignments, centroids
 
     def _compute_cluster_stats(
         self,
@@ -226,11 +236,26 @@ class FlowClusterModel:
     ) -> Dict[str, Any]:
         total = max(len(trades), 1)
 
-        # Determine strategy mapping heuristically
-        momentum_idx = max(range(3), key=lambda idx: abs(stats[idx]['mean_direction']) * (stats[idx]['mean_abs_return'] + 1e-6))
-        hedging_idx = max(range(3), key=lambda idx: stats[idx]['mean_notional'] * (1.0 - min(abs(stats[idx]['mean_direction']), 1.0)))
-        remaining = {0, 1, 2} - {momentum_idx, hedging_idx}
-        mean_rev_idx = remaining.pop() if remaining else momentum_idx
+        # Determine strategy mapping heuristically with deterministic, unique assignments
+        indices = range(3)
+        momentum_scores = [abs(stats[idx]['mean_direction']) * (stats[idx]['mean_abs_return'] + 1e-6) for idx in indices]
+        momentum_idx = int(np.argmax(momentum_scores))
+
+        available = {0, 1, 2}
+        available.discard(momentum_idx)
+
+        hedging_scores = [stats[idx]['mean_notional'] * (1.0 - min(abs(stats[idx]['mean_direction']), 1.0)) for idx in indices]
+        if available:
+            hedging_idx = max(available, key=lambda idx: hedging_scores[idx])
+        else:
+            hedging_idx = momentum_idx
+        available.discard(hedging_idx)
+
+        remaining_ordered = sorted(available)
+        if remaining_ordered:
+            mean_rev_idx = remaining_ordered[0]
+        else:
+            mean_rev_idx = int(np.argmin([stats[idx]['count'] for idx in indices]))
 
         strategy_counts = {
             'momentum': stats[momentum_idx]['count'],

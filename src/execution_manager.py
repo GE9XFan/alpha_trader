@@ -45,6 +45,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 import redis.asyncio as aioredis
 from ib_insync import IB, Stock, Option, MarketOrder, LimitOrder, StopOrder, Order, ExecutionFilter, util
 
+from signal_deduplication import contract_fingerprint
 from src.option_utils import normalize_expiry
 from src.stop_engine import StopEngine, StopState
 from logging_utils import get_logger
@@ -1519,6 +1520,63 @@ class ExecutionManager:
             except json.JSONDecodeError as e:
                 self.logger.error(f"Invalid signal JSON: {e}")
 
+    async def _acknowledge_signal(
+        self,
+        signal: Optional[Dict[str, Any]],
+        *,
+        status: str,
+        filled: float = 0.0,
+        avg_price: Optional[float] = None,
+    ) -> None:
+        """Publish execution acknowledgement and release signal live-lock."""
+
+        if not signal:
+            return
+
+        symbol = signal.get('symbol')
+        contract = signal.get('contract') or {}
+        strategy = signal.get('strategy') or ''
+        side = signal.get('side') or ''
+        signal_id = signal.get('id')
+
+        if not (symbol and contract):
+            return
+
+        try:
+            contract_fp = contract_fingerprint(symbol, strategy, side, contract)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self.logger.error(f"Failed to compute contract fingerprint for ack: {exc}")
+            return
+
+        live_key = f'signals:live:{symbol}:{contract_fp}'
+        try:
+            await self.redis.delete(live_key)
+        except Exception:
+            pass
+
+        ack_payload = {
+            'id': signal_id,
+            'symbol': symbol,
+            'strategy': strategy,
+            'side': side,
+            'status': status,
+            'contract_fp': contract_fp,
+            'filled': float(filled or 0.0),
+            'avg_price': float(avg_price) if avg_price is not None else None,
+            'timestamp': time.time(),
+        }
+
+        try:
+            await self.redis.setex(
+                f'signals:ack:{signal_id}',
+                86400,
+                json.dumps(ack_payload),
+            )
+            await self.redis.publish('signals:acknowledged', json.dumps(ack_payload))
+            await self.redis.incr('metrics:signals:acks')
+        except Exception as exc:  # pragma: no cover
+            self.logger.error(f"Failed to publish signal ack: {exc}")
+
     async def _get_risk_manager(self) -> Optional["RiskManager"]:
         """Return the shared RiskManager instance, creating it if needed."""
         async with self._risk_manager_lock:
@@ -2140,6 +2198,12 @@ class ExecutionManager:
                 await self.redis.delete(f'orders:pending:{order_id}')
                 if order_id in self.pending_orders:
                     del self.pending_orders[order_id]
+                await self._acknowledge_signal(
+                    signal,
+                    status=status.upper(),
+                    filled=snapshot.get('filled', 0),
+                    avg_price=snapshot.get('avg_price'),
+                )
                 break
 
             if status in {'Inactive', 'Rejected'}:
@@ -2325,6 +2389,13 @@ class ExecutionManager:
             await self.redis.lpush(
                 f'orders:fills:{datetime.now().strftime("%Y%m%d")}',
                 json.dumps(fill_record)
+            )
+
+            await self._acknowledge_signal(
+                signal,
+                status='FILLED',
+                filled=total_quantity,
+                avg_price=avg_price,
             )
 
         except Exception as e:
@@ -2580,9 +2651,23 @@ class ExecutionManager:
 
             # Clean up pending order
             await self.redis.delete(f'orders:pending:{order_id}')
+            cached_signal = None
             if order_id in self.pending_orders:
+                cached_signal = self.pending_orders[order_id].get('signal')
                 del self.pending_orders[order_id]
             self.active_trades.pop(order_id, None)
+
+            signal_payload = cached_signal or (
+                (order_snapshot or {}).get('signal')
+                if isinstance(order_snapshot, dict)
+                else None
+            )
+            await self._acknowledge_signal(
+                signal_payload,
+                status=reason.upper(),
+                filled=(order_snapshot or {}).get('filled', 0) if isinstance(order_snapshot, dict) else 0,
+                avg_price=(order_snapshot or {}).get('avg_fill_price') if isinstance(order_snapshot, dict) else None,
+            )
 
         except Exception as e:
             self.logger.error(f"Error handling rejection: {e}")

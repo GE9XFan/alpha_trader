@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
+import asyncio
+
 import numpy as np
 import pytz
 import redis.asyncio as aioredis
@@ -225,6 +227,39 @@ class DTEStrategies:
         feature_set = DTEFeatureSet.from_mapping(features)
         return feature_set.as_dict()
 
+    def _check_0dte_vetoes(
+        self,
+        features: Dict[str, Any],
+        thresholds: Dict[str, Any],
+    ) -> Optional[str]:
+        hedging_notional = abs(features.get('hedging_notional_per_pct', 0.0) or 0.0)
+        hedging_cap = float(thresholds.get('hedging_notional_max', 5e8))
+        hedging_veto_ratio = float(thresholds.get('hedging_veto_ratio', 0.8))
+
+        if hedging_cap > 0 and hedging_notional >= hedging_cap * hedging_veto_ratio:
+            return "dealer_elasticity"
+
+        toxicity_metric = features.get('toxicity_adjusted', features.get('toxicity', 0.5))
+        toxicity_floor = float(thresholds.get('toxicity_floor', 0.45))
+        if toxicity_metric < toxicity_floor:
+            return "low_toxicity"
+
+        vpin = features.get('vpin', 0.5)
+        obi = features.get('obi', 0.5)
+        neutral_band = float(thresholds.get('neutral_band', 0.2))
+        if abs(vpin - 0.5) < neutral_band and abs(obi - 0.5) < neutral_band:
+            return "no_directional_pressure"
+
+        vix_regime = str(features.get('vix1d_regime') or '').upper()
+        if vix_regime == 'SHOCK':
+            return "vix_shock"
+
+        age_s = features.get('age_s', 999)
+        if age_s > float(thresholds.get('max_feature_age_s', 15.0)):
+            return "feature_staleness"
+
+        return None
+
     async def evaluate(self, strategy: str, symbol: str, features: Dict[str, Any]) -> Tuple[int, List[str], str]:
         """Route to appropriate DTE strategy evaluator."""
         normalized = self._normalized_features(features)
@@ -248,6 +283,20 @@ class DTEStrategies:
         strategy_config = self.strategies.get('0dte', {})
         thresholds = strategy_config.get('thresholds', {})
         weights = strategy_config.get('confidence_weights', {})
+
+        # Quick veto checks before scoring
+        veto_reason = self._check_0dte_vetoes(features, thresholds)
+        if veto_reason:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(
+                    self.redis.hincrby('metrics:signals:blocked_by_veto', veto_reason, 1)
+                )
+            except RuntimeError:
+                asyncio.create_task(
+                    self.redis.hincrby('metrics:signals:blocked_by_veto', veto_reason, 1)
+                )
+            return 0, [veto_reason], "FLAT"
 
         # 1. VPIN pressure analysis (30 points max)
         vpin = features.get('vpin', 0)
@@ -311,6 +360,8 @@ class DTEStrategies:
                     confidence += points
                     reasons.append(f"Gamma influence")
 
+        institutional_flags = []
+
         # 4. Sweep detection with size analysis (15 points max)
         sweep_score = features.get('sweep', 0)
         if sweep_score >= 1:
@@ -327,6 +378,7 @@ class DTEStrategies:
                     # Large aggressive sweep
                     points = int(float(weights.get('sweep', 15)))
                     reasons.append("Aggressive sweep detected")
+                    institutional_flags.append('sweep')
                 else:
                     # Normal sweep
                     points = int(weights.get('sweep', 15) * 0.7)
@@ -350,11 +402,13 @@ class DTEStrategies:
                 dealer_points += dealer_weight * 0.6 * intensity
                 direction = 'bullish' if vanna_notional > 0 else 'bearish'
                 reasons.append(f"Vanna {direction} pressure ({vanna_notional/1e9:.2f}B/1% vol)")
+                institutional_flags.append('vanna')
             if abs(charm_notional) >= charm_threshold > 0:
                 intensity = min(abs(charm_notional) / max(charm_threshold, 1e-6), 2.0) / 2.0
                 dealer_points += dealer_weight * 0.4 * intensity
                 direction = 'bid' if charm_notional > 0 else 'offer'
                 reasons.append(f"Charm decay {direction} ({charm_notional/1e9:.2f}B/day)")
+                institutional_flags.append('charm')
             confidence += int(dealer_points)
 
         # 6. Skew and flow clustering contributions
@@ -379,6 +433,7 @@ class DTEStrategies:
             if points > 0:
                 confidence += points
                 reasons.append(f"Momentum flow {flow_momentum:.0%}")
+                institutional_flags.append('flow')
 
         # 7. Hedging elasticity guardrails
         hedging_notional = abs(features.get('hedging_notional_per_pct', 0.0) or 0.0)
@@ -415,6 +470,11 @@ class DTEStrategies:
                 confidence = min(100, int(confidence * 1.2))
                 reasons.append("(gamma support)")
 
+        min_institutional = int(thresholds.get('min_institutional_signals', 2))
+        if side != "FLAT" and len(set(institutional_flags)) < min_institutional:
+            reasons.append("Insufficient institutional confirmation")
+            return 0, reasons, "FLAT"
+
         return confidence, reasons, side
 
     def _determine_0dte_direction(self, features: Dict[str, Any], obi: float, price: float) -> str:
@@ -423,7 +483,7 @@ class DTEStrategies:
         """
         vwap = features.get('vwap')
         bars = features.get('bars', [])
-        toxicity = features.get('toxicity', 0.5)
+        toxicity = features.get('toxicity_adjusted', features.get('toxicity', 0.5))
 
         # Direction scoring system
         long_score = 0
@@ -755,6 +815,9 @@ class DTEStrategies:
 
         strategy_config = self.strategies.get('14dte', {})
         weights = strategy_config.get('confidence_weights', {})
+        thresholds = strategy_config.get('thresholds', {})
+
+        min_confidence = float(thresholds.get('min_confidence', 75))
 
         # Track institutional flow characteristics
         institutional_signals = 0
@@ -764,9 +827,11 @@ class DTEStrategies:
         unusual = features.get('unusual_activity', 0)
         options_chain = features.get('options_chain')
 
-        if unusual >= 0.6:
+        unusual_min = float(thresholds.get('unusual_min', 0.5))
+
+        if unusual >= unusual_min:
             # Analyze the nature of unusual activity
-            unusual_intensity = min((unusual - 0.6) / 0.4, 1.0)  # 0.6->1.0 maps to 0->1
+            unusual_intensity = min((unusual - unusual_min) / max(1 - unusual_min, 1e-6), 1.0)
 
             # Check if we have options chain for deeper analysis
             if options_chain and isinstance(options_chain, list):
@@ -796,8 +861,8 @@ class DTEStrategies:
                         reasons.append(f"{len(large_positions)} large OI strikes")
 
             # Base points for unusual activity
-            base_points = 24 + (unusual_intensity * 16)  # 24-40 range
-            points = min(int(base_points), weights.get('unusual_options', 40))
+            base_points = 15 + (unusual_intensity * 10)
+            points = min(int(base_points), weights.get('unusual_options', 25))
             confidence += points
 
             if unusual > 0.85:
@@ -805,7 +870,7 @@ class DTEStrategies:
             else:
                 reasons.append("Unusual options activity")
 
-        # 2. Sweep detection and characterization (30 points max)
+        # 2. Sweep detection and characterization
         sweep_score = features.get('sweep', 0)
         if sweep_score >= 1:
             # Analyze sweep characteristics
@@ -820,48 +885,48 @@ class DTEStrategies:
                 if avg_volume > 0:
                     volume_spike = current_volume / avg_volume
 
+                    sweep_weight = float(weights.get('sweep', 20))
+
                     if volume_spike > 3:
                         # Aggressive institutional sweep
-                        points = int(float(weights.get('sweep', 30)))
+                        points = int(float(sweep_weight))
                         institutional_signals += 2
                         reasons.append(f"Aggressive sweep ({volume_spike:.1f}x vol)")
                     elif volume_spike > 2:
                         # Moderate sweep
-                        points = int(weights.get('sweep', 30) * 0.8)
+                        points = int(sweep_weight * 0.8)
                         institutional_signals += 1
                         reasons.append(f"Sweep detected ({volume_spike:.1f}x vol)")
                     else:
                         # Mild sweep
-                        points = int(weights.get('sweep', 30) * 0.6)
+                        points = int(sweep_weight * 0.6)
                         reasons.append("Sweep activity")
                 else:
-                    points = int(weights.get('sweep', 30) * 0.5)
+                    points = int(float(weights.get('sweep', 20)) * 0.5)
                     reasons.append("Sweep pattern")
             else:
-                points = int(weights.get('sweep', 30) * 0.4)
+                points = int(float(weights.get('sweep', 20)) * 0.4)
                 reasons.append("Possible sweep")
 
             confidence += points
 
-        # 3. Hidden order detection (20 points max)
+        # 3. Hidden order detection
         hidden = features.get('hidden_orders', 0)
-        if hidden >= 0.5:
-            # Hidden orders suggest institutional activity
-            hidden_intensity = min((hidden - 0.5) / 0.3, 1.0)  # 0.5->0.8 maps to 0->1
+        hidden_min = float(thresholds.get('hidden_min', 0.4))
+        if hidden >= hidden_min:
+            hidden_weight = float(weights.get('hidden_orders', 15))
+            hidden_intensity = min((hidden - hidden_min) / max(1 - hidden_min, 1e-6), 1.0)
 
             if hidden > 0.75:
-                # Strong hidden order presence
-                points = int(float(weights.get('hidden_orders', 20)))
+                points = int(hidden_weight)
                 institutional_signals += 2
                 reasons.append(f"Strong hidden orders ({hidden:.2f})")
-            elif hidden > 0.65:
-                # Moderate hidden orders
-                points = int(weights.get('hidden_orders', 20) * 0.8)
+            elif hidden > 0.6:
+                points = int(hidden_weight * 0.8)
                 institutional_signals += 1
                 reasons.append(f"Hidden order flow ({hidden:.2f})")
             else:
-                # Light hidden orders
-                points = int(weights.get('hidden_orders', 20) * 0.6)
+                points = int(hidden_weight * max(hidden_intensity, 0.5))
                 reasons.append("Some hidden orders")
 
             confidence += points
@@ -869,12 +934,13 @@ class DTEStrategies:
         # 4. Delta exposure analysis (10 points max)
         dex = features.get('dex', 0)
         dex_z = features.get('dex_z', 0)
+        dex_min = float(thresholds.get('dex_min', 5e9))
 
         if abs(dex_z) >= 0.5:
             # Significant delta positioning
             dex_intensity = min(abs(dex_z) / 2, 1.0)  # 0.5->2.0 z-score maps to 0->1
 
-            if abs(dex) > 10e9:  # >$10B delta
+            if abs(dex) > max(dex_min * 2, 10e9):
                 # Massive positioning
                 points = int(float(weights.get('dex', 10)))
                 institutional_signals += 1
@@ -882,7 +948,7 @@ class DTEStrategies:
                     reasons.append(f"Massive call delta (${dex/1e9:.1f}B)")
                 else:
                     reasons.append(f"Massive put delta (${abs(dex)/1e9:.1f}B)")
-            elif abs(dex) > 5e9:  # >$5B delta
+            elif abs(dex) > dex_min:
                 # Large positioning
                 points = int(weights.get('dex', 10) * 0.7)
                 if dex_z > 1:
@@ -897,9 +963,37 @@ class DTEStrategies:
 
             confidence += points
 
-        # 5. Additional smart money indicators
-        toxicity = features.get('toxicity', 0.5)
+        # 5. Vanna/Charm confirmation
+        vanna_weight = float(weights.get('vanna', 15))
+        charm_weight = float(weights.get('charm', 10))
+        vanna_notional = features.get('vanna_notional', 0.0)
+        charm_notional = features.get('charm_notional', 0.0)
+        vanna_z = features.get('vanna_z', 0.0)
+        charm_z = features.get('charm_z', 0.0)
+
+        vanna_threshold = float(thresholds.get('vanna_notional_min', 1e8))
+        charm_threshold = float(thresholds.get('charm_notional_min', 5e7))
+
+        if vanna_weight > 0 and abs(vanna_notional) >= vanna_threshold:
+            intensity = min(abs(vanna_z), 2.0) / 2.0 if vanna_z else 1.0
+            points = int(vanna_weight * intensity)
+            confidence += points
+            institutional_signals += 1
+            direction = 'bullish' if vanna_notional > 0 else 'bearish'
+            reasons.append(f"Vanna {direction} tilt ({vanna_notional/1e9:.2f}B)")
+
+        if charm_weight > 0 and abs(charm_notional) >= charm_threshold:
+            intensity = min(abs(charm_z), 2.0) / 2.0 if charm_z else 1.0
+            points = int(charm_weight * intensity)
+            confidence += points
+            institutional_signals += 1
+            direction = 'bid' if charm_notional > 0 else 'offer'
+            reasons.append(f"Charm decay {direction} ({charm_notional/1e9:.2f}B/day)")
+
+        # 6. Additional smart money indicators
+        toxicity = features.get('toxicity_adjusted', features.get('toxicity', 0.5))
         vpin = features.get('vpin', 0.5)
+        inst_score = features.get('institutional_score', 0.0) or 0.0
 
         if toxicity > 0.7 and vpin < 0.4:
             # Low VPIN with high toxicity = smart money accumulation
@@ -911,7 +1005,12 @@ class DTEStrategies:
             confidence += 3
             reasons.append("Informed flow")
 
-        # 6. Time of day adjustments
+        if inst_score >= 0.4:
+            confidence += int(5 * inst_score)
+            institutional_signals += 1
+            reasons.append(f"Institutional score {inst_score:.2f}")
+
+        # 7. Time of day adjustments
         current_time = datetime.now(self.eastern)
         if 9.5 <= current_time.hour + current_time.minute/60 <= 10.5:
             # First hour often has institutional positioning
@@ -924,12 +1023,17 @@ class DTEStrategies:
                 confidence = min(100, int(confidence * 1.1))
                 reasons.append("(power hour setup)")
 
-        # 7. Determine direction with institutional vs retail analysis
+        # 8. Determine direction with institutional vs retail analysis
         side = self._determine_14dte_direction(
-            features, unusual, dex, institutional_signals, retail_signals
+            features,
+            unusual,
+            dex,
+            institutional_signals,
+            retail_signals,
+            thresholds,
         )
 
-        # 8. Confidence boost for strong institutional consensus
+        # 9. Confidence boost for strong institutional consensus
         if side != "FLAT" and institutional_signals >= 3:
             confidence = min(100, int(confidence * 1.2))
             reasons.append("(institutional consensus)")
@@ -940,8 +1044,15 @@ class DTEStrategies:
 
         return confidence, reasons, side
 
-    def _determine_14dte_direction(self, features: Dict[str, Any], unusual: float,
-                                   dex: float, inst_signals: int, retail_signals: int) -> str:
+    def _determine_14dte_direction(
+        self,
+        features: Dict[str, Any],
+        unusual: float,
+        dex: float,
+        inst_signals: int,
+        retail_signals: int,
+        thresholds: Dict[str, Any],
+    ) -> str:
         """
         Determine 14DTE direction using institutional flow analysis.
         """
@@ -963,7 +1074,9 @@ class DTEStrategies:
             short_score += 2
 
         # 2. Unusual activity with options chain analysis
-        if unusual > 0.6 and options_chain:
+        unusual_min = float(thresholds.get('unusual_min', 0.5))
+
+        if unusual >= unusual_min and options_chain:
             # Analyze strike distribution
             price = features.get('price', 0)
             if price > 0:
@@ -1043,13 +1156,13 @@ class DTEStrategies:
 
         contract: Dict[str, Any] = {
             'type': 'option',
-            'right': right,
+            'right': 'C' if right.startswith('C') else 'P',
             'multiplier': 100,
             'exchange': 'SMART',
             'dte_band': dte_band,
             'expiry_label': expiry_label,
             'expiry': fallback_expiry,
-            'strike': target_strike,
+            'strike': float(target_strike) if target_strike is not None else 0.0,
         }
 
         refined = self._select_from_chain(options_chain or [], side, target_strike)
@@ -1138,7 +1251,8 @@ class DTEStrategies:
                     'strike': round(strike, 2),
                     'expiration': expiry,
                     'multiplier': option.get('multiplier', option.get('contract_multiplier', 100)),
-                    'exchange': option.get('exchange', 'SMART'),
+                    'exchange': str(option.get('exchange', 'SMART') or 'SMART').upper(),
+                    'right': 'C' if desired_right == 'C' else 'P',
                 }
                 best_score = score
 

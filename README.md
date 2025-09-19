@@ -30,6 +30,12 @@ Traditional retail platforms lack visibility into dealer hedging flows and marke
 | **Execution** | • Place bracket orders on fills<br>• Manage trailing stop adjustments<br>• Sync positions with IBKR in real-time | `positions:open:{account}:{conId}`<br>`orders:pending:{orderId}`<br>`execution:fills:{symbol}` |
 | **Distribution** | • Route signals to tier queues<br>• Enforce 0/60/300s delays<br>• Track delivery metrics | `distribution:premium:queue`<br>`distribution:basic:queue`<br>`distribution:metrics` |
 
+## Documentation
+
+- **Ingestion Module Deep Dive**: `docs/ingestion_module.md`
+- **Analytics Module Deep Dive**: `docs/analytics_module.md`
+- **Signal Engine Deep Dive**: `docs/signal_engine_module.md`
+
 ## Architecture Overview
 
 ```
@@ -119,7 +125,13 @@ python -m src.signal_generator      # Signals only
 | Stale Data | `monitoring:data:stale` | Any symbol > 10s |
 | Risk Violations | `risk:breaches:count` | > 3 per hour |
 | Failed Orders | `orders:failed:count` | > 5 per hour |
+| Signal Blocks (reasoned) | `metrics:signals:blocked_by_reason` hash | Any reason spiking > baseline |
+| Strategy Veto Counts | `metrics:signals:blocked_by_veto` hash | >5 vetoes in 5 min for same code |
+| Exposure/Live Locks | `metrics:signals:blocked:exposure` counter & `signals:live:*` keys | Counter growth without matching acks |
+| Execution Acks | `signals:acknowledged` pubsub / `signals:ack:*` keys | Missing ack for > 10s after emit |
 | API Rate Limit | `monitoring:alpha_vantage:metrics` | tokens < 10 |
+
+Published acknowledgements mirror signal IDs. Each fill/cancel/reject writes `signals:ack:<signal_id>` with `{status, filled, avg_price}` and publishes on `signals:acknowledged`; consumers should delete live locks when they see `status=FILLED` and alarm if signals remain unacknowledged beyond the exposure TTL window.
 
 ### Redis Schema & TTLs
 

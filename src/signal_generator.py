@@ -224,15 +224,18 @@ class SignalGenerator:
             return
 
         if not features:
+            await self.redis.incr('metrics:signals:blocked:no_features')
             return
 
         if not self.check_freshness(features):
             await self.redis.incr('metrics:signals:skipped_stale')
             await self.redis.incr('metrics:signals:blocked:stale_features')
+            await self.redis.hincrby('metrics:signals:blocked_by_reason', 'stale_features', 1)
             return
 
         if not self.check_schema(features):
             await self.redis.incr('metrics:signals:skipped_schema')
+            await self.redis.hincrby('metrics:signals:blocked_by_reason', 'schema', 1)
             return
 
         handler = self.get_strategy_handler(strategy_name)
@@ -258,6 +261,7 @@ class SignalGenerator:
         )
 
         if side == "FLAT" or confidence < min_conf:
+            await self.redis.hincrby('metrics:signals:blocked_by_reason', 'low_confidence', 1)
             await self._debug_rejected_signal(symbol, strategy_name, confidence, min_conf, side, reasons, features)
             self.last_eval[cache_key] = now
             return
@@ -284,10 +288,9 @@ class SignalGenerator:
         contract = await self.select_contract(symbol, strategy_name, side, features.get('price', 0), options_chain)
         contract_fp = contract_fingerprint(symbol, strategy_name, side, contract)
 
-        signal_id = self._deduper.generate_signal_id(symbol, side, contract_fp)
-
-        if not await self._deduper.check_material_change(contract_fp, int(confidence)):
-            return
+        signal_id = self._deduper.generate_signal_id(
+            symbol, side, contract_fp, contract.get('expiry')
+        )
 
         signal = await self.create_signal_with_contract(
             symbol,
@@ -300,6 +303,22 @@ class SignalGenerator:
             emit_id=signal_id,
             contract_fp=contract_fp,
         )
+
+        exposure_state = await self._gather_exposure_state(symbol, contract_fp)
+        exposure_violation = await self._check_exposure_caps(
+            symbol, strategy_name, contract_fp, exposure_state, signal
+        )
+        if exposure_violation:
+            return
+
+        if not await self._deduper.check_material_change(
+            contract_fp,
+            int(confidence),
+            signal=signal,
+            signal_id=signal_id,
+            exposure_state=exposure_state,
+        ):
+            return
 
         dynamic_ttl = self.calculate_dynamic_ttl(contract)
 
@@ -339,6 +358,15 @@ class SignalGenerator:
                 contract_fp,
                 "blocked",
                 "cooldown",
+                {"conf": confidence, "signal_id": signal_id},
+            )
+
+        elif emit_result == -2:
+            await self.redis.incr('metrics:signals:blocked:live')
+            await self._deduper.add_audit_entry(
+                contract_fp,
+                "blocked",
+                "live_lock",
                 {"conf": confidence, "signal_id": signal_id},
             )
 
@@ -472,41 +500,159 @@ class SignalGenerator:
 
         now = now or datetime.now(self.eastern)
 
-        # Get market close time (4:00 PM ET)
-        market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
-        if now >= market_close:
-            # If after market close, use next trading day close
-            next_day = market_close + timedelta(days=1)
-            while next_day.weekday() >= 5:  # Skip weekends
-                next_day += timedelta(days=1)
-            market_close = next_day
+        def _ttl_for_dte(dte_days: int) -> int:
+            if dte_days <= 0:
+                return 86400  # 24 hours
+            if dte_days == 1:
+                return 172800  # 48 hours
+            return max((dte_days + 1) * 86400, 604800)  # At least a week
 
-        # Calculate time to market close
-        time_to_close = (market_close - now).total_seconds()
+        ttl = max(60, int(self.ttl_seconds))
 
-        ttl = self.ttl_seconds
         expiry_str = normalize_expiry(contract.get('expiry'))
-        expiry_dt = None
+        dte = None
         if expiry_str:
             try:
                 expiry_dt = datetime.strptime(expiry_str, "%Y%m%d").date()
+                dte = (expiry_dt - now.date()).days
             except ValueError:
-                expiry_dt = None
+                dte = None
 
-        if expiry_dt:
-            dte = (expiry_dt - now.date()).days
-            if dte <= 0:
-                ttl = min(time_to_close, self.ttl_seconds)
-            elif dte == 1:
-                ttl = min(time_to_close + 86400, self.ttl_seconds)
-        else:
+        if dte is None:
             dte_band = str(contract.get('dte_band') or '').strip()
-            if dte_band == '0':
-                ttl = min(time_to_close, self.ttl_seconds)
-            elif dte_band == '1':
-                ttl = min(time_to_close + 86400, self.ttl_seconds)
+            try:
+                if dte_band:
+                    dte = int(dte_band)
+            except ValueError:
+                dte = None
 
-        return max(60, int(ttl))
+        if dte is not None:
+            ttl = max(ttl, _ttl_for_dte(dte))
+        else:
+            ttl = max(ttl, 86400)
+
+        return int(ttl)
+
+    def _resolve_exposure_cap(self, symbol: str, strategy: str, cap_key: str) -> Optional[int]:
+        caps_cfg = self.signal_config.get('exposure_caps', {}) or {}
+        default_cfg = caps_cfg.get('default', {}) or {}
+        strategy_cfg = (caps_cfg.get('strategies') or {}).get(strategy, {}) or {}
+        symbol_cfg = (caps_cfg.get('symbols') or {}).get(symbol, {}) or {}
+        symbol_strategy_cfg = (symbol_cfg.get('strategies') or {}).get(strategy, {}) or {}
+
+        for scope in (symbol_strategy_cfg, symbol_cfg, strategy_cfg, default_cfg):
+            value = scope.get(cap_key)
+            if value is None:
+                continue
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                self.logger.warning(
+                    "invalid_exposure_cap_value",
+                    extra={
+                        "action": "exposure_cap_invalid",
+                        "symbol": symbol,
+                        "strategy": strategy,
+                        "cap_key": cap_key,
+                        "value": value,
+                    },
+                )
+        return None
+
+    async def _count_pending_orders(self, symbol: str) -> int:
+        symbol_upper = (symbol or '').upper()
+        count = 0
+        async for key in self.redis.scan_iter(match='orders:pending:*'):
+            payload = await self.redis.get(key)
+            if not payload:
+                continue
+            if isinstance(payload, bytes):
+                payload = payload.decode('utf-8', errors='ignore')
+            try:
+                data = json.loads(payload)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            order_symbol = data.get('symbol') or (
+                (data.get('contract') or {}).get('symbol')
+            )
+            if isinstance(order_symbol, str) and order_symbol.upper() == symbol_upper:
+                count += 1
+        return count
+
+    async def _gather_exposure_state(self, symbol: str, contract_fp: str) -> Dict[str, Any]:
+        live_key = f'signals:live:{symbol}:{contract_fp}'
+        live_lock = bool(await self.redis.exists(live_key))
+
+        live_count = 0
+        async for key in self.redis.scan_iter(match=f'signals:live:{symbol}:*'):
+            live_count += 1
+
+        positions = await self.redis.scard(f'positions:by_symbol:{symbol}')
+        pending_orders = await self._count_pending_orders(symbol)
+
+        return {
+            'symbol': symbol,
+            'live_key': live_key,
+            'live_lock': live_lock,
+            'live_count': live_count,
+            'positions': int(positions or 0),
+            'pending_orders': pending_orders,
+        }
+
+    async def _check_exposure_caps(
+        self,
+        symbol: str,
+        strategy: str,
+        contract_fp: str,
+        exposure_state: Dict[str, Any],
+        signal: Dict[str, Any],
+    ) -> bool:
+        caps = [
+            ('max_positions', exposure_state.get('positions', 0)),
+            ('max_pending_orders', exposure_state.get('pending_orders', 0)),
+            ('max_live_signals', exposure_state.get('live_count', 0)),
+        ]
+
+        for cap_key, value in caps:
+            limit = self._resolve_exposure_cap(symbol, strategy, cap_key)
+            if limit is None or limit <= 0:
+                continue
+
+            adjusted_value = value
+            if cap_key == 'max_live_signals' and exposure_state.get('live_lock'):
+                adjusted_value = value
+
+            if adjusted_value >= limit:
+                details = {
+                    'cap': cap_key,
+                    'limit': limit,
+                    'value': adjusted_value,
+                    'symbol': symbol,
+                    'strategy': strategy,
+                }
+                self.logger.info(
+                    "signal_exposure_block",
+                    extra={
+                        "action": "exposure_block",
+                        **details,
+                    },
+                )
+                await self.redis.incr('metrics:signals:blocked:exposure')
+                await self._deduper.add_audit_entry(
+                    contract_fp,
+                    "blocked",
+                    "exposure_cap",
+                    details,
+                )
+                await self._deduper.publish_update(
+                    dict(signal),
+                    contract_fp=contract_fp,
+                    reason=cap_key,
+                    exposure_state=exposure_state,
+                )
+                return True
+
+        return False
 
     async def select_contract(self, symbol: str, strategy: str, side: str,
                             spot: float, options_chain=None) -> Dict[str, Any]:
@@ -692,13 +838,61 @@ async def default_feature_reader(redis_conn: aioredis.Redis, symbol: str) -> Dic
             'obi',
             default=0.5,
         ),
-        'toxicity': _extract_metric(toxicity_raw, 'score', 'toxicity', default=0.5),
         'sweep': _extract_metric(sweep_raw, 'score', 'value'),
         'hidden_orders': _extract_metric(hidden_raw, 'score', 'value'),
         'unusual_activity': _extract_metric(unusual_raw, 'score', 'value'),
         'institutional_flow': _extract_metric(institutional_raw, 'value'),
         'retail_flow': _extract_metric(retail_raw, 'value'),
     }
+
+    toxicity_data = _decode(toxicity_raw) or {}
+    if isinstance(toxicity_data, dict):
+        raw_score = toxicity_data.get('toxicity_score')
+        if raw_score is None:
+            raw_score = toxicity_data.get('toxicity') or toxicity_data.get('score')
+        adjusted_score = toxicity_data.get('toxicity_adjusted')
+
+        try:
+            if raw_score is not None:
+                features['toxicity_raw'] = float(raw_score)
+        except (TypeError, ValueError):
+            pass
+
+        try:
+            if adjusted_score is not None:
+                features['toxicity_adjusted'] = float(adjusted_score)
+        except (TypeError, ValueError):
+            pass
+
+        try:
+            features['toxicity_confidence'] = float(toxicity_data.get('confidence', 0.0) or 0.0)
+        except (TypeError, ValueError):
+            features['toxicity_confidence'] = 0.0
+
+        try:
+            features['aggressor_ratio'] = float(toxicity_data.get('aggressor_ratio', 0.0) or 0.0)
+        except (TypeError, ValueError):
+            features['aggressor_ratio'] = 0.0
+
+        try:
+            features['large_trade_ratio'] = float(toxicity_data.get('large_trade_ratio', 0.0) or 0.0)
+        except (TypeError, ValueError):
+            features['large_trade_ratio'] = 0.0
+
+        try:
+            features['institutional_score'] = float(toxicity_data.get('institutional_score', 0.0) or 0.0)
+        except (TypeError, ValueError):
+            features['institutional_score'] = 0.0
+
+        features['toxicity'] = (
+            features.get('toxicity_adjusted')
+            or features.get('toxicity_raw')
+            or 0.5
+        )
+        features['toxicity_level'] = toxicity_data.get('toxicity_adjusted_level') or toxicity_data.get('toxicity_level')
+        features['venue_mix'] = toxicity_data.get('derived_venue_mix') or {}
+    else:
+        features['toxicity'] = _extract_metric(toxicity_raw, 'score', 'toxicity', default=0.5)
 
     gex_data = _decode(gex_raw) or {}
     if isinstance(gex_data, dict):

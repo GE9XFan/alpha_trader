@@ -204,25 +204,62 @@ class MetricsAggregator:
                 'flow_clusters': {},
                 'vix1d': vix1d_data,
             }
+            key_map = {
+                'vpin': rkeys.analytics_vpin_key(symbol),
+                'gex': rkeys.analytics_gex_key(symbol),
+                'dex': rkeys.analytics_dex_key(symbol),
+                'vanna': rkeys.analytics_vanna_key(symbol),
+                'charm': rkeys.analytics_charm_key(symbol),
+                'hedging': rkeys.analytics_hedging_impact_key(symbol),
+                'skew': rkeys.analytics_skew_key(symbol),
+                'clusters': rkeys.analytics_flow_clusters_key(symbol),
+                'ticker': rkeys.market_ticker_key(symbol),
+            }
 
-            vpin_data = await self._fetch_json(rkeys.analytics_vpin_key(symbol))
+            try:
+                async with self.redis.pipeline(transaction=False) as pipe:
+                    for redis_key in key_map.values():
+                        pipe.get(redis_key)
+                    raw_values = await pipe.execute()
+            except Exception as exc:  # pragma: no cover - defensive guardrail
+                self.logger.error(f"Failed to fetch snapshot data for {symbol}: {exc}")
+                snapshots.append(snapshot)
+                continue
+
+            raw_by_name = dict(zip(key_map.keys(), raw_values))
+
+            def decode_json(name: str) -> Optional[Dict[str, Any]]:
+                raw_value = raw_by_name.get(name)
+                if not raw_value:
+                    return None
+                if isinstance(raw_value, bytes):
+                    raw_value = raw_value.decode('utf-8', errors='ignore')
+                if not raw_value:
+                    return None
+                try:
+                    return json.loads(raw_value)
+                except json.JSONDecodeError:
+                    self.logger.warning(f"Invalid JSON payload for {key_map[name]}")
+                    return None
+
+            vpin_data = decode_json('vpin')
             if vpin_data:
                 try:
                     snapshot['vpin'] = float(vpin_data.get('value'))
                 except (TypeError, ValueError):
                     snapshot['vpin'] = None
 
-            gex_data = await self._fetch_json(rkeys.analytics_gex_key(symbol))
+            gex_data = decode_json('gex')
             if gex_data:
                 snapshot['gex'] = float(gex_data.get('total_gex', 0.0))
 
-            dex_data = await self._fetch_json(rkeys.analytics_dex_key(symbol))
+            dex_data = decode_json('dex')
             if dex_data:
                 snapshot['dex'] = float(dex_data.get('total_dex', 0.0))
                 snapshot['call_dex'] = float(dex_data.get('call_dex', 0.0))
                 snapshot['put_dex'] = float(dex_data.get('put_dex', 0.0))
 
-            vanna_data = await self._fetch_json(rkeys.analytics_vanna_key(symbol))
+            vanna_data = decode_json('vanna')
             if vanna_data:
                 snapshot['vanna'] = vanna_data
                 snapshot['vanna_notional'] = float(vanna_data.get('total_vanna_notional_per_pct_vol', 0.0))
@@ -232,7 +269,7 @@ class MetricsAggregator:
                 except (TypeError, ValueError):
                     snapshot['vanna_z'] = 0.0
 
-            charm_data = await self._fetch_json(rkeys.analytics_charm_key(symbol))
+            charm_data = decode_json('charm')
             if charm_data:
                 snapshot['charm'] = charm_data
                 snapshot['charm_notional'] = float(charm_data.get('total_charm_notional_per_day', 0.0))
@@ -242,13 +279,13 @@ class MetricsAggregator:
                 except (TypeError, ValueError):
                     snapshot['charm_z'] = 0.0
 
-            hedging_data = await self._fetch_json(rkeys.analytics_hedging_impact_key(symbol))
+            hedging_data = decode_json('hedging')
             if hedging_data:
                 snapshot['hedging'] = hedging_data
                 snapshot['hedging_notional'] = float(hedging_data.get('notional_per_pct_move', 0.0))
                 snapshot['hedging_shares_per_pct'] = float(hedging_data.get('shares_per_pct_move', 0.0))
 
-            skew_data = await self._fetch_json(rkeys.analytics_skew_key(symbol))
+            skew_data = decode_json('skew')
             if skew_data:
                 snapshot['skew'] = skew_data.get('skew')
                 history = skew_data.get('history') or {}
@@ -258,11 +295,11 @@ class MetricsAggregator:
                     snapshot['skew_z'] = 0.0
                 snapshot['skew_data'] = skew_data
 
-            clusters_data = await self._fetch_json(rkeys.analytics_flow_clusters_key(symbol))
+            clusters_data = decode_json('clusters')
             if clusters_data:
                 snapshot['flow_clusters'] = clusters_data
 
-            ticker = await self._fetch_json(rkeys.market_ticker_key(symbol))
+            ticker = decode_json('ticker')
             if ticker:
                 try:
                     snapshot['volume'] = float(ticker.get('volume') or ticker.get('vol') or 0.0)
@@ -527,7 +564,6 @@ class AnalyticsEngine:
         self.dealer_flow_calculator: Optional[DealerFlowCalculator] = None
         self.flow_cluster_model: Optional[FlowClusterModel] = None
         self.volatility_metrics: Optional[VolatilityMetrics] = None
-        self.flow_cluster_symbols: List[str] = []
         self.aggregator = MetricsAggregator(config, redis_conn)
 
         self.logger.info(

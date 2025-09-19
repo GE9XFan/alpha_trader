@@ -105,6 +105,15 @@ modules:
       volatility: 60
       moc: 30
       unusual_activity: 60
+    toxicity_heuristics:
+      trade_window: 200
+      minimum_trades: 40
+      large_trade_notional: 250000
+      large_trade_contracts: 250
+      spread_cross_tolerance_bps: 5
+      aggressor_weight: 0.3
+      large_trade_weight: 0.2
+      vpin_weight: 0.5
     sector_map:
       SPY: INDEX
       QQQ: TECH
@@ -161,6 +170,18 @@ modules:
     ttl_seconds: 300          # TTL for emitted keys
     version: "D6.0.1"
 
+    exposure_caps:
+      default:
+        max_positions: null
+        max_pending_orders: null
+        max_live_signals: null
+      strategies:
+        0dte:
+          max_positions: 1
+          max_pending_orders: 1
+          max_live_signals: 1
+      symbols: {}
+
     # Optional global blend (for future hybrid scorers)
     weights:
       vpin: 0.15
@@ -199,6 +220,11 @@ modules:
           skew_sigma: 1.0
           flow_momentum_min: 0.35
           hedging_notional_max: 500000000
+          hedging_veto_ratio: 0.8
+          neutral_band: 0.2
+          toxicity_floor: 0.45
+          max_feature_age_s: 15
+          min_institutional_signals: 2
 
       1dte:
         enabled: true
@@ -220,12 +246,18 @@ modules:
         symbols: ["AAPL","TSLA","NVDA","AMD","GOOGL","META","AMZN","MSFT","PLTR"]
         time_window: { start: "09:30", end: "16:00" }  # Full market hours
         confidence_weights:
-          unusual_options: 40
-          sweep: 30
-          hidden_orders: 20
+          unusual_options: 25
+          sweep: 20
+          hidden_orders: 15
           dex: 10
+          vanna: 15
+          charm: 10
+          flow_momentum: 5
         thresholds:
-          min_confidence: 90
+          min_confidence: 75
+          unusual_min: 0.5
+          hidden_min: 0.4
+          dex_min: 3000000000
 
       moc:
         enabled: true

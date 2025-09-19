@@ -6,7 +6,7 @@
 | **1 – Schema & Configuration** | ✅ Complete | Canonical Redis key helpers, unified module toggles, cadence/TTL controls, bootstrap wiring in `main.py` | `redis_keys.py`, `config/config.yaml`, config load path in `main.py` | Expand schema docs, `.env` templates, automated config validation |
 | **2 – Dealer-Flow Analytics** | ✅ Complete | DealerFlowCalculator, metrics aggregation into symbol/sector/portfolio snapshots, hedging elasticity metrics, analytics scheduler | `src/dealer_flow_calculator.py`, `src/analytics_engine.py`, dashboards TTL checks | Regression coverage for edge cases, performance profiling |
 | **3 – Flow Clustering & Volatility Regimes** | ✅ Complete | FlowClusterModel, VolatilityMetrics, VIX1D regime tagging, analytics integration | `src/flow_clustering.py`, `src/volatility_metrics.py`, scheduler logs | Validate clustering on expanded universes, regime calibration tooling |
-| **4 – Signal Integration & Scoring** | ✅ Complete | Feature reader refresh, 0/1/14DTE + MOC playbooks, contract normalization, dedupe fan-out to execution/distribution | `src/signal_generator.py`, `src/dte_strategies.py`, `src/moc_strategy.py`, `src/signal_deduplication.py` | Strategy unit/backtest harness, tuning guidance |
+| **4 – Signal Integration & Scoring** | ✅ Complete | Feature reader refresh, 0/1/14DTE + MOC playbooks, exposure-aware dedupe, execution acknowledgements, observability metrics | `src/signal_generator.py`, `src/dte_strategies.py`, `src/moc_strategy.py`, `src/signal_deduplication.py` | Strategy unit/backtest harness, tuning guidance |
 | **5 – Backfills & Monitoring** | ✅ Complete | Replay utilities for analytics history, monitoring scaffolds, regression coverage for replay paths | Replay scripts, monitoring heartbeats in Redis | Update legacy tests, automate replay validation, alerting for stalled jobs |
 | **6 – Execution & Distribution Hardening** | ✅ Complete | Notional-aware sizing, commission normalization, bracket/trailing rebuilds, executed-only distribution, daily P&L reconciliation | `src/execution_manager.py`, `src/position_manager.py`, `src/signal_distributor.py`, `reconcile_daily_pnl.py` | Automated reconciliation checks, expanded risk regression coverage, execution dashboards |
 | **7 – Community Publishing & Automation** | ⚠️ In Planning | Scaffolds for social bots, dashboards, morning automation, reporting wired to config + Redis | `src/discord_bot.py`, `src/telegram_bot.py`, `src/twitter_bot.py`, `src/morning_scanner.py`, `src/report_generator.py` | Implement publishing logic, provision credentials, observability, integration tests |
@@ -23,6 +23,7 @@
 - **DealerFlowCalculator** (`src/dealer_flow_calculator.py`): Computes Vanna, Charm, hedging elasticity, skew, and maintains rolling statistics stored under `analytics:{symbol}:{metric}`.
 - **Aggregation layer** (`src/analytics_engine.py`): Schedules calculator execution, consolidates contract-level readings into symbol, sector, and portfolio snapshots, and enforces TTLs outlined in config.
 - **Cache hygiene**: Analytics outputs respect `modules.data_ingestion.store_ttls.analytics`, ensuring downstream modules (signals, dashboards) consume consistent payloads.
+- **Documentation**: Architecture, cadences, and Redis touchpoints for analytics are captured in `docs/analytics_module.md` (paired with the ingestion deep dive).
 - **Monitoring**: Heartbeats and state flags updated via `analytics_engine` for operations observability.
 
 ### Flow Clustering & Volatility Regimes (Phase 3)
@@ -35,6 +36,7 @@
 - **Strategies**: 0/1/14 DTE (`src/dte_strategies.py`) and MOC (`src/moc_strategy.py`) re-tuned to new analytics, including contract hysteresis, strike memory, and liquidity filters.
 - **Deduplication** (`src/signal_deduplication.py`): Normalizes contract fingerprints, avoids duplicate emissions, and writes to both `signals:pending:*` (distribution) and `signals:execution:*` (execution loop) queues.
 - **Backpressure handling**: Signal generator implements exponential backoff on repeated failures to protect downstream services.
+- **Exposure & observability**: Live-locks (`signals:live:*`), exposure caps, veto hashes, and acknowledgement metrics (`signals:ack:*`, `metrics:signals:*`) give operators visibility into blocked signals and pending orders. Details captured in `docs/signal_engine_module.md`.
 
 ### Backfills & Monitoring (Phase 5)
 - **Replay utilities**: Backfill scripts rehydrate dealer-flow, flow-cluster, and VIX1D histories to accelerate warm-up for new symbols or cold starts.
@@ -139,3 +141,4 @@
 - **Signal pipeline**: `src/signal_generator.py`, `src/dte_strategies.py`, `src/moc_strategy.py`, `src/signal_deduplication.py`
 - **Execution & risk**: `src/execution_manager.py`, `src/position_manager.py`, `src/risk_manager.py`, `src/emergency_manager.py`, `reconcile_daily_pnl.py`
 - **Distribution & comms**: `src/signal_distributor.py`, `src/discord_bot.py`, `src/telegram_bot.py`, `src/twitter_bot.py`, `src/morning_scanner.py`, `src/news_analyzer.py`, `src/report_generator.py`
+- **Documentation**: `docs/ingestion_module.md`, `docs/analytics_module.md`

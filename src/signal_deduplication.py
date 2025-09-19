@@ -27,21 +27,47 @@ from datetime import datetime
 from typing import Dict, Any, Optional
 import logging
 
+from option_utils import normalize_expiry
+
+
+def _normalized_strike(value: Any) -> str:
+    try:
+        return f"{float(value):.2f}"
+    except (TypeError, ValueError):
+        return "0.00"
+
 
 def contract_fingerprint(symbol: str, strategy: str, side: str, contract: dict) -> str:
-    """
-    Stable identity for the specific option contract choice.
-    Includes multiplier and exchange to handle edge cases (minis, different venues).
-    """
+    """Stable identity for the specific option contract choice."""
+
+    expiry_raw = (
+        contract.get('expiry')
+        or contract.get('expiration')
+        or contract.get('expiration_date')
+    )
+    expiry = normalize_expiry(expiry_raw)
+
+    right_raw = contract.get('right') or contract.get('type')
+    right = str(right_raw or '').upper().strip()
+    right = 'C' if right.startswith('C') else 'P'
+
+    multiplier_raw = contract.get('multiplier', contract.get('contract_multiplier', 100))
+    try:
+        multiplier = int(multiplier_raw)
+    except (TypeError, ValueError):
+        multiplier = 100
+
+    exchange = str(contract.get('exchange', 'SMART') or 'SMART').upper()
+
     parts = (
         symbol,
         strategy,
         side,
-        str(contract.get('expiry')),
-        str(contract.get('right')),
-        str(contract.get('strike')),
-        str(contract.get('multiplier', 100)),  # Default 100 for standard equity options
-        str(contract.get('exchange', 'SMART')),  # Default SMART for IB routing
+        expiry or '',
+        right,
+        _normalized_strike(contract.get('strike')),
+        str(multiplier),
+        exchange,
     )
     return "sigfp:" + hashlib.sha1(":".join(parts).encode()).hexdigest()[:20]
 
@@ -54,6 +80,9 @@ def trading_day_bucket(ts: float = None) -> str:
     ET = pytz.timezone("America/New_York")
     dt = datetime.fromtimestamp(ts or time.time(), tz=ET)
     return dt.strftime("%Y%m%d")
+
+
+UPDATE_CHANNEL = 'signals:updates'
 
 
 class SignalDeduplication:
@@ -88,9 +117,16 @@ class SignalDeduplication:
         -- KEYS[2] = cooldown_key    "signals:cooldown:<contract_fp>"
         -- KEYS[3] = queue_pending   "signals:pending:<symbol>"
         -- KEYS[4] = queue_execution "signals:execution:<symbol>"
+        -- KEYS[5] = live_lock_key   "signals:live:<symbol>:<contract_fp>"
         -- ARGV[1] = signal_json
         -- ARGV[2] = idempotency_ttl_seconds
         -- ARGV[3] = cooldown_ttl_seconds
+        -- ARGV[4] = live_lock_ttl_seconds
+        -- ARGV[5] = signal_id
+
+        if redis.call('EXISTS', KEYS[5]) == 1 then
+            return -2  -- Active position/order lock
+        end
 
         if redis.call('SETNX', KEYS[1], '1') == 1 then
             redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[2]) * 1000)
@@ -98,6 +134,7 @@ class SignalDeduplication:
                 redis.call('LPUSH', KEYS[3], ARGV[1])
                 redis.call('LPUSH', KEYS[4], ARGV[1])
                 redis.call('PEXPIRE', KEYS[2], tonumber(ARGV[3]) * 1000)
+                redis.call('SET', KEYS[5], ARGV[5], 'PX', tonumber(ARGV[4]) * 1000)
                 return 1  -- Signal enqueued
             else
                 return -1  -- Blocked by cooldown
@@ -107,6 +144,34 @@ class SignalDeduplication:
         end
         """
         self.lua_sha = None  # Will be loaded on first use
+
+    async def publish_update(
+        self,
+        signal: Dict[str, Any],
+        *,
+        contract_fp: str,
+        reason: str,
+        exposure_state: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Publish a confidence/position update to downstream consumers."""
+
+        if not signal:
+            return
+
+        payload = {
+            'ts': time.time(),
+            'type': 'update',
+            'reason': reason,
+            'contract_fp': contract_fp,
+            'signal': signal,
+            'exposure': exposure_state or {},
+        }
+
+        try:
+            await self.redis.publish(UPDATE_CHANNEL, json.dumps(payload))
+            await self.redis.incr('metrics:signals:updates_routed')
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self.logger.error(f"Failed to publish signal update: {exc}")
 
     async def check_cooldown(self, contract_fp: str) -> bool:
         """
@@ -136,7 +201,13 @@ class SignalDeduplication:
         result = await self.redis.set(emitted_key, '1', nx=True, ex=self.ttl_seconds)
         return result is not None
 
-    def generate_signal_id(self, symbol: str, side: str, contract_fp: str) -> str:
+    def generate_signal_id(
+        self,
+        symbol: str,
+        side: str,
+        contract_fp: str,
+        expiry: Optional[str] = None,
+    ) -> str:
         """
         Idempotent ID for 'this contract, this side, today'.
         Avoids re-emitting micro-variants for the same contract.
@@ -145,14 +216,26 @@ class SignalDeduplication:
             symbol: Trading symbol
             side: LONG or SHORT
             contract_fp: Contract fingerprint
+            expiry: Contract expiry string if available
 
         Returns:
             Unique signal identifier
         """
-        components = f"{contract_fp}:{self.version}:{trading_day_bucket()}"
-        return hashlib.sha1(components.encode()).hexdigest()[:16]
+        expiry_norm = normalize_expiry(expiry)
+        components = [contract_fp, self.version]
+        if expiry_norm:
+            components.append(expiry_norm)
+        return hashlib.sha1(":".join(components).encode()).hexdigest()[:16]
 
-    async def check_material_change(self, contract_fp: str, confidence: int) -> bool:
+    async def check_material_change(
+        self,
+        contract_fp: str,
+        confidence: int,
+        *,
+        signal: Dict[str, Any],
+        signal_id: str,
+        exposure_state: Dict[str, Any],
+    ) -> bool:
         """
         Check if confidence change is material enough to warrant new signal.
 
@@ -194,6 +277,26 @@ class SignalDeduplication:
 
         # Update last confidence with sliding TTL
         await self.redis.setex(last_c_key, 900, int(confidence))
+
+        update_reason = None
+        if exposure_state.get('live_lock'):
+            update_reason = 'live_lock'
+        elif exposure_state.get('positions'):
+            update_reason = 'positions'
+        elif exposure_state.get('pending_orders'):
+            update_reason = 'pending_orders'
+
+        if update_reason:
+            signal_copy = dict(signal)
+            signal_copy['id'] = signal_id
+            await self.publish_update(
+                signal_copy,
+                contract_fp=contract_fp,
+                reason=update_reason,
+                exposure_state=exposure_state,
+            )
+            return False
+
         return True
 
     async def atomic_emit(self, signal_id: str, contract_fp: str, symbol: str,
@@ -212,6 +315,7 @@ class SignalDeduplication:
             1: Signal successfully enqueued
             0: Duplicate signal (already emitted)
             -1: Blocked by cooldown
+            -2: Blocked by active live-lock (existing position/order)
         """
         # Load Lua script if not already loaded
         if not self.lua_sha:
@@ -226,21 +330,26 @@ class SignalDeduplication:
         cooldown_key = f'signals:cooldown:{contract_fp}'
         queue_key_pending = f'signals:pending:{symbol}'
         queue_key_execution = f'signals:execution:{symbol}'
+        live_key = f'signals:live:{symbol}:{contract_fp}'
 
         signal_json = json.dumps(signal)
+        live_ttl = max(int(ttl or self.ttl_seconds), self.cooldown_s)
 
         try:
             # Execute atomic operation
             result = await self.redis.evalsha(
                 self.lua_sha,
-                4,  # Number of keys
+                5,  # Number of keys
                 idempotency_key,
                 cooldown_key,
                 queue_key_pending,
                 queue_key_execution,
+                live_key,
                 signal_json,
                 str(ttl),
-                str(self.cooldown_s)
+                str(self.cooldown_s),
+                str(live_ttl),
+                signal_id,
             )
 
             return int(result)
@@ -250,14 +359,17 @@ class SignalDeduplication:
                 self.lua_sha = await self.redis.script_load(self.LUA_ATOMIC_EMIT)
                 result = await self.redis.evalsha(
                     self.lua_sha,
-                    4,
+                    5,
                     idempotency_key,
                     cooldown_key,
                     queue_key_pending,
                     queue_key_execution,
+                    live_key,
                     signal_json,
                     str(ttl),
-                    str(self.cooldown_s)
+                    str(self.cooldown_s),
+                    str(live_ttl),
+                    signal_id,
                 )
                 return int(result)
             else:

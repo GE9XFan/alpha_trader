@@ -52,21 +52,40 @@ class VolatilityMetrics:
         self.cboe_history_cache_key = 'volatility:vix1d:cboe:history'
         self.yahoo_backoff_key = 'volatility:vix1d:yahoo_backoff'
         self.yahoo_retry_count = 0
+        self._failure_count = 0
+        self._next_retry_ts = 0.0
 
     async def update_vix1d(self) -> Dict[str, Any]:
-        fetched = await self._fetch_vix1d()
-        if isinstance(fetched, tuple):
-            value, source = fetched
-        else:  # Backwards compatibility with monkeypatched helpers returning raw floats
-            value, source = fetched, None
-        if value is None:
+        now = time.time()
+        if now < self._next_retry_ts:
             cached = await self.redis.get(rkeys.analytics_vix1d_key())
             if cached:
                 try:
                     return json.loads(cached)
                 except json.JSONDecodeError:
                     pass
-            return {'error': 'unavailable'}
+            remaining = max(int(self._next_retry_ts - now), 1)
+            raise RuntimeError(f"VIX1D update in backoff for {remaining}s")
+
+        fetched = await self._fetch_vix1d()
+        if isinstance(fetched, tuple):
+            value, source = fetched
+        else:  # Backwards compatibility with monkeypatched helpers returning raw floats
+            value, source = fetched, None
+        if value is None:
+            self._failure_count += 1
+            backoff = min(self.cache_duration, max(5, 2 ** self._failure_count))
+            self._next_retry_ts = now + backoff
+            cached = await self.redis.get(rkeys.analytics_vix1d_key())
+            if cached:
+                try:
+                    return json.loads(cached)
+                except json.JSONDecodeError:
+                    pass
+            raise RuntimeError('VIX1D update failed: upstream data unavailable')
+
+        self._failure_count = 0
+        self._next_retry_ts = 0.0
 
         as_of = datetime.now(timezone.utc)
         history_stats, change_5m, change_1h, percentile = await self._update_history(value, as_of.timestamp())

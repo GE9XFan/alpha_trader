@@ -16,7 +16,7 @@ import math
 import re
 import redis.asyncio as aioredis
 import time
-from typing import Dict, Any, Tuple, Optional, Iterable
+from typing import Dict, Any, Tuple, Optional, Iterable, List
 import logging
 import traceback
 
@@ -145,6 +145,19 @@ class GEXDEXCalculator:
         _, strike = self._extract_occ(key)
         return strike
 
+    async def _collect_option_keys(self, symbol: str, patterns: Iterable[str]) -> List[str]:
+        keys: List[str] = []
+        for pattern in patterns:
+            try:
+                async for key in self.redis.scan_iter(match=pattern):
+                    keys.append(key if isinstance(key, str) else key.decode('utf-8', errors='ignore'))
+            except Exception as exc:  # pragma: no cover - defensive telemetry
+                self.logger.error(f"Failed to scan pattern {pattern} for {symbol}: {exc}")
+                return []
+            if keys:
+                break
+        return keys
+
     async def calculate_gex(self, symbol: str) -> dict:
         """
         Calculate Gamma Exposure (GEX) from options chain.
@@ -188,28 +201,18 @@ class GEXDEXCalculator:
                     self.logger.error(f"Failed to parse normalized chain for {symbol}: {exc}")
                     contracts_iter = []
 
-            greek_keys = []
+            greek_keys: List[str] = []
             if not contracts_iter:
-                pattern = f'options:{symbol}:*:greeks'
-
-                try:
-                    greek_keys = await self.redis.keys(pattern)
-
-                    if not greek_keys:
-                        for alt_pattern in [f'options:{symbol}:greeks:*', f'greeks:{symbol}:*']:
-                            greek_keys = await self.redis.keys(alt_pattern)
-                            if greek_keys:
-                                break
-
-                    self.logger.debug(f"Found {len(greek_keys)} option contracts for {symbol}")
-
-                except Exception as e:
-                    self.logger.error(f"Failed to get option keys for {symbol}: {e}")
-                    return {'error': f'Failed to get options for {symbol}'}
+                greek_keys = await self._collect_option_keys(
+                    symbol,
+                    [f'options:{symbol}:*:greeks', f'options:{symbol}:greeks:*', f'greeks:{symbol}:*']
+                )
 
                 if not greek_keys:
                     self.logger.warning(f"No options data for {symbol}")
                     return {'error': f'No options data for {symbol}'}
+
+                self.logger.debug(f"Found {len(greek_keys)} option contracts for {symbol}")
 
             # 3. Calculate GEX for each strike
             gex_by_strike = {}
@@ -251,11 +254,14 @@ class GEXDEXCalculator:
                             continue
 
                         if option_type == 'call':
-                            contract_gex = gamma * open_interest * contract_multiplier * spot * spot
                             calls_processed += 1
-                        else:
-                            contract_gex = -gamma * open_interest * contract_multiplier * spot * spot
+                        elif option_type == 'put':
                             puts_processed += 1
+                        else:
+                            contracts_skipped += 1
+                            continue
+
+                        contract_gex = gamma * open_interest * contract_multiplier * spot * spot
 
                         gex_by_strike.setdefault(strike, 0)
                         gex_by_strike[strike] += contract_gex
@@ -301,11 +307,14 @@ class GEXDEXCalculator:
                             continue
 
                         if option_type == 'call':
-                            contract_gex = gamma * open_interest * contract_multiplier * spot * spot
                             calls_processed += 1
-                        else:  # put
-                            contract_gex = -gamma * open_interest * contract_multiplier * spot * spot
+                        elif option_type == 'put':
                             puts_processed += 1
+                        else:
+                            contracts_skipped += 1
+                            continue
+
+                        contract_gex = gamma * open_interest * contract_multiplier * spot * spot
 
                         if strike not in gex_by_strike:
                             gex_by_strike[strike] = 0
@@ -432,27 +441,16 @@ class GEXDEXCalculator:
                 return {'error': 'Invalid spot price'}
 
             # 2. Get all option Greeks keys
-            greek_keys = []
-            pattern = f'options:{symbol}:*:greeks'
-
-            try:
-                greek_keys = await self.redis.keys(pattern)
-
-                if not greek_keys:
-                    for alt_pattern in [f'options:{symbol}:greeks:*', f'greeks:{symbol}:*']:
-                        greek_keys = await self.redis.keys(alt_pattern)
-                        if greek_keys:
-                            break
-
-                self.logger.debug(f"Found {len(greek_keys)} option contracts for {symbol} DEX")
-
-            except Exception as e:
-                self.logger.error(f"Failed to get option keys for {symbol}: {e}")
-                return {'error': f'Failed to get options for {symbol}'}
+            greek_keys = await self._collect_option_keys(
+                symbol,
+                [f'options:{symbol}:*:greeks', f'options:{symbol}:greeks:*', f'greeks:{symbol}:*']
+            )
 
             if not greek_keys:
                 self.logger.warning(f"No options data for {symbol}")
                 return {'error': f'No options data for {symbol}'}
+
+            self.logger.debug(f"Found {len(greek_keys)} option contracts for {symbol} DEX")
 
             # 3. Calculate DEX for each strike
             dex_by_strike = {}

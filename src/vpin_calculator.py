@@ -33,6 +33,7 @@ class VPINCalculator:
         self.config = config
         self.redis = redis_conn
         self.logger = logging.getLogger(__name__)
+        self._warned_missing_bucket_size = False
 
         # TTLs for storing metrics
         self.ttls = config.get('modules', {}).get('analytics', {}).get('store_ttls', {
@@ -63,7 +64,11 @@ class VPINCalculator:
                 self.logger.debug(f"Using discovered bucket size: {bucket_size}")
             else:
                 # Fallback to config default
-                self.logger.warning(f"No discovered bucket size, using default: {bucket_size}")
+                if not self._warned_missing_bucket_size:
+                    self.logger.warning(f"No discovered bucket size, using default: {bucket_size}")
+                    self._warned_missing_bucket_size = True
+                else:
+                    self.logger.debug(f"Using default VPIN bucket size: {bucket_size}")
 
             # 2. Fetch recent trades from Redis (last 1000 trades)
             trades_json = await self.redis.lrange(rkeys.market_trades_key(symbol), -1000, -1)
@@ -174,13 +179,16 @@ class VPINCalculator:
 
         # Get current bid/ask for midpoint calculation
         ticker_json = await self.redis.get(rkeys.market_ticker_key(symbol))
+        midpoint = 0
         if ticker_json:
-            ticker = json.loads(ticker_json)
-            bid = ticker.get('bid', 0)
-            ask = ticker.get('ask', 0)
-            midpoint = (bid + ask) / 2 if bid and ask else 0
-        else:
-            midpoint = 0
+            try:
+                ticker = json.loads(ticker_json)
+            except (json.JSONDecodeError, TypeError):
+                ticker = None
+            if isinstance(ticker, dict):
+                bid = ticker.get('bid', 0)
+                ask = ticker.get('ask', 0)
+                midpoint = (bid + ask) / 2 if bid and ask else 0
 
         # If no midpoint, try to estimate from trade prices
         if midpoint == 0 and trades:

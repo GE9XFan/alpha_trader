@@ -42,54 +42,332 @@ class PatternAnalyzer:
             'heartbeat': 15
         })
 
+        heuristics_cfg = config.get('modules', {}).get('analytics', {}).get('toxicity_heuristics', {}) or {}
+        self.toxicity_trade_window = int(heuristics_cfg.get('trade_window', 200))
+        self.toxicity_min_trades = int(heuristics_cfg.get('minimum_trades', 40))
+        self.large_trade_notional = float(heuristics_cfg.get('large_trade_notional', 250000))
+        self.large_trade_contracts = float(heuristics_cfg.get('large_trade_contracts', 250))
+        self.spread_cross_tolerance_bps = float(heuristics_cfg.get('spread_cross_tolerance_bps', 5))
+        self.toxicity_weights = {
+            'vpin': float(heuristics_cfg.get('vpin_weight', 0.5)),
+            'aggressor': float(heuristics_cfg.get('aggressor_weight', 0.3)),
+            'large': float(heuristics_cfg.get('large_trade_weight', 0.2)),
+        }
+
     async def analyze_flow_toxicity(self, symbol: str) -> dict:
-        """
-        Analyze flow toxicity from trading patterns.
-        This is simplified from the full parameter discovery version.
-        """
+        """Estimate flow toxicity with aggressor and venue heuristics."""
+
         try:
-            # Get VPIN data as primary toxicity indicator
-            vpin_json = await self.redis.get(rkeys.analytics_vpin_key(symbol))
-            if not vpin_json:
-                return {'error': 'No VPIN data available'}
+            async with self.redis.pipeline(transaction=False) as pipe:
+                pipe.get(rkeys.analytics_vpin_key(symbol))
+                pipe.lrange(rkeys.market_trades_key(symbol), -self.toxicity_trade_window, -1)
+                pipe.get(rkeys.market_ticker_key(symbol))
+                pipe.get(rkeys.market_book_key(symbol))
+                vpin_raw, trades_raw, ticker_raw, book_raw = await pipe.execute()
 
-            vpin_data = json.loads(vpin_json)
-            vpin_value = vpin_data.get('value', 0.5)
+            vpin_data = self._decode_json(vpin_raw) or {}
+            vpin_value = float(vpin_data.get('value') or vpin_data.get('vpin') or 0.5)
 
-            # Classify toxicity based on VPIN
-            if vpin_value > 0.7:
-                toxicity_level = 'high'
-                toxicity_score = vpin_value
-            elif vpin_value > 0.5:
-                toxicity_level = 'moderate'
-                toxicity_score = vpin_value
-            else:
-                toxicity_level = 'low'
-                toxicity_score = vpin_value
+            trades = []
+            for entry in trades_raw or []:
+                decoded = self._decode_json(entry)
+                if isinstance(decoded, dict) and decoded.get('price') and decoded.get('size'):
+                    trades.append(decoded)
 
-            result = {
+            sample_size = len(trades)
+            if sample_size == 0:
+                return await self._store_toxicity_payload(symbol, vpin_value, 'no_trades')
+
+            ticker = self._decode_json(ticker_raw) or {}
+            book = self._decode_json(book_raw) or {}
+
+            trades = trades[-self.toxicity_trade_window:]
+            trades.sort(key=lambda t: t.get('timestamp') or t.get('ts') or 0)
+
+            classified, market_refs = self._classify_trades(symbol, trades, ticker, book)
+            if not classified:
+                return await self._store_toxicity_payload(symbol, vpin_value, 'unclassified')
+
+            proxies = self._compute_flow_proxies(classified, market_refs)
+
+            weight_sum = sum(max(w, 0.0) for w in self.toxicity_weights.values()) or 1.0
+            adjusted_score = (
+                self.toxicity_weights.get('vpin', 0.5) * vpin_value
+                + self.toxicity_weights.get('aggressor', 0.3) * proxies['aggressor_ratio']
+                + self.toxicity_weights.get('large', 0.2) * proxies['large_trade_ratio']
+            ) / weight_sum
+            adjusted_score = max(0.0, min(1.0, adjusted_score))
+
+            toxicity_level = self._classify_toxicity(vpin_value)
+            adjusted_level = self._classify_toxicity(adjusted_score)
+
+            confidence = min(1.0, sample_size / max(self.toxicity_min_trades, 1))
+            institution_score = min(1.0, 0.5 * proxies['large_trade_ratio'] + 0.5 * proxies['aggressor_ratio'])
+
+            payload = {
                 'symbol': symbol,
-                'toxicity_score': round(toxicity_score, 4),
+                'toxicity_score': round(vpin_value, 4),
                 'toxicity_level': toxicity_level,
-                'vpin': vpin_value,
-                'timestamp': time.time()
+                'toxicity_adjusted': round(adjusted_score, 4),
+                'toxicity_adjusted_level': adjusted_level,
+                'aggressor_ratio': round(proxies['aggressor_ratio'], 4),
+                'aggressor_side': proxies['aggressor_side'],
+                'large_trade_ratio': round(proxies['large_trade_ratio'], 4),
+                'spread_cross_ratio': round(proxies['spread_cross_ratio'], 4),
+                'institutional_score': round(institution_score, 4),
+                'confidence': round(confidence, 4),
+                'total_trades_analyzed': sample_size,
+                'total_volume': proxies['total_volume'],
+                'aggressive_volume': proxies['aggressive_volume'],
+                'derived_venue_mix': proxies['venue_mix'],
+                'midpoint': market_refs.get('midpoint'),
+                'timestamp': time.time(),
+                'status': 'ok',
             }
 
-            # Store result
             await self.redis.setex(
                 rkeys.analytics_toxicity_key(symbol),
                 self.ttls.get('analytics', self.ttls.get('metrics', 60)),
-                json.dumps(result)
+                json.dumps(payload)
             )
 
-            if toxicity_level == 'high':
-                self.logger.info(f"HIGH flow toxicity for {symbol}: {toxicity_score:.3f}")
+            if adjusted_level == 'high':
+                self.logger.info(
+                    "toxicity_high",
+                    extra={
+                        "action": "toxicity_high",
+                        "symbol": symbol,
+                        "adjusted": round(adjusted_score, 4),
+                        "aggressor_ratio": round(proxies['aggressor_ratio'], 4),
+                    },
+                )
 
-            return result
+            return payload
 
-        except Exception as e:
-            self.logger.error(f"Error analyzing flow toxicity for {symbol}: {e}")
-            return {'error': str(e)}
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self.logger.error(f"Error analyzing flow toxicity for {symbol}: {exc}")
+            self.logger.error(traceback.format_exc())
+            return {'error': str(exc)}
+
+    async def _store_toxicity_payload(self, symbol: str, vpin_value: float, status: str) -> dict:
+        payload = {
+            'symbol': symbol,
+            'toxicity_score': round(vpin_value, 4),
+            'toxicity_level': self._classify_toxicity(vpin_value),
+            'toxicity_adjusted': round(vpin_value, 4),
+            'toxicity_adjusted_level': self._classify_toxicity(vpin_value),
+            'aggressor_ratio': 0.0,
+            'large_trade_ratio': 0.0,
+            'spread_cross_ratio': 0.0,
+            'institutional_score': 0.0,
+            'confidence': 0.0,
+            'total_trades_analyzed': 0,
+            'total_volume': 0.0,
+            'aggressive_volume': 0.0,
+            'derived_venue_mix': {},
+            'timestamp': time.time(),
+            'status': status,
+        }
+
+        await self.redis.setex(
+            rkeys.analytics_toxicity_key(symbol),
+            self.ttls.get('analytics', self.ttls.get('metrics', 60)),
+            json.dumps(payload)
+        )
+        return payload
+
+    def _decode_json(self, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, bytes):
+            value = value.decode('utf-8', errors='ignore')
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                return None
+        return value
+
+    def _classify_toxicity(self, score: float) -> str:
+        if score >= 0.7:
+            return 'high'
+        if score >= 0.55:
+            return 'moderate'
+        return 'low'
+
+    def _extract_best_prices(self, ticker: Dict[str, Any], book: Dict[str, Any]) -> Dict[str, Optional[float]]:
+        bid = self._safe_float(ticker.get('bid')) if isinstance(ticker, dict) else None
+        ask = self._safe_float(ticker.get('ask')) if isinstance(ticker, dict) else None
+
+        if not bid or not ask:
+            bids = book.get('bids') if isinstance(book, dict) else None
+            asks = book.get('asks') if isinstance(book, dict) else None
+            if isinstance(bids, list) and bids:
+                bid = self._safe_float(bids[0].get('price')) or bid
+            if isinstance(asks, list) and asks:
+                ask = self._safe_float(asks[0].get('price')) or ask
+
+        midpoint = None
+        if bid and ask:
+            midpoint = (bid + ask) / 2
+        elif isinstance(ticker, dict):
+            last = self._safe_float(ticker.get('last'))
+            close = self._safe_float(ticker.get('close'))
+            midpoint = last or close
+
+        return {
+            'bid': bid,
+            'ask': ask,
+            'midpoint': midpoint,
+        }
+
+    def _safe_float(self, value: Any) -> Optional[float]:
+        try:
+            if value is None:
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _classify_trades(
+        self,
+        symbol: str,
+        trades: List[dict],
+        ticker: Dict[str, Any],
+        book: Dict[str, Any],
+    ) -> tuple[List[dict], Dict[str, Any]]:
+        if not trades:
+            return [], {'midpoint': None, 'bid': None, 'ask': None}
+
+        market_refs = self._extract_best_prices(ticker, book)
+        midpoint = market_refs.get('midpoint')
+
+        if midpoint is None:
+            prices = [self._safe_float(t.get('price')) or 0 for t in trades if self._safe_float(t.get('price'))]
+            if prices:
+                midpoint = float(np.median(prices))
+                market_refs['midpoint'] = midpoint
+
+        tolerance = 0.0
+        if midpoint and self.spread_cross_tolerance_bps > 0:
+            tolerance = midpoint * (self.spread_cross_tolerance_bps / 10000.0)
+
+        prev_price = None
+        prev_side = 'buy'
+        classified: List[dict] = []
+
+        for trade in trades:
+            price = self._safe_float(trade.get('price'))
+            size = self._safe_float(trade.get('size') or trade.get('volume'))
+
+            if not price or not size:
+                continue
+
+            side = 'buy'
+            if midpoint:
+                if price > midpoint + tolerance:
+                    side = 'buy'
+                elif price < midpoint - tolerance:
+                    side = 'sell'
+                else:
+                    if prev_price is not None:
+                        if price > prev_price:
+                            side = 'buy'
+                        elif price < prev_price:
+                            side = 'sell'
+                        else:
+                            side = 'sell' if prev_side == 'buy' else 'buy'
+                    else:
+                        side = 'buy'
+            else:
+                if prev_price is not None:
+                    if price > prev_price:
+                        side = 'buy'
+                    elif price < prev_price:
+                        side = 'sell'
+                    else:
+                        side = 'sell' if prev_side == 'buy' else 'buy'
+                else:
+                    side = 'buy'
+
+            prev_price = price
+            prev_side = side
+
+            multiplier = self._safe_float(
+                trade.get('multiplier')
+                or trade.get('contract_multiplier')
+                or (100 if str(trade.get('asset_type') or '').lower() == 'option' else 1)
+            ) or 1.0
+            notional = price * size * multiplier
+
+            spread_cross = None
+            bid = market_refs.get('bid')
+            ask = market_refs.get('ask')
+            if bid and ask:
+                if price >= ask + tolerance:
+                    spread_cross = 'buy'
+                elif price <= bid - tolerance:
+                    spread_cross = 'sell'
+
+            classified.append(
+                {
+                    'price': price,
+                    'size': size,
+                    'notional': notional,
+                    'side': side,
+                    'cross': spread_cross,
+                    'timestamp': trade.get('timestamp') or trade.get('ts'),
+                }
+            )
+
+        return classified, market_refs
+
+    def _compute_flow_proxies(self, trades: List[dict], market_refs: Dict[str, Any]) -> Dict[str, Any]:
+        total_volume = sum(t['size'] for t in trades)
+        if total_volume <= 0:
+            return {
+                'aggressor_ratio': 0.0,
+                'large_trade_ratio': 0.0,
+                'spread_cross_ratio': 0.0,
+                'aggressor_side': 'neutral',
+                'total_volume': 0.0,
+                'aggressive_volume': 0.0,
+                'venue_mix': {},
+            }
+
+        buy_volume = sum(t['size'] for t in trades if t['side'] == 'buy')
+        sell_volume = sum(t['size'] for t in trades if t['side'] == 'sell')
+        aggressor_ratio = abs(buy_volume - sell_volume) / total_volume
+        aggressor_side = 'buy' if buy_volume > sell_volume else 'sell' if sell_volume > buy_volume else 'neutral'
+
+        large_trade_volume = sum(
+            t['size']
+            for t in trades
+            if t['notional'] >= self.large_trade_notional or t['size'] >= self.large_trade_contracts
+        )
+
+        cross_buy_volume = sum(t['size'] for t in trades if t['cross'] == 'buy')
+        cross_sell_volume = sum(t['size'] for t in trades if t['cross'] == 'sell')
+        aggressive_volume = cross_buy_volume + cross_sell_volume
+        spread_cross_ratio = aggressive_volume / total_volume if total_volume > 0 else 0.0
+
+        venue_mix = {
+            'aggressive_buy_volume': cross_buy_volume,
+            'aggressive_sell_volume': cross_sell_volume,
+            'classified_buy_volume': buy_volume,
+            'classified_sell_volume': sell_volume,
+            'total_volume': total_volume,
+        }
+
+        return {
+            'aggressor_ratio': aggressor_ratio,
+            'aggressor_side': aggressor_side,
+            'large_trade_ratio': large_trade_volume / total_volume if total_volume else 0.0,
+            'spread_cross_ratio': spread_cross_ratio,
+            'total_volume': total_volume,
+            'aggressive_volume': aggressive_volume,
+            'venue_mix': venue_mix,
+        }
 
     async def calculate_order_book_imbalance(self, symbol: str) -> dict:
         """
@@ -307,14 +585,26 @@ class PatternAnalyzer:
             current_time = time.time() * 1000
 
             for trade_str in trades_json:
+                if isinstance(trade_str, bytes):
+                    trade_str = trade_str.decode('utf-8', errors='ignore')
+                if not trade_str:
+                    continue
                 try:
                     trade = json.loads(trade_str)
-                    # Only consider trades from last 1 second
-                    trade_time = trade.get('time', trade.get('timestamp', 0))
-                    if current_time - trade_time <= 1000:
-                        trades.append(trade)
-                except (json.JSONDecodeError, KeyError):
+                except (json.JSONDecodeError, TypeError):
                     continue
+                if not isinstance(trade, dict):
+                    continue
+
+                trade_time = trade.get('time', trade.get('timestamp', 0))
+                if trade_time is None:
+                    continue
+                try:
+                    trade_time = float(trade_time)
+                except (TypeError, ValueError):
+                    continue
+                if current_time - trade_time <= 1000:
+                    trades.append(trade)
 
             if len(trades) < 3:
                 return 0
@@ -346,7 +636,19 @@ class PatternAnalyzer:
 
             # Store result
             sweep_value = 1.0 if is_sweep else 0.0
-            await self.redis.setex(rkeys.analytics_metric_key(symbol, 'sweep'), 30, str(sweep_value))
+            payload = {
+                'symbol': symbol,
+                'value': sweep_value,
+                'timestamp': time.time(),
+                'sample_count': len(trades),
+                'price_levels': unique_prices,
+                'volume': float(total_size),
+            }
+            await self.redis.setex(
+                rkeys.analytics_metric_key(symbol, 'sweep'),
+                30,
+                json.dumps(payload)
+            )
 
             if is_sweep:
                 self.logger.info(f"SWEEP detected for {symbol}: {unique_prices} levels, {total_size} shares")
@@ -378,7 +680,18 @@ class PatternAnalyzer:
                 return {'error': 'Insufficient data'}
 
             book = json.loads(book_json)
-            trades = [json.loads(t) for t in trades_json]
+            trades: List[Dict[str, Any]] = []
+            for raw_trade in trades_json:
+                if isinstance(raw_trade, bytes):
+                    raw_trade = raw_trade.decode('utf-8', errors='ignore')
+                if not raw_trade:
+                    continue
+                try:
+                    trade = json.loads(raw_trade)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if isinstance(trade, dict):
+                    trades.append(trade)
 
             if not trades:
                 return {'error': 'No trades'}

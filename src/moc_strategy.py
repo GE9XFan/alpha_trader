@@ -232,7 +232,7 @@ class MOCStrategy:
         fallback_expiry = compute_expiry_from_dte(0)
         contract: Dict[str, Any] = {
             'type': 'option',
-            'right': right,
+            'right': 'C' if right.startswith('C') else 'P',
             'expiry': fallback_expiry,
             'expiry_label': '0DTE',
             'dte_band': '0',
@@ -361,7 +361,8 @@ class MOCStrategy:
                     'strike': round(strike, 2),
                     'expiration': expiry,
                     'multiplier': option.get('multiplier', option.get('contract_multiplier', 100)),
-                    'exchange': option.get('exchange', 'SMART'),
+                    'exchange': str(option.get('exchange', 'SMART') or 'SMART').upper(),
+                    'right': right,
                 }
                 best_score = score
 
