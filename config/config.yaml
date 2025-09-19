@@ -355,6 +355,9 @@ risk_management:
     default:
       profit_trigger: 0.2
       trail_percent: 0.5
+
+  # Dynamic stop engine configuration (used by execution + position manager)
+  dynamic_stops: {}
   
   # Circuit breakers
   circuit_breakers:

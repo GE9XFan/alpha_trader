@@ -43,9 +43,10 @@ import logging
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 import redis.asyncio as aioredis
-from ib_insync import IB, Stock, Option, MarketOrder, LimitOrder, StopOrder, ExecutionFilter, util
+from ib_insync import IB, Stock, Option, MarketOrder, LimitOrder, StopOrder, Order, ExecutionFilter, util
 
 from src.option_utils import normalize_expiry
+from src.stop_engine import StopEngine, StopState
 from logging_utils import get_logger
 
 
@@ -92,6 +93,7 @@ class ExecutionManager:
         self.max_per_symbol = risk_config.get('max_per_symbol', 5)
         self.max_0dte_contracts = risk_config.get('max_0dte_contracts', 50)
         self.max_other_contracts = risk_config.get('max_other_contracts', 100)
+        self.stop_engine = StopEngine.from_risk_config(risk_config)
 
         # Order management
         self.pending_orders: Dict[int, Dict[str, Any]] = {}  # order_id -> order details
@@ -423,6 +425,69 @@ class ExecutionManager:
 
         return pnl_value / base_notional
 
+    @staticmethod
+    def _map_event_to_status(event_type: str) -> str:
+        mapping = {
+            'EXIT': 'CLOSED',
+            'SCALE_OUT': 'PARTIAL',
+            'ENTRY': 'FILLED',
+        }
+        key = (event_type or '').upper()
+        return mapping.get(key, key)
+
+    async def _publish_lifecycle_event(
+        self,
+        position: Dict[str, Any],
+        event_type: str,
+        details: Dict[str, Any],
+    ) -> None:
+        if not self.config.get('modules', {}).get('signals', {}).get('enabled', False):
+            return
+
+        signal_id = position.get('signal_id') or position.get('id')
+        if not signal_id:
+            return
+
+        lifecycle = dict(details or {})
+        execution_snapshot = {
+            'status': self._map_event_to_status(event_type),
+            'avg_fill_price': lifecycle.get('fill_price') or lifecycle.get('exit_price'),
+            'filled_quantity': lifecycle.get('quantity'),
+            'executed_at': lifecycle.get('executed_at') or lifecycle.get('timestamp'),
+        }
+        execution_snapshot = {
+            key: value for key, value in execution_snapshot.items() if value is not None
+        }
+
+        payload = {
+            'id': signal_id,
+            'symbol': position.get('symbol'),
+            'side': position.get('side'),
+            'strategy': self._normalize_strategy(position.get('strategy')),
+            'action_type': event_type,
+            'ts': int(time.time() * 1000),
+            'position_id': position.get('id'),
+            'position_notional': position.get('position_notional'),
+            'entry': position.get('entry_price'),
+            'stop': position.get('stop_loss'),
+            'targets': position.get('targets', []),
+            'contract': position.get('contract'),
+            'lifecycle': lifecycle,
+        }
+
+        if execution_snapshot:
+            payload['execution'] = execution_snapshot
+
+        payload = {k: v for k, v in payload.items() if v is not None}
+
+        try:
+            await self.redis.lpush('signals:distribution:pending', json.dumps(payload))
+        except Exception as exc:
+            self.logger.error(
+                "Failed to enqueue execution lifecycle payload",
+                extra={'position_id': position.get('id'), 'event': event_type, 'error': str(exc)}
+            )
+
     async def _publish_exit_distribution(
         self,
         position: Dict[str, Any],
@@ -713,6 +778,7 @@ class ExecutionManager:
         position['stop_order_id'] = None
         position['target_order_ids'] = []
         position['oca_group'] = None
+        position['stop_engine_plan'] = []
 
     async def _cancel_trade_safe(self, trade, *, context: str = "") -> None:
         """Cancel an IB trade object if it is still active."""
@@ -816,6 +882,7 @@ class ExecutionManager:
         position['exit_price'] = exit_price
         position['exit_time'] = datetime.utcnow().isoformat()
         position['close_reason'] = reason
+        position['stop_engine_plan'] = []
 
         prior_realized = float(position.get('realized_pnl') or 0.0)
         delta = float(realized_pnl_delta or 0.0)
@@ -856,6 +923,111 @@ class ExecutionManager:
 
         await self._publish_exit_distribution(position, exit_price, closed_quantity, reason)
 
+
+    async def _handle_target_fill(
+        self,
+        position: Dict[str, Any],
+        fill_price: float,
+        filled_qty: float,
+        realized_pnl: float,
+        commission: float,
+        order_id: int,
+    ) -> None:
+        """Handle partial take-profit fills and rebuild protection for remainder."""
+
+        try:
+            symbol = position.get('symbol')
+            position_id = position.get('id')
+            if not symbol or not position_id:
+                return
+
+            multiplier = self._position_multiplier(position)
+            side = position.get('side')
+            state = StopState.from_dict(position.get('stop_engine_state'))
+
+            current_qty = int(position.get('quantity', 0) or 0)
+            filled_units = int(round(filled_qty))
+            remaining_qty = max(current_qty - filled_units, 0)
+            position['quantity'] = remaining_qty
+            position['realized_pnl'] = position.get('realized_pnl', 0.0) + realized_pnl
+
+            plan_records = position.get('stop_engine_plan', []) or []
+            matched_stage = None
+            for stage in plan_records:
+                if stage.get('order_id') == order_id:
+                    matched_stage = stage
+                    stage['status'] = 'filled'
+                    stage['filled_quantity'] = stage.get('filled_quantity', 0) + filled_qty
+                    stage['fill_price'] = fill_price
+                    break
+
+            if matched_stage and matched_stage.get('profit_pct') is not None:
+                pct = float(matched_stage['profit_pct'])
+                rounded_pct = round(pct, 6)
+                existing = {round(ft, 6) for ft in state.filled_targets}
+                if rounded_pct not in existing:
+                    state.filled_targets.append(pct)
+
+            reductions = position.setdefault('reductions', [])
+            reductions.append(
+                {
+                    'quantity': filled_units,
+                    'price': fill_price,
+                    'reason': 'TARGET',
+                    'timestamp': datetime.utcnow().isoformat(),
+                    'multiplier': multiplier,
+                }
+            )
+
+            position['target_order_ids'] = [
+                oid for oid in position.get('target_order_ids', []) if oid != order_id
+            ]
+            position['stop_order_id'] = None
+            position['oca_group'] = None
+            position['stop_engine_state'] = state.to_dict()
+            position['stop_engine_plan'] = plan_records
+
+            redis_key = f'positions:open:{symbol}:{position_id}'
+            await self.redis.set(redis_key, json.dumps(position))
+
+            # Remove cached trade references for the expired bracket
+            stop_trade = self.stop_orders.pop(position_id, None)
+            if stop_trade and not stop_trade.isDone():
+                try:
+                    self.ib.cancelOrder(stop_trade.order)
+                except Exception:
+                    pass
+
+            target_trades = self.target_orders.pop(position_id, None) or []
+            for trade in target_trades:
+                try:
+                    if trade and not trade.isDone():
+                        self.ib.cancelOrder(trade.order)
+                except Exception:
+                    continue
+
+            if remaining_qty <= 0:
+                # Fully closed by cascading target fills (rare)
+                await self._finalize_position_close(position, fill_price, realized_pnl, 'TARGET', filled_units)
+                return
+
+            # Rebuild protective orders for the remaining size
+            await self.place_stop_loss(position)
+
+            lifecycle_details = {
+                'executed_at': datetime.utcnow().isoformat(),
+                'fill_price': round(float(fill_price), 4),
+                'quantity': filled_units,
+                'realized_pnl': round(float(realized_pnl), 2),
+                'remaining_quantity': remaining_qty,
+                'reason': 'TARGET',
+                'result': 'SCALE_OUT',
+                'side': side,
+            }
+            await self._publish_lifecycle_event(position, 'SCALE_OUT', lifecycle_details)
+
+        except Exception as exc:
+            self.logger.error(f"Error handling target fill: {exc}")
 
     async def _archive_position(self, position: Dict[str, Any], reason: str) -> None:
         """Move a stale Redis position to the closed bucket."""
@@ -2192,44 +2364,72 @@ class ExecutionManager:
             strategy = position.get('strategy')
             strategy_code = self._normalize_strategy(strategy)
 
-            # Determine stop price from signal or defaults
-            stop_price = position.get('stop_loss')
-            if not stop_price and entry_price:
-                if strategy_code == '0DTE':
-                    stop_price = entry_price * (0.5 if side == 'LONG' else 1.5)
-                elif strategy_code == '1DTE':
-                    stop_price = entry_price * (0.75 if side == 'LONG' else 1.25)
-                else:
-                    stop_price = entry_price * (0.7 if side == 'LONG' else 1.3)
+            instrument_type = contract_info.get('type') or contract_info.get('secType') or 'default'
+            state = StopState.from_dict(position.get('stop_engine_state'))
 
-            if not stop_price:
-                self.logger.warning("Unable to determine stop price for bracket order")
-                return
+            stop_price, state = self.stop_engine.initial_stop(
+                instrument_type,
+                side,
+                entry_price,
+                state=state,
+            )
 
-            stop_price = round(float(stop_price), 2)
+            allocations = self.stop_engine.plan_targets(
+                instrument_type,
+                side,
+                entry_price,
+                int(quantity),
+                filled_targets=state.filled_targets,
+            )
 
-            # Determine target prices (use first configured target or derive default)
-            raw_targets = position.get('targets', []) or []
-            target_prices = []
-            for target in raw_targets:
-                try:
-                    target_val = round(float(target), 2)
-                except (TypeError, ValueError):
-                    continue
-                if target_val > 0:
-                    target_prices.append(target_val)
+            plan_records: List[Dict[str, Any]] = []
+            if not allocations:
+                raw_targets = position.get('targets', []) or []
+                for target in raw_targets:
+                    try:
+                        plan_records.append(
+                            {
+                                'profit_pct': None,
+                                'price': round(float(target), 4),
+                                'fraction': 1.0,
+                                'quantity': int(quantity),
+                                'status': 'pending',
+                                'order_id': None,
+                            }
+                        )
+                    except (TypeError, ValueError):
+                        continue
 
-            if not target_prices and entry_price:
-                if side == 'LONG':
-                    target_prices.append(round(entry_price * 1.3, 2))
-                else:
-                    target_prices.append(round(entry_price * 0.7, 2))
-
-            # Ensure targets make sense relative to entry
-            if side == 'LONG':
-                target_prices = [tp for tp in target_prices if tp >= stop_price]
+                if not plan_records and entry_price:
+                    fallback_raw = self.stop_engine.target_price(side, entry_price, 30.0)
+                    fallback_rounded = self.stop_engine.quantize_price(
+                        instrument_type,
+                        side,
+                        fallback_raw,
+                    )
+                    default_price = round(fallback_rounded, 4)
+                    plan_records.append(
+                        {
+                            'profit_pct': 30.0,
+                            'price': default_price,
+                            'fraction': 1.0,
+                            'quantity': int(quantity),
+                            'status': 'pending',
+                            'order_id': None,
+                        }
+                    )
             else:
-                target_prices = [tp for tp in target_prices if tp <= stop_price]
+                for alloc in allocations:
+                    plan_records.append(
+                        {
+                            'profit_pct': alloc.profit_pct,
+                            'price': round(float(alloc.price), 4),
+                            'fraction': alloc.fraction,
+                            'quantity': int(alloc.quantity),
+                            'status': 'pending',
+                            'order_id': None,
+                        }
+                    )
 
             sanitized_position = re.sub(r'[^A-Za-z0-9]+', '_', str(position_id or 'UNKNOWN'))
             base_group = position.get('oca_group') or f"OCA_{sanitized_position}"
@@ -2237,19 +2437,32 @@ class ExecutionManager:
             oca_group = f"{base_group}_{int(time.time())}"
 
             # Create and submit stop order
-            stop_order = StopOrder(close_action, quantity, stop_price)
+            if state.last_stop_type == 'TRAIL_PERCENT':
+                stop_order = Order()
+                stop_order.orderType = 'TRAIL'
+                stop_order.trailingPercent = round(state.last_stop_value or 0.0, 6)
+                stop_order.trailStopPrice = round(stop_price, 4)
+            else:
+                stop_order = StopOrder(close_action, quantity, round(stop_price, 4))
+            stop_order.action = close_action
+            stop_order.totalQuantity = quantity
             stop_order.ocaGroup = oca_group
             stop_order.ocaType = 1
             stop_order.tif = 'GTC'
-
+            stop_order.outsideRth = True
             stop_trade = self.ib.placeOrder(ib_contract, stop_order)
             stop_order_id = stop_trade.order.orderId
 
-            # Create profit-taking orders (use first target to bracket full position)
+            # Create profit-taking orders for each allocation (sequential OCA bucket)
             target_order_ids: List[int] = []
             target_trades: List[Any] = []
-            for target_price in target_prices[:1]:
-                limit_order = LimitOrder(close_action, quantity, target_price)
+            for idx, plan in enumerate(plan_records):
+                alloc_qty = int(plan.get('quantity') or 0)
+                target_price = float(plan.get('price') or 0)
+                if alloc_qty <= 0 or target_price <= 0:
+                    continue
+
+                limit_order = LimitOrder(close_action, alloc_qty, target_price)
                 limit_order.ocaGroup = oca_group
                 limit_order.ocaType = 1
                 limit_order.tif = 'GTC'
@@ -2257,6 +2470,8 @@ class ExecutionManager:
                 target_trade = self.ib.placeOrder(ib_contract, limit_order)
                 target_trades.append(target_trade)
                 target_order_ids.append(target_trade.order.orderId)
+                plan['order_id'] = target_trade.order.orderId
+                plan['status'] = 'working'
 
                 self.logger.info(
                     "execution_target_order",
@@ -2264,8 +2479,9 @@ class ExecutionManager:
                         "action": "target_order",
                         "position_id": position_id,
                         "side": close_action,
-                        "quantity": quantity,
+                        "quantity": alloc_qty,
                         "target_price": round(target_price, 4),
+                        "stage_index": idx,
                     },
                 )
 
@@ -2274,6 +2490,9 @@ class ExecutionManager:
             position['target_order_ids'] = target_order_ids
             position['oca_group'] = oca_group
             position['stop_loss'] = stop_price
+            position['targets'] = [plan['price'] for plan in plan_records]
+            position['stop_engine_state'] = state.to_dict()
+            position['stop_engine_plan'] = plan_records
 
             await self.redis.set(f'positions:open:{symbol}:{position_id}', json.dumps(position))
 
@@ -2513,6 +2732,7 @@ class ExecutionManager:
                             realized_pnl -= commission
 
                     reason = 'STOP' if order_id == stop_order_id else 'TARGET'
+
                     position['commission'] = float(position.get('commission', 0.0) or 0.0) + commission
                     events = position.setdefault('realized_events', [])
                     events.append(
@@ -2527,7 +2747,18 @@ class ExecutionManager:
                             'side': getattr(fill.execution, 'side', None),
                         }
                     )
-                    await self._finalize_position_close(position, fill_price, realized_pnl, reason, filled_qty)
+
+                    if reason == 'STOP':
+                        await self._finalize_position_close(position, fill_price, realized_pnl, reason, filled_qty)
+                    else:
+                        await self._handle_target_fill(
+                            position,
+                            fill_price,
+                            filled_qty,
+                            realized_pnl,
+                            commission,
+                            order_id,
+                        )
                     return True
 
         except Exception as e:

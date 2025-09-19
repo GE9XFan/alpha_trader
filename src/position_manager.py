@@ -29,12 +29,15 @@ import inspect
 import json
 import time
 import logging
-from datetime import datetime
+import math
+from datetime import datetime, timezone
 import re
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 import pytz
 import redis.asyncio as aioredis
-from ib_insync import IB, Stock, Option, LimitOrder, MarketOrder, StopOrder
+from ib_insync import IB, Stock, Option, LimitOrder, MarketOrder, StopOrder, Order
+
+from src.stop_engine import StopEngine, StopState
 
 
 class PositionManager:
@@ -67,53 +70,27 @@ class PositionManager:
 
         # Stop management
         self.stop_orders = {}  # position_id -> stop order
-        self.trailing_stops = {}  # position_id -> trailing stop config
+        self.target_orders = {}  # position_id -> list of target orders
+        self.stop_states: Dict[str, StopState] = {}
 
         # P&L tracking
         self.high_water_marks = {}  # position_id -> max profit
-
-        # Configuration
-        self.trail_config = {
-            '0DTE': {'profit_trigger': 0.5, 'trail_percent': 0.5},  # Trail at 50% profit, keep 50%
-            '1DTE': {'profit_trigger': 0.75, 'trail_percent': 0.75},  # Trail at 75% profit, keep 75%
-            '14DTE': {'profit_trigger': 0.25, 'trail_percent': 0.25},  # Trail at 25% profit, keep 25%
-            'OPTION': {'profit_trigger': 0.2, 'trail_percent': 0.6},  # Default option trailing behaviour
-            'STOCK': {'profit_trigger': 0.02, 'trail_percent': 0.5},  # Stocks trail after ~2%
-            'default': {'profit_trigger': 0.2, 'trail_percent': 0.5},
-        }
+        self._pending_price_updates: Set[str] = set()
 
         risk_config = self.config.get('risk_management', {})
+        self.stop_engine = StopEngine.from_risk_config(risk_config)
+        expiry_cfg = risk_config.get('expiry_protection', {}) if isinstance(risk_config, dict) else {}
+        self.expiry_alert_levels: List[int] = sorted(
+            {int(level) for level in expiry_cfg.get('alert_days', [5, 3, 1]) if level >= 0},
+            reverse=True,
+        )
+        self.expiry_force_close_days: int = int(expiry_cfg.get('force_close_days', 0))
         default_eod_rules = risk_config.get('eod_rules') or [
             {'strategy': '0DTE', 'max_dte': 0, 'action': 'close', 'reason': 'EOD expiry avoidance'},
             {'strategy': '1DTE', 'max_dte': 1, 'action': 'reduce', 'reduction': 0.5, 'reason': 'EOD risk trim'},
         ]
         # Copy rules to avoid mutating shared config structures
         self.eod_rules = [dict(rule) for rule in default_eod_rules]
-
-        trailing_overrides = risk_config.get('trailing_stops', {})
-        if isinstance(trailing_overrides, dict):
-            for label, settings in trailing_overrides.items():
-                if not isinstance(settings, dict):
-                    continue
-                profit_trigger = settings.get('profit_trigger')
-                trail_percent = settings.get('trail_percent')
-                if profit_trigger is None or trail_percent is None:
-                    continue
-
-                try:
-                    profit_val = float(profit_trigger)
-                    trail_val = float(trail_percent)
-                except (TypeError, ValueError):
-                    continue
-
-                key = str(label).upper()
-                if key == 'DEFAULT':
-                    key = 'default'
-
-                self.trail_config[key] = {
-                    'profit_trigger': profit_val,
-                    'trail_percent': trail_val,
-                }
 
     async def _increment_position_count(self, amount: int = 1) -> None:
         """Increase the cached open-position count."""
@@ -263,6 +240,38 @@ class PositionManager:
 
         return None
 
+    def _get_stop_state(self, position: Dict[str, Any]) -> StopState:
+        position_id = position.get('id')
+        if not position_id:
+            return StopState()
+
+        state = self.stop_states.get(position_id)
+        if state:
+            return state
+
+        state = StopState.from_dict(position.get('stop_engine_state'))
+        self.stop_states[position_id] = state
+        return state
+
+    def _ensure_stop_trade_reference(self, position: Dict[str, Any]):
+        position_id = position.get('id')
+        if not position_id:
+            return None
+
+        trade = self.stop_orders.get(position_id)
+        if trade and not trade.isDone():
+            return trade
+
+        order_id = position.get('stop_order_id')
+        if order_id is None:
+            return None
+
+        trade = self._find_trade_by_id(order_id)
+        if trade and not trade.isDone():
+            self.stop_orders[position_id] = trade
+            return trade
+        return None
+
     async def _cancel_order_id(self, order_id: Optional[int]) -> None:
         if order_id is None or not self.ib.isConnected():
             return
@@ -293,70 +302,20 @@ class PositionManager:
         for order_id in target_ids:
             await self._cancel_order_id(order_id)
         position['target_order_ids'] = []
+        position['stop_engine_plan'] = []
         if position_id in self.target_orders:
             self.target_orders.pop(position_id, None)
-
-    def _derive_stop_price(self, position: Dict[str, Any], entry_price: float) -> Optional[float]:
-        existing = position.get('stop_loss')
-        if existing is not None:
-            try:
-                return round(float(existing), 2)
-            except (TypeError, ValueError):
-                self.logger.debug("Invalid stored stop price for %s", position.get('id'))
-
-        strategy_code = self._normalize_strategy(position.get('strategy'))
-        side = (position.get('side') or '').upper()
-        if entry_price <= 0:
-            return None
-
-        if strategy_code == '0DTE':
-            return round(entry_price * (0.5 if side == 'LONG' else 1.5), 2)
-        if strategy_code == '1DTE':
-            return round(entry_price * (0.75 if side == 'LONG' else 1.25), 2)
-        return round(entry_price * (0.7 if side == 'LONG' else 1.3), 2)
-
-    def _prepare_target_allocations(
-        self,
-        position: Dict[str, Any],
-        quantity: int,
-        entry_price: float,
-        stop_price: float,
-    ) -> List[Tuple[int, float]]:
-        raw_targets = position.get('targets', []) or []
-        side = (position.get('side') or '').upper()
-
-        target_levels: List[float] = []
-        for target in raw_targets:
-            try:
-                target_levels.append(round(float(target), 2))
-            except (TypeError, ValueError):
-                continue
-
-        if not target_levels and entry_price:
-            if side == 'LONG':
-                target_levels.append(round(entry_price * 1.3, 2))
-            else:
-                target_levels.append(round(entry_price * 0.7, 2))
-
-        # Ensure targets maintain logical relationship with stop
-        if side == 'LONG':
-            target_levels = [tp for tp in target_levels if tp >= stop_price]
-        else:
-            target_levels = [tp for tp in target_levels if tp <= stop_price]
-
-        if not target_levels:
-            return []
-
-        # Current implementation fans out the first target for the full remaining quantity.
-        # A more advanced allocation can distribute across multiple targets.
-        return [(int(quantity), target_levels[0])]
 
     async def _submit_stop_order(
         self,
         position: Dict[str, Any],
+        *,
         stop_price: float,
+        stop_type: Optional[str],
+        stop_value: Optional[float],
         quantity: int,
-    ) -> Optional[Tuple[Any, str]]:
+        oca_group: str,
+    ) -> Optional[Any]:
         if quantity <= 0 or not self.ib.isConnected():
             return None
 
@@ -365,24 +324,41 @@ class PositionManager:
             return None
 
         action = self._close_action(position)
-        oca_group = position.get('oca_group') or f"OCA_{position.get('id')}"
+        if (stop_type or '').upper() == 'TRAIL_PERCENT':
+            order = Order()
+            order.orderType = 'TRAIL'
+            order.trailingPercent = round(stop_value or 0.0, 6)
+            order.trailStopPrice = round(stop_price, 4)
+        else:
+            order = StopOrder(action, int(quantity), round(stop_price, 4))
 
-        stop_order = StopOrder(action, int(quantity), stop_price)
-        stop_order.ocaGroup = oca_group
-        stop_order.ocaType = 1
-        stop_order.tif = 'GTC'
+        order.action = action
+        order.totalQuantity = int(quantity)
+        order.ocaGroup = oca_group
+        order.ocaType = 1
+        order.tif = 'GTC'
+        order.outsideRth = True
 
-        stop_trade = self.ib.placeOrder(ib_contract, stop_order)
+        stop_trade = self.ib.placeOrder(ib_contract, order)
         self.stop_orders[position.get('id')] = stop_trade
-        return stop_trade, oca_group
+        return stop_trade
+
+    async def _update_existing_stop_order(
+        self,
+        position: Dict[str, Any],
+        stop_price: float,
+        quantity: int,
+    ) -> bool:
+        await self._place_bracket_orders(position, quantity=quantity)
+        return True
 
     async def _submit_target_orders(
         self,
         position: Dict[str, Any],
-        allocations: List[Tuple[int, float]],
+        plan_records: List[Dict[str, Any]],
         oca_group: str,
     ) -> List[Any]:
-        if not allocations or not self.ib.isConnected():
+        if not plan_records or not self.ib.isConnected():
             return []
 
         ib_contract = await self._resolve_contract(position.get('contract'))
@@ -391,15 +367,24 @@ class PositionManager:
 
         action = self._close_action(position)
         trades: List[Any] = []
-        for qty, price in allocations:
-            if qty <= 0:
+        for idx, plan in enumerate(plan_records):
+            qty_val = plan.get('quantity') or 0
+            if isinstance(qty_val, float) and (math.isnan(qty_val) or math.isinf(qty_val)):
+                qty_val = 0
+            qty = int(qty_val)
+            price = float(plan.get('price') or 0)
+            if qty <= 0 or price <= 0:
                 continue
-            limit_order = LimitOrder(action, int(qty), price)
+
+            limit_order = LimitOrder(action, qty, price)
             limit_order.ocaGroup = oca_group
             limit_order.ocaType = 1
             limit_order.tif = 'GTC'
             trade = self.ib.placeOrder(ib_contract, limit_order)
             trades.append(trade)
+            plan['order_id'] = trade.order.orderId
+            plan['status'] = 'working'
+            plan['stage_index'] = idx
 
         position_id = position.get('id')
         if trades:
@@ -413,36 +398,89 @@ class PositionManager:
         position: Dict[str, Any],
         *,
         quantity: Optional[int] = None,
-        stop_price: Optional[float] = None,
     ) -> None:
         qty = int(quantity if quantity is not None else position.get('quantity', 0) or 0)
         if qty <= 0:
             return
 
+        await self._cancel_stop_order(position)
+        await self._cancel_target_orders(position)
+
         entry_price = float(position.get('entry_price', 0) or 0)
-        derived_stop = stop_price
-        if derived_stop is None:
-            derived_stop = self._derive_stop_price(position, entry_price)
-        if derived_stop is None:
-            self.logger.warning(
-                "Unable to determine stop price for position %s", position.get('id')
-            )
+        side = (position.get('side') or '').upper()
+        contract_type = position.get('contract', {}).get('type', 'stock')
+        state = self._get_stop_state(position)
+
+        stop_price, state = self.stop_engine.initial_stop(
+            contract_type,
+            side,
+            entry_price,
+            state=state,
+        )
+        stop_price = round(float(stop_price), 4)
+
+        raw_group = position.get('oca_group') or f"OCA_{position.get('id')}"
+        sanitized_group = re.sub(r'[^A-Za-z0-9_]+', '_', str(raw_group))
+        oca_group = (sanitized_group[:60] or 'OCA_DEFAULT') + f"_{int(time.time())}"
+
+        stop_trade = await self._submit_stop_order(
+            position,
+            stop_price=stop_price,
+            stop_type=state.last_stop_type,
+            stop_value=state.last_stop_value,
+            quantity=qty,
+            oca_group=oca_group,
+        )
+        if not stop_trade:
             return
 
-        stop_price_rounded = round(float(derived_stop), 2)
-        result = await self._submit_stop_order(position, stop_price_rounded, qty)
-        if not result:
-            return
-
-        stop_trade, oca_group = result
         position_id = position.get('id')
-        target_allocations = self._prepare_target_allocations(position, qty, entry_price, stop_price_rounded)
-        target_trades = await self._submit_target_orders(position, target_allocations, oca_group)
+
+        allocations = self.stop_engine.plan_targets(
+            contract_type,
+            side,
+            entry_price,
+            max(qty, 0),
+            filled_targets=state.filled_targets,
+        )
+
+        plan_records: List[Dict[str, Any]] = []
+        if allocations:
+            for alloc in allocations:
+                plan_records.append(
+                    {
+                        'profit_pct': alloc.profit_pct,
+                        'price': round(float(alloc.price), 4),
+                        'fraction': alloc.fraction,
+                        'quantity': alloc.quantity,
+                        'status': 'pending',
+                        'order_id': None,
+                    }
+                )
+        else:
+            fallback_price = self.stop_engine.target_price(side, entry_price, 30.0)
+            fallback_price = self.stop_engine.quantize_price(contract_type, side, fallback_price)
+            plan_records.append(
+                {
+                    'profit_pct': 30.0,
+                    'price': round(float(fallback_price), 4),
+                    'fraction': 1.0,
+                    'quantity': qty,
+                    'status': 'pending',
+                    'order_id': None,
+                }
+            )
+
+        target_trades = await self._submit_target_orders(position, plan_records, oca_group)
 
         position['oca_group'] = oca_group
         position['stop_order_id'] = stop_trade.order.orderId
-        position['stop_loss'] = stop_price_rounded
+        position['stop_loss'] = stop_price
         position['target_order_ids'] = [trade.order.orderId for trade in target_trades]
+        position['targets'] = [plan['price'] for plan in plan_records]
+        position['stop_engine_plan'] = plan_records
+        self.stop_states[position_id] = state
+        position['stop_engine_state'] = state.to_dict()
 
         symbol = position.get('symbol')
         if symbol:
@@ -473,16 +511,22 @@ class PositionManager:
                 # Load all open positions from Redis
                 await self.load_positions()
 
-                # Update P&L every 5 seconds
-                if current_time - last_pnl_update >= 5:
+                # Update P&L every 2 seconds (reduced from 5 for faster stop detection)
+                if current_time - last_pnl_update >= 2:
                     await self.update_all_positions_pnl()
                     last_pnl_update = current_time
 
-                # Check for exit conditions
+                # Check for exit conditions (backup for IBKR stops)
                 await self.check_exit_conditions()
 
-                # Manage trailing stops
-                await self.manage_trailing_stops()
+                dirty_ids = await self.refresh_market_prices()
+                if dirty_ids:
+                    await self.manage_trailing_stops(candidate_ids=dirty_ids)
+                else:
+                    await self.manage_trailing_stops()
+
+                await self.enforce_stop_invariants()
+                await self.enforce_expiry_rules()
 
                 # Check targets for scaling
                 await self.check_targets()
@@ -620,6 +664,9 @@ class PositionManager:
 
                     # Store in memory
                     self.positions[position_id] = position
+                    self.stop_states[position_id] = StopState.from_dict(
+                        position.get('stop_engine_state')
+                    )
                     redis_position_ids.add(position_id)
 
                     # Subscribe to market data if needed
@@ -636,7 +683,7 @@ class PositionManager:
                 stale_position = self.positions.pop(stale_id, None)
                 self.high_water_marks.pop(stale_id, None)
                 self.stop_orders.pop(stale_id, None)
-                self.trailing_stops.pop(stale_id, None)
+                self.stop_states.pop(stale_id, None)
 
                 if not stale_position:
                     continue
@@ -939,87 +986,103 @@ class PositionManager:
             self.logger.error(f"Error getting Greeks: {e}")
             return None
 
-    async def manage_trailing_stops(self):
-        """
-        Manage trailing stops for all profitable positions.
-        """
+    async def manage_trailing_stops(self, *, force_refresh: bool = False):
+        """Evaluate dynamic stop adjustments for every open position."""
         for position_id, position in self.positions.items():
             try:
-                unrealized_pnl = position.get('unrealized_pnl', 0)
-                entry_price = position.get('entry_price', 0)
-                current_price = position.get('current_price', 0)
-                strategy_code = self._normalize_strategy(position.get('strategy'))
-                contract_type = str(position.get('contract', {}).get('type', 'stock')).upper()
-                side = position.get('side')
-
-                # Skip positions without an active stop order (e.g., reconciled without brackets)
-                if not position.get('stop_order_id'):
+                status = str(position.get('status', 'OPEN')).upper()
+                if status != 'OPEN':
                     continue
 
-                if unrealized_pnl <= 0:
-                    continue  # Only trail profitable positions
+                quantity = int(position.get('quantity', 0) or 0)
+                if quantity <= 0:
+                    continue
 
-                # Get trail configuration (strategy -> contract type -> default)
-                trail_config = (
-                    self.trail_config.get(strategy_code)
-                    or self.trail_config.get(contract_type)
-                    or self.trail_config['default']
+                entry_price_raw = position.get('entry_price')
+                current_price_raw = position.get('current_price')
+                try:
+                    entry_price = float(entry_price_raw)
+                    current_price = float(current_price_raw)
+                except (TypeError, ValueError):
+                    continue
+
+                if entry_price <= 0 or current_price <= 0:
+                    continue
+
+                contract_type = position.get('contract', {}).get('type', 'stock')
+                side = (position.get('side') or '').upper()
+                if side not in {'LONG', 'SHORT'}:
+                    continue
+
+                state = self._get_stop_state(position)
+                current_stop_raw = position.get('stop_loss')
+                try:
+                    current_stop = float(current_stop_raw) if current_stop_raw is not None else None
+                except (TypeError, ValueError):
+                    current_stop = None
+
+                decision = self.stop_engine.evaluate(
+                    contract_type,
+                    side,
+                    entry_price,
+                    current_price,
+                    current_stop=current_stop,
+                    state=state,
                 )
-                profit_trigger = trail_config.get('profit_trigger', self.trail_config['default']['profit_trigger'])
-                trail_percent = trail_config.get('trail_percent', self.trail_config['default']['trail_percent'])
 
-                if profit_trigger <= 0 or trail_percent <= 0:
+                if decision is None:
                     continue
 
-                # Calculate profit percentage
-                notional = self._calculate_notional(position)
-                if notional == 0:
+                trade = self._ensure_stop_trade_reference(position)
+
+                has_active_stop = trade is not None or position.get('stop_order_id') is not None
+                if not has_active_stop or force_refresh:
+                    self.stop_states[position_id] = decision.state
+                    position['stop_engine_state'] = decision.state.to_dict()
+                    await self._place_bracket_orders(position)
+                    if not has_active_stop:
+                        self.logger.warning(
+                            "Rebuilt missing stop for %s at %.4f",
+                            position_id,
+                            decision.stop_price or 0.0,
+                        )
                     continue
 
-                profit_pct = unrealized_pnl / notional
-
-                if profit_pct >= profit_trigger:
-                    # Calculate new stop price
-                    if side == 'LONG':
-                        # Trail stop up
-                        profit_to_lock = (current_price - entry_price) * trail_percent
-                        new_stop = entry_price + profit_to_lock
-                    else:  # SHORT
-                        # Trail stop down
-                        profit_to_lock = (entry_price - current_price) * trail_percent
-                        new_stop = entry_price - profit_to_lock
-
-                    # Round stop price
-                    new_stop = round(new_stop, 2)
-
-                    # Check if new stop is better than current
-                    current_stop_raw = position.get('stop_loss')
-                    try:
-                        current_stop = float(current_stop_raw) if current_stop_raw is not None else None
-                    except (TypeError, ValueError):
-                        current_stop = None
-
-                    should_update = False
-                    if side == 'LONG':
-                        if current_stop is None or new_stop > current_stop:
-                            should_update = True
-                    else:  # SHORT
-                        if current_stop is None or new_stop < current_stop:
-                            should_update = True
-
-                    if should_update:
-                        await self.update_stop_loss(position, new_stop)
-                        if current_stop is not None:
-                            self.logger.info(
-                                f"Trailing stop for {position_id[:8]}: "
-                                f"${current_stop:.2f} → ${new_stop:.2f} "
-                                f"(profit: {profit_pct:.1%})"
+                if decision.should_update and decision.stop_price is not None:
+                    previous_state = StopState.from_dict(
+                        self.stop_states[position_id].to_dict()
+                    ) if position_id in self.stop_states else None
+                    self.stop_states[position_id] = decision.state
+                    position['stop_engine_state'] = decision.state.to_dict()
+                    success = await self._update_existing_stop_order(position, decision.stop_price, quantity)
+                    if success:
+                        position['stop_loss'] = decision.stop_price
+                        state = decision.state
+                        self.stop_states[position_id] = state
+                        position['stop_engine_state'] = state.to_dict()
+                        symbol = position.get('symbol')
+                        if symbol:
+                            await self.redis.set(
+                                f'positions:open:{symbol}:{position_id}',
+                                json.dumps(position)
                             )
-                        else:
-                            self.logger.info(
-                                f"Trailing stop for {position_id[:8]} initialized at ${new_stop:.2f} "
-                                f"(profit: {profit_pct:.1%})"
-                            )
+                        self.logger.info(
+                            "dynamic_stop_update",
+                            extra={
+                                "position_id": position_id,
+                                "symbol": position.get('symbol'),
+                                "side": side,
+                                "instrument": contract_type,
+                                "reason": decision.reason,
+                                "profit_pct": round(decision.profit_pct * 100, 2),
+                                "stop_price": round(decision.stop_price, 4),
+                                "improvement": round(decision.improvement, 4),
+                            },
+                        )
+                    else:
+                        if previous_state is not None:
+                            self.stop_states[position_id] = previous_state
+                            position['stop_engine_state'] = previous_state.to_dict()
 
             except Exception as e:
                 self.logger.error(f"Error managing trailing stop for {position_id}: {e}")
@@ -1043,26 +1106,27 @@ class PositionManager:
             if new_stop is None or not self.ib.isConnected():
                 return
 
-            stop_price = round(float(new_stop), 2)
-            await self._cancel_stop_order(position)
+            stop_price = round(float(new_stop), 4)
 
             quantity = int(position.get('quantity', 0) or 0)
             if quantity <= 0:
                 return
 
-            result = await self._submit_stop_order(position, stop_price, quantity)
-            if not result:
+            success = await self._update_existing_stop_order(position, stop_price, quantity)
+            if not success:
                 return
 
-            stop_trade, oca_group = result
+            state = self._get_stop_state(position)
+            state.last_stop_price = stop_price
+            state.last_reason = 'manual_update'
+            state.last_update_ts = time.time()
 
             position_id = position.get('id')
             position['stop_loss'] = stop_price
-            position['stop_order_id'] = stop_trade.order.orderId
-            position['oca_group'] = oca_group
+            position['stop_engine_state'] = state.to_dict()
 
             symbol = position.get('symbol')
-            if symbol:
+            if symbol and position_id:
                 await self.redis.set(
                     f'positions:open:{symbol}:{position_id}',
                     json.dumps(position)
@@ -1071,12 +1135,103 @@ class PositionManager:
         except Exception as e:
             self.logger.error(f"Error updating stop loss: {e}")
 
+    async def refresh_market_prices(self) -> Set[str]:
+        """Update cached prices from IBKR tickers and return affected positions."""
+        dirty: Set[str] = set()
+        for symbol, ticker in self.position_tickers.items():
+            price = None
+            try:
+                if getattr(ticker, 'last', None):
+                    price = ticker.last
+                elif getattr(ticker, 'close', None):
+                    price = ticker.close
+                elif getattr(ticker, 'marketPrice', None):
+                    price = ticker.marketPrice
+            except Exception:
+                price = None
+
+            if price is None or price <= 0:
+                continue
+
+            for position_id, position in self.positions.items():
+                if position.get('symbol') != symbol or str(position.get('status', 'OPEN')).upper() != 'OPEN':
+                    continue
+
+                try:
+                    previous = float(position.get('current_price') or 0.0)
+                except (TypeError, ValueError):
+                    previous = 0.0
+
+                profile = self.stop_engine.profile_for(position.get('contract', {}).get('type', 'stock'))
+                if abs(previous - price) >= profile.min_tick:
+                    position['current_price'] = price
+                    dirty.add(position_id)
+        return dirty
+
+    async def enforce_stop_invariants(self) -> None:
+        """Ensure every open position has a live protective stop."""
+        for position_id, position in self.positions.items():
+            if str(position.get('status', 'OPEN')).upper() != 'OPEN':
+                continue
+            trade = self._ensure_stop_trade_reference(position)
+            if trade or position.get('stop_order_id'):
+                continue
+            self.logger.warning("Stop invariant rebuild triggered for %s", position_id)
+            await self._place_bracket_orders(position)
+
+    async def enforce_expiry_rules(self) -> None:
+        """Apply simple expiry-based risk controls for option positions."""
+        if not self.expiry_alert_levels and self.expiry_force_close_days <= 0:
+            return
+
+        today = datetime.now(timezone.utc).date()
+
+        for position_id, position in list(self.positions.items()):
+            contract = position.get('contract') or {}
+            if contract.get('type') != 'option':
+                continue
+
+            expiry_str = contract.get('expiry') or contract.get('lastTradeDateOrContractMonth')
+            if not expiry_str:
+                continue
+
+            try:
+                expiry_date = datetime.strptime(expiry_str[:8], '%Y%m%d').date()
+            except ValueError:
+                continue
+
+            days_to_expiry = (expiry_date - today).days
+
+            if self.expiry_force_close_days and days_to_expiry <= self.expiry_force_close_days:
+                price = position.get('current_price') or position.get('entry_price') or 0.0
+                await self.close_position(position, price, 'EXPIRY_PROTECTION')
+                self.logger.warning(
+                    "Force closed %s (%s) due to expiry window (%d days)",
+                    position.get('symbol'),
+                    position_id,
+                    days_to_expiry,
+                )
+                continue
+
+            for level in self.expiry_alert_levels:
+                if days_to_expiry == level:
+                    self.logger.warning(
+                        "Expiry alert for %s (%s): %d days remaining",
+                        position.get('symbol'),
+                        position_id,
+                        days_to_expiry,
+                    )
+                    break
+
     async def check_targets(self):
         """
         Check if price targets hit for scaling out.
         """
         for position_id, position in self.positions.items():
             try:
+                if position.get('stop_engine_plan'):
+                    # Active bracket orders manage profit taking
+                    continue
                 targets = position.get('targets', [])
                 if not targets:
                     continue
@@ -1108,6 +1263,8 @@ class PositionManager:
         Scale out of position at target.
         """
         try:
+            if position.get('stop_engine_plan'):
+                return
             position_id = position.get('id')
             symbol = position.get('symbol')
             current_quantity = int(position.get('quantity', 0) or 0)
@@ -1222,6 +1379,7 @@ class PositionManager:
                         )
             position['target_order_ids'] = []
             position['oca_group'] = None
+            position['stop_engine_plan'] = []
 
             # Update position record
             position['status'] = 'CLOSED'
@@ -1302,12 +1460,19 @@ class PositionManager:
     async def check_exit_conditions(self):
         """
         Check for positions that need to be exited.
+        Note: Stop losses are primarily handled by IBKR orders.
+        This is a backup check for positions without active IBKR stops.
         """
         for position_id, position in list(self.positions.items()):
             try:
                 strategy = position.get('strategy')
 
-                # Check stop loss hit
+                # Skip if position has an active IBKR stop order
+                if position.get('stop_order_id') and position_id in self.stop_orders:
+                    # IBKR is handling the stop - we don't need to check manually
+                    continue
+
+                # Manual stop loss check for positions without IBKR stops
                 current_price_raw = position.get('current_price')
                 stop_loss_raw = position.get('stop_loss')
                 side = position.get('side')
