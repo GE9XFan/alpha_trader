@@ -111,7 +111,14 @@ These modules are scaffolding-heavy and require additional API credentials.
 | --- | --- | --- | --- |
 | `twitter_bot.py` | 290 | `TwitterBot`, `SocialMediaAnalytics` | Async loop outlined; API integration and Redis queries marked with TODOs for future implementation.【F:src/twitter_bot.py†L25-L133】 |
 | `telegram_bot.py` | 272 | `TelegramBot` | Placeholder handlers for tiered distribution and subscription billing; extensive TODO markers remain.【F:src/telegram_bot.py†L25-L180】 |
-| `discord_bot.py` | 144 | `DiscordBot` | Provides skeleton for Discord messaging; awaits implementation of specific channel workflows.【F:src/discord_bot.py†L25-L140】 |
+| `discord_bot.py` | 726 | `DiscordBot` | Async relay draining premium/basic/free queues, rendering the new tier-specific embed templates, enforcing webhook retries, and tracking delivery metrics. Summaries/analysis/performance drops are still pending.【F:src/discord_bot.py†L200-L579】 |
+
+#### Discord Cascades
+
+- Premium/basic/free embeds now match the live copy requirements (contract, execution, risk plan, confidence/drivers, upgrade callouts, and localised timestamps).【F:src/discord_bot.py†L200-L579】
+- Configuration exposes `basic_upgrade_text` / `free_upgrade_text` so copy changes do not require code edits.【F:config/config.yaml†L285-L297】
+- A new simulator (`scripts/simulate_discord_scenarios.py`) replays reference payloads for 0DTE, 1DTE, 14+DTE, and MOC scenarios. Use `python3 scripts/simulate_discord_scenarios.py --list` to view them or append `--push` to inject into Redis for full end-to-end validation.【F:scripts/simulate_discord_scenarios.py†L1-L210】
+- Outstanding work: add summary/analysis/performance posts that reuse the tiered formatter once their data sources are ready.
 
 ### Dashboard & APIs
 | Module | Lines | Primary Classes | Responsibilities |
@@ -255,7 +262,7 @@ Because IBKR does not expose market-maker identities, toxicity detection blends 
 Phase 7 is the remaining functional gap. The orchestrator leaves the following modules **disabled** until their TODO blocks are implemented and tested. Each class already ingests the shared configuration and Redis client so wiring will not require structural changes once features land:
 
 - **TwitterBot & social analytics** – Load credentials, stand up Tweepy clients, monitor `signals:distribution:*` queues, enforce tier delays, collect engagement metrics, and publish back into `social:analytics:*` keys.【F:src/twitter_bot.py†L25-L206】
-- **DiscordBot** – Establish long-lived aiohttp sessions, drain premium/basic queues, generate embeds per tier, capture delivery errors, and persist metrics for dashboard surfaces.【F:src/discord_bot.py†L25-L141】
+- **DiscordBot** – Runs dedicated workers per tier, builds premium/basic/free message formats, posts via resilient webhook retries, and records delivery/dlq metrics for monitoring.【F:src/discord_bot.py†L350-L720】
 - **TelegramBot** – Build subscription UX (commands, Stripe checkout, entitlements), implement tier-aware broadcasting with scheduled delays, and maintain `users:telegram:*` records for billing and compliance.【F:src/telegram_bot.py†L25-L218】
 - **Dashboard services & analytics monitoring** – Implement FastAPI app wiring, authentication, REST routes, WebSocket streaming, log aggregation, performance dashboards, and operator controls before enabling the dashboard toggle in `config/config.yaml`.【F:src/dashboard_server.py†L25-L220】【F:src/dashboard_routes.py†L25-L184】【F:src/dashboard_websocket.py†L1-L70】
 - **MorningScanner & NewsAnalyzer** – Finish data gathering (futures, international indices, econ calendar), options positioning synthesis, GPT-4 prompt orchestration, preview generation, and publishing into premium/public queues.【F:src/morning_scanner.py†L25-L220】【F:src/news_analyzer.py†L25-L138】

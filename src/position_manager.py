@@ -111,6 +111,108 @@ class PositionManager:
     def _normalize_strategy(strategy: Optional[str]) -> str:
         return str(strategy).strip().upper() if strategy else ''
 
+    @staticmethod
+    def _compute_holding_minutes(entry_time: Optional[str], exit_time: Optional[str]) -> Optional[float]:
+        if not entry_time or not exit_time:
+            return None
+
+        try:
+            start = datetime.fromisoformat(entry_time)
+            end = datetime.fromisoformat(exit_time)
+        except ValueError:
+            return None
+
+        delta = (end - start).total_seconds()
+        if delta < 0:
+            return None
+
+        return round(delta / 60.0, 2)
+
+    @staticmethod
+    def _calculate_return_pct(realized_pnl: Optional[float], position_notional: Optional[float]) -> Optional[float]:
+        if realized_pnl is None or position_notional in (None, 0):
+            return None
+
+        try:
+            return round(float(realized_pnl) / float(position_notional), 4)
+        except (TypeError, ZeroDivisionError):
+            return None
+
+    @staticmethod
+    def _classify_result(realized_pnl: Optional[float]) -> Optional[str]:
+        if realized_pnl is None:
+            return None
+        if realized_pnl > 0:
+            return 'WIN'
+        if realized_pnl < 0:
+            return 'LOSS'
+        return 'BREAKEVEN'
+
+    @staticmethod
+    def _map_event_to_status(event_type: str) -> str:
+        mapping = {
+            'EXIT': 'CLOSED',
+            'SCALE_OUT': 'PARTIAL',
+            'ENTRY': 'FILLED',
+        }
+        return mapping.get(event_type.upper(), event_type.upper())
+
+    async def _publish_lifecycle_event(
+        self,
+        position: Dict[str, Any],
+        event_type: str,
+        details: Dict[str, Any],
+    ) -> None:
+        """Emit lifecycle events into the downstream distribution queue."""
+
+        if not self.config.get('modules', {}).get('signals', {}).get('enabled', False):
+            return
+
+        signal_id = position.get('signal_id') or position.get('id')
+        if not signal_id:
+            return
+
+        lifecycle = dict(details or {})
+        execution_snapshot = {
+            'status': self._map_event_to_status(event_type),
+            'avg_fill_price': lifecycle.get('fill_price') or lifecycle.get('exit_price'),
+            'filled_quantity': lifecycle.get('quantity'),
+            'executed_at': lifecycle.get('executed_at') or lifecycle.get('timestamp'),
+        }
+        execution_snapshot = {
+            key: value for key, value in execution_snapshot.items() if value is not None
+        }
+
+        payload = {
+            'id': signal_id,
+            'symbol': position.get('symbol'),
+            'side': position.get('side'),
+            'strategy': self._normalize_strategy(position.get('strategy')),
+            'action_type': event_type,
+            'ts': int(time.time() * 1000),
+            'position_id': position.get('id'),
+            'position_notional': position.get('position_notional'),
+            'entry': position.get('entry_price'),
+            'stop': position.get('stop_loss'),
+            'targets': position.get('targets', []),
+            'contract': position.get('contract'),
+            'lifecycle': lifecycle,
+        }
+
+        if execution_snapshot:
+            payload['execution'] = execution_snapshot
+
+        # Remove keys with None values to keep payload compact
+        payload = {k: v for k, v in payload.items() if v is not None}
+
+        try:
+            await self.redis.lpush('signals:distribution:pending', json.dumps(payload))
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self.logger.error(
+                "Failed to enqueue lifecycle distribution payload",
+                extra={'position_id': position.get('id'), 'event': event_type, 'error': str(exc)}
+            )
+
     def _close_action(self, position: Dict[str, Any]) -> str:
         side = (position.get('side') or '').upper()
         return 'SELL' if side == 'LONG' else 'BUY'
@@ -1094,11 +1196,12 @@ class PositionManager:
 
             # Calculate final P&L if any quantity remains
             remaining_qty = position.get('quantity', 0)
-            if remaining_qty > 0:
-                entry_price = position.get('entry_price', 0)
-                contract_type = position.get('contract', {}).get('type', 'stock')
-                side = position.get('side')
+            entry_price = position.get('entry_price', 0)
+            contract_type = position.get('contract', {}).get('type', 'stock')
+            side = position.get('side')
+            final_pnl = 0.0
 
+            if remaining_qty > 0:
                 if contract_type == 'option':
                     if side == 'LONG':
                         final_pnl = (exit_price - entry_price) * remaining_qty * 100
@@ -1110,8 +1213,9 @@ class PositionManager:
                     else:
                         final_pnl = (entry_price - exit_price) * remaining_qty
 
-                position['realized_pnl'] = position.get('realized_pnl', 0) + final_pnl
+            position['realized_pnl'] = position.get('realized_pnl', 0) + final_pnl
 
+            closed_quantity = remaining_qty
             position['quantity'] = 0
 
             # Move to closed positions
@@ -1142,6 +1246,20 @@ class PositionManager:
                 f"P&L: ${position['realized_pnl']:.2f} "
                 f"Reason: {reason}"
             )
+
+            lifecycle_details = {
+                'executed_at': position.get('exit_time'),
+                'exit_price': round(float(exit_price), 4) if exit_price is not None else None,
+                'quantity': closed_quantity,
+                'realized_pnl': round(float(position.get('realized_pnl', 0.0)), 2),
+                'return_pct': self._calculate_return_pct(position.get('realized_pnl'), position.get('position_notional')),
+                'holding_period_minutes': self._compute_holding_minutes(position.get('entry_time'), position.get('exit_time')),
+                'reason': reason,
+                'result': self._classify_result(position.get('realized_pnl')),
+                'remaining_quantity': position.get('quantity', 0),
+            }
+
+            await self._publish_lifecycle_event(position, 'EXIT', lifecycle_details)
 
         except Exception as e:
             self.logger.error(f"Error closing position: {e}")
@@ -1274,6 +1392,16 @@ class PositionManager:
             f"Reduced {symbol} by {close_quantity} @ ${fill_price:.2f} ({reason})"
         )
 
+        lifecycle_details = {
+            'executed_at': datetime.now().isoformat(),
+            'fill_price': round(float(fill_price), 4),
+            'quantity': close_quantity,
+            'realized_pnl': round(float(realized_pnl), 2),
+            'remaining_quantity': position['quantity'],
+            'reason': reason,
+            'result': 'SCALE_OUT',
+        }
+
         if position['quantity'] <= 0:
             await self.close_position(position, fill_price, reason)
         else:
@@ -1281,6 +1409,7 @@ class PositionManager:
                 f'positions:open:{symbol}:{position_id}',
                 json.dumps(position)
             )
+            await self._publish_lifecycle_event(position, 'SCALE_OUT', lifecycle_details)
 
     async def _reduce_position(self, position: dict, reduction: float, reason: str):
         """Reduce a position by a percentage at market."""

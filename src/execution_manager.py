@@ -1348,6 +1348,7 @@ class ExecutionManager:
             payload['position_notional'] = signal.get('position_size')
             payload['stop_loss'] = position.get('stop_loss')
             payload['targets'] = position.get('targets', [])
+            payload['action_type'] = payload.get('action_type') or 'ENTRY'
             payload['execution'] = {
                 'status': 'FILLED',
                 'avg_fill_price': round(float(avg_price), 4),

@@ -48,7 +48,7 @@ The default feature reader batches Redis fetches for dealer-flow, hedging, skew,
 The communication and automation layer ships with scaffolding but still depends on extensive TODO lists before production launch. Constructor signatures across these modules already accept the shared config dict and Redis handle, so they can be wired into the live queues without refactoring when their TODOs are addressed.
 
 - **TwitterBot & SocialMediaAnalytics** – Implement credential loading, Tweepy client initialization, and the posting/analytics loops so winning trades, teasers, daily summaries, and morning previews leave `signals:distribution:pending` and write engagement metrics back to Redis.【F:src/twitter_bot.py†L25-L206】
-- **DiscordBot** – Finish the webhook session management and embed formatting to mirror premium/basic tiers, with delivery/error metrics persisted for dashboards.【F:src/discord_bot.py†L25-L141】
+- **DiscordBot** – Tier workers drain premium/basic/free queues, render the updated embed templates, enforce webhook retries, and persist delivery/dead-letter metrics for dashboards. Summaries/analysis/performance posts remain outstanding for the next milestone.【F:src/discord_bot.py†L200-L579】
 - **TelegramBot** – Stand up the command handlers, Stripe subscription flow, tier-aware formatting, and delayed distribution to match the premium/basic/free cadence in Redis.【F:src/telegram_bot.py†L25-L218】
 - **Dashboard services & analytics monitoring** – Flesh out the FastAPI routes/WebSocket broadcasting, log aggregation, alert management, performance chart builders, and the newly scoped backfill/analytics dashboards so operators (and community members, if desired) have a real-time lens on health, replay progress, and risk.【F:src/dashboard_server.py†L25-L220】【F:src/dashboard_routes.py†L25-L184】【F:src/dashboard_websocket.py†L1-L70】
 - **MorningScanner** – Complete the GPT-4 powered morning analysis workflow (data gathering, key levels, options positioning, distribution) so premium channels receive pre-open briefs and social queues get teasers automatically.【F:src/morning_scanner.py†L25-L220】
@@ -59,7 +59,7 @@ The communication and automation layer ships with scaffolding but still depends 
 
 | Area | Status | Next Actions |
 | --- | --- | --- |
-| Social publishing (`twitter_bot`, `discord_bot`, `telegram_bot`) | Not started | Implement credential management, queue draining, tier-aware formatting, delivery metrics, and configure dependency extras. |
+| Social publishing (`twitter_bot`, `discord_bot`, `telegram_bot`) | In progress | Discord relay implemented (tier embeds + simulator); next wire Twitter/Telegram credentials and add summary/analysis/performance drops for Discord. |
 | Operator dashboard (`dashboard_server`, `dashboard_routes`, `dashboard_websocket`) | Scaffolding only | Build FastAPI app, auth, REST + WebSocket endpoints, metrics aggregation, alert routing, and front-end payloads before enabling module flag. |
 | Morning automation (`morning_scanner`, `news_analyzer`) | Scaffolding only | Gather overnight data, compute key levels/options positioning, orchestrate GPT-4 prompts, persist premium/public previews, and schedule distribution jobs. |
 | Archival & reporting (`report_generator`) | Scaffolding only | Implement daily exports, retention cleanup, long-horizon metrics, and operator-triggered report generation. |

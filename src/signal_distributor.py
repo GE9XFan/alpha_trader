@@ -26,7 +26,7 @@ import json
 import time
 import logging
 import traceback
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from datetime import datetime
 import pytz
 
@@ -59,6 +59,9 @@ class SignalDistributor:
         self.validator = SignalValidator(config, redis_conn)
         self.dead_letter_key = 'distribution:dead_letter'
         self._consecutive_failures = 0
+
+        # Execution statuses that qualify for downstream fan-out
+        self.allowed_statuses = {'FILLED', 'CLOSED', 'PARTIAL', 'ADJUSTMENT'}
 
         # Distribution tiers from config
         distribution_config = self.signal_config.get('distribution', {})
@@ -97,10 +100,11 @@ class SignalDistributor:
                         signal_payload = signal_payload.decode('utf-8')
                     signal = json.loads(signal_payload)
                     execution_info = signal.get('execution') or {}
-                    if execution_info.get('status') != 'FILLED':
+                    status = str(execution_info.get('status', '')).upper()
+                    if status not in self.allowed_statuses:
                         self.logger.debug(
-                            "Skipping non-filled signal from distribution queue",
-                            extra={'signal_id': signal.get('id')}
+                            "Skipping signal due to unsupported execution status",
+                            extra={'signal_id': signal.get('id'), 'status': status}
                         )
                         continue
 
@@ -240,8 +244,10 @@ class SignalDistributor:
         Returns:
             Premium formatted signal with all details
         """
-        # Premium gets everything
-        return signal
+        formatted = dict(signal)
+        formatted.setdefault('action_type', signal.get('action_type', 'ENTRY'))
+        formatted.setdefault('id', signal.get('id'))
+        return formatted
 
     def format_basic_signal(self, signal: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -262,12 +268,19 @@ class SignalDistributor:
         else:
             conf_band = 'LOW'
 
+        execution = self._sanitize_execution(signal.get('execution'))
+        lifecycle = self._sanitize_lifecycle(signal.get('lifecycle'))
+
         return {
+            'id': signal.get('id'),
             'symbol': signal.get('symbol'),
             'side': signal.get('side'),
             'strategy': signal.get('strategy'),
             'confidence_band': conf_band,
-            'ts': signal.get('ts')
+            'action_type': signal.get('action_type', 'ENTRY'),
+            'ts': signal.get('ts'),
+            'execution': execution,
+            'lifecycle': lifecycle,
         }
 
     def format_free_signal(self, signal: Dict[str, Any]) -> Dict[str, Any]:
@@ -283,12 +296,49 @@ class SignalDistributor:
         side = signal.get('side', '')
         sentiment = 'bullish' if side == 'LONG' else 'bearish' if side == 'SHORT' else 'neutral'
 
+        lifecycle = self._sanitize_lifecycle(signal.get('lifecycle'))
+
         return {
+            'id': signal.get('id'),
             'symbol': signal.get('symbol'),
             'sentiment': sentiment,
             'message': f"New {sentiment} signal on {signal.get('symbol')}. Upgrade for full details!",
-            'ts': signal.get('ts')
+            'action_type': signal.get('action_type', 'ENTRY'),
+            'ts': signal.get('ts'),
+            'execution': self._sanitize_execution(signal.get('execution')),
+            'lifecycle': lifecycle,
         }
+
+    @staticmethod
+    def _sanitize_execution(execution: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not execution:
+            return None
+
+        sanitized = {
+            'status': execution.get('status'),
+            'executed_at': execution.get('executed_at'),
+        }
+
+        return sanitized
+
+    @staticmethod
+    def _sanitize_lifecycle(lifecycle: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not lifecycle:
+            return None
+
+        sanitized = {
+            key: lifecycle.get(key)
+            for key in (
+                'result',
+                'return_pct',
+                'holding_period_minutes',
+                'reason',
+                'remaining_quantity',
+            )
+            if lifecycle.get(key) is not None
+        }
+
+        return sanitized or None
 
 
 class SignalValidator:
