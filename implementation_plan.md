@@ -25,6 +25,7 @@
 - **Cache hygiene**: Analytics outputs respect `modules.data_ingestion.store_ttls.analytics`, ensuring downstream modules (signals, dashboards) consume consistent payloads.
 - **Documentation**: Architecture, cadences, and Redis touchpoints for analytics are captured in `docs/analytics_module.md` (paired with the ingestion deep dive).
 - **Monitoring**: Heartbeats and state flags updated via `analytics_engine` for operations observability.
+- **Participant flow metrics** (`src/pattern_analyzer.py`): Flow toxicity pipeline now classifies institutional vs retail flow heuristically and stores `analytics:{symbol}:institutional_flow` / `retail_flow` payloads for downstream scoring.
 
 ### Flow Clustering & Volatility Regimes (Phase 3)
 - **FlowClusterModel** (`src/flow_clustering.py`): Consumes trade prints to categorize flow (momentum, dealer hedging, reversion) using KMeans; publishes distribution histograms.
@@ -32,7 +33,7 @@
 - **Integration**: Analytics engine coordinates cadence, gating within RTH, and merges clustering/regime outputs into the same symbol snapshots consumed by signal scoring.
 
 ### Signal Integration & Scoring (Phase 4)
-- **Feature reader** (`src/signal_generator.py`): Merges dealer-flow, flow clustering, volatility regimes, order imbalance, and unusual activity metrics into strategy-ready payloads with sane defaults.
+- **Feature reader** (`src/signal_generator.py`): Hydrates option chains from the normalized `by_contract` map, merges dealer-flow, participant flow splits, flow clustering, volatility regimes, order imbalance, and unusual activity metrics into strategy-ready payloads with sane defaults.
 - **Strategies**: 0/1/14 DTE (`src/dte_strategies.py`) and MOC (`src/moc_strategy.py`) re-tuned to new analytics, including contract hysteresis, strike memory, and liquidity filters.
 - **Deduplication** (`src/signal_deduplication.py`): Normalizes contract fingerprints, avoids duplicate emissions, and writes to both `signals:pending:*` (distribution) and `signals:execution:*` (execution loop) queues.
 - **Backpressure handling**: Signal generator implements exponential backoff on repeated failures to protect downstream services.

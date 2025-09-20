@@ -17,9 +17,18 @@ import numpy as np
 import json
 import redis.asyncio as aioredis
 import time
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Set
 import logging
 import traceback
+
+
+INSTITUTIONAL_VENUES = {
+    'TRF', 'DARK', 'ATS', 'FINRA', 'XADF', 'XOFF', 'IEX', 'BX', 'EDGX', 'EDGA', 'CHX', 'NSX'
+}
+RETAIL_VENUES = {'ARCA', 'NYSE', 'NASDAQ', 'NSDQ', 'MEMX', 'BATS', 'BYX'}
+CLUSTER_WINDOW_SECONDS = 0.35
+INSTITUTIONAL_NOTIONAL_THRESHOLD = 100_000.0
+RETAIL_NOTIONAL_THRESHOLD = 20_000.0
 
 import redis_keys as rkeys
 
@@ -76,6 +85,7 @@ class PatternAnalyzer:
 
             sample_size = len(trades)
             if sample_size == 0:
+                await self._store_participant_flows(symbol, self._participant_flow_neutral(symbol, 'no_trades'))
                 return await self._store_toxicity_payload(symbol, vpin_value, 'no_trades')
 
             ticker = self._decode_json(ticker_raw) or {}
@@ -86,6 +96,7 @@ class PatternAnalyzer:
 
             classified, market_refs = self._classify_trades(symbol, trades, ticker, book)
             if not classified:
+                await self._store_participant_flows(symbol, self._participant_flow_neutral(symbol, 'unclassified'))
                 return await self._store_toxicity_payload(symbol, vpin_value, 'unclassified')
 
             proxies = self._compute_flow_proxies(classified, market_refs)
@@ -131,6 +142,9 @@ class PatternAnalyzer:
                 json.dumps(payload)
             )
 
+            flows_payload = self._compute_participant_flows(symbol, classified, proxies)
+            await self._store_participant_flows(symbol, flows_payload)
+
             if adjusted_level == 'high':
                 self.logger.info(
                     "toxicity_high",
@@ -147,6 +161,7 @@ class PatternAnalyzer:
         except Exception as exc:  # pragma: no cover - defensive logging
             self.logger.error(f"Error analyzing flow toxicity for {symbol}: {exc}")
             self.logger.error(traceback.format_exc())
+            await self._store_participant_flows(symbol, self._participant_flow_neutral(symbol, 'error'))
             return {'error': str(exc)}
 
     async def _store_toxicity_payload(self, symbol: str, vpin_value: float, status: str) -> dict:
@@ -309,6 +324,14 @@ class PatternAnalyzer:
                 elif price <= bid - tolerance:
                     spread_cross = 'sell'
 
+            ts_raw = trade.get('timestamp') or trade.get('ts') or trade.get('time')
+            ts_value = self._safe_float(ts_raw)
+            if ts_value and ts_value > 1e12:
+                ts_value = ts_value / 1000.0
+
+            venue_raw = trade.get('venue') or trade.get('exchange') or trade.get('market_center')
+            venue = str(venue_raw).upper() if venue_raw else 'UNKNOWN'
+
             classified.append(
                 {
                     'price': price,
@@ -316,7 +339,8 @@ class PatternAnalyzer:
                     'notional': notional,
                     'side': side,
                     'cross': spread_cross,
-                    'timestamp': trade.get('timestamp') or trade.get('ts'),
+                    'timestamp': ts_value,
+                    'venue': venue,
                 }
             )
 
@@ -368,6 +392,185 @@ class PatternAnalyzer:
             'aggressive_volume': aggressive_volume,
             'venue_mix': venue_mix,
         }
+
+    def _identify_cluster_indices(self, trades: List[dict]) -> Set[int]:
+        if len(trades) < 3:
+            return set()
+
+        cluster_indices: Set[int] = set()
+        timestamps: List[Optional[float]] = []
+        for trade in trades:
+            ts = trade.get('timestamp')
+            if isinstance(ts, (int, float)):
+                timestamps.append(float(ts))
+            else:
+                timestamps.append(None)
+
+        for idx, ts in enumerate(timestamps):
+            if ts is None:
+                continue
+
+            side = trades[idx].get('side')
+            count = 1
+
+            j = idx - 1
+            while j >= 0 and timestamps[j] is not None and ts - timestamps[j] <= CLUSTER_WINDOW_SECONDS:
+                if trades[j].get('side') == side:
+                    count += 1
+                j -= 1
+
+            j = idx + 1
+            while j < len(trades) and timestamps[j] is not None and timestamps[j] - ts <= CLUSTER_WINDOW_SECONDS:
+                if trades[j].get('side') == side:
+                    count += 1
+                j += 1
+
+            if count >= 3:
+                cluster_indices.add(idx)
+
+        return cluster_indices
+
+    def _compute_participant_flows(
+        self,
+        symbol: str,
+        trades: List[dict],
+        proxies: Dict[str, Any],
+    ) -> Dict[str, Dict[str, Any]]:
+        if not trades:
+            return self._participant_flow_neutral(symbol, 'no_trades')
+
+        cluster_indices = self._identify_cluster_indices(trades)
+        inst_notional = 0.0
+        inst_trades = 0
+        retail_notional = 0.0
+        retail_trades = 0
+
+        inst_hits = {'size': 0, 'venue': 0, 'cluster': 0, 'passive': 0}
+        retail_hits = {'small_lot': 0, 'aggressive': 0, 'venue': 0}
+
+        for idx, trade in enumerate(trades):
+            notional = float(trade.get('notional') or 0.0)
+            if notional <= 0:
+                continue
+
+            venue_raw = trade.get('venue') or 'UNKNOWN'
+            venue = str(venue_raw).upper()
+            score = 0
+
+            if notional >= INSTITUTIONAL_NOTIONAL_THRESHOLD:
+                score += 2
+                inst_hits['size'] += 1
+            elif notional <= RETAIL_NOTIONAL_THRESHOLD:
+                retail_hits['small_lot'] += 1
+
+            if venue in INSTITUTIONAL_VENUES:
+                score += 1
+                inst_hits['venue'] += 1
+            elif venue in RETAIL_VENUES:
+                retail_hits['venue'] += 1
+
+            if idx in cluster_indices:
+                score += 1
+                inst_hits['cluster'] += 1
+
+            cross = trade.get('cross')
+            if cross is None and notional >= 50_000:
+                score += 1
+                inst_hits['passive'] += 1
+            elif cross and notional <= RETAIL_NOTIONAL_THRESHOLD:
+                score -= 1
+                retail_hits['aggressive'] += 1
+
+            if score >= 2:
+                inst_notional += notional
+                inst_trades += 1
+            elif score <= 0:
+                retail_notional += notional
+                retail_trades += 1
+            else:
+                if notional >= 75_000:
+                    inst_notional += notional
+                    inst_trades += 1
+                else:
+                    retail_notional += notional
+                    retail_trades += 1
+
+        total_notional = inst_notional + retail_notional
+        if total_notional <= 0:
+            return self._participant_flow_neutral(symbol, 'no_notional')
+
+        inst_ratio = max(0.0, min(inst_notional / total_notional, 1.0))
+        retail_ratio = max(0.0, min(retail_notional / total_notional, 1.0))
+        ts = time.time()
+
+        institutional_payload = {
+            'symbol': symbol,
+            'timestamp': ts,
+            'value': round(inst_ratio, 4),
+            'notional': inst_notional,
+            'trade_count': inst_trades,
+            'total_notional': total_notional,
+            'cluster_trades': len(cluster_indices),
+            'signals': inst_hits,
+            'aggressor_ratio': proxies.get('aggressor_ratio'),
+            'status': 'ok',
+        }
+
+        retail_payload = {
+            'symbol': symbol,
+            'timestamp': ts,
+            'value': round(retail_ratio, 4),
+            'notional': retail_notional,
+            'trade_count': retail_trades,
+            'total_notional': total_notional,
+            'cluster_trades': len(cluster_indices),
+            'signals': retail_hits,
+            'aggressor_ratio': proxies.get('aggressor_ratio'),
+            'status': 'ok',
+        }
+
+        return {
+            'institutional_flow': institutional_payload,
+            'retail_flow': retail_payload,
+        }
+
+    def _participant_flow_neutral(self, symbol: str, status: str) -> Dict[str, Dict[str, Any]]:
+        ts = time.time()
+        base = {
+            'symbol': symbol,
+            'timestamp': ts,
+            'value': 0.5,
+            'notional': 0.0,
+            'trade_count': 0,
+            'total_notional': 0.0,
+            'cluster_trades': 0,
+            'signals': {},
+            'aggressor_ratio': 0.0,
+            'status': status,
+        }
+
+        institutional_payload = dict(base)
+        retail_payload = dict(base)
+
+        return {
+            'institutional_flow': institutional_payload,
+            'retail_flow': retail_payload,
+        }
+
+    async def _store_participant_flows(self, symbol: str, payloads: Dict[str, Dict[str, Any]]) -> None:
+        ttl = self.ttls.get('analytics', self.ttls.get('metrics', 60))
+
+        try:
+            async with self.redis.pipeline(transaction=False) as pipe:
+                for metric, payload in payloads.items():
+                    await pipe.setex(
+                        rkeys.analytics_metric_key(symbol, metric),
+                        ttl,
+                        json.dumps(payload)
+                    )
+                await pipe.execute()
+        except Exception as exc:  # pragma: no cover - defensive telemetry
+            self.logger.debug("Failed to store participant flows for %s: %s", symbol, exc)
 
     async def calculate_order_book_imbalance(self, symbol: str) -> dict:
         """

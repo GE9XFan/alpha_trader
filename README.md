@@ -15,7 +15,7 @@ Traditional retail platforms lack visibility into dealer hedging flows and marke
 | **Level 2 Market Depth** | SPY, QQQ, IWM | < 5ms latency | IBKR SMART routing |
 | **Options Analytics** | All liquid strikes | 5 minutes | Alpha Vantage chains |
 | **Dealer Positioning** | Vanna, Charm, 0DTE skew | 30 seconds | Computed from chains |
-| **Trade Flow Classification** | Momentum/hedging/reversion | 60 seconds | ML clustering |
+| **Trade Flow Classification** | Momentum/hedging/reversion + institutional vs retail split | 60 seconds | ML clustering + pattern heuristics |
 | **Signal Generation** | 0/1/14 DTE, MOC | Continuous | Multi-factor scoring |
 | **Automated Execution** | Bracket orders, trailing stops | Real-time | IBKR API |
 | **Risk Management** | Position limits, circuit breakers | Real-time | Internal controls |
@@ -25,8 +25,8 @@ Traditional retail platforms lack visibility into dealer hedging flows and marke
 | Component | Responsibilities | Redis Touchpoints |
 |-----------|------------------|-------------------|
 | **Ingestion** | • Stream IBKR Level 2 depth with venue codes<br>• Aggregate 1-minute bars from 5-second samples<br>• Fetch options chains with full Greeks | `market:{symbol}:book`<br>`market:{symbol}:bars:1min`<br>`options:{symbol}:chain` |
-| **Analytics** | • Calculate VPIN toxicity and order imbalance<br>• Compute GEX/DEX exposure profiles<br>• Classify trade flow via KMeans clustering | `analytics:{symbol}:vpin`<br>`analytics:{symbol}:gex`<br>`analytics:flow_clusters:{symbol}` |
-| **Signal Engine** | • Score multi-factor DTE opportunities<br>• Detect MOC auction imbalances<br>• Enforce contract-level deduplication | `signals:pending:{symbol}`<br>`signals:execution:{symbol}`<br>`signals:emitted:{fingerprint}` |
+| **Analytics** | • Calculate VPIN toxicity and order imbalance<br>• Compute GEX/DEX exposure profiles<br>• Segment institutional vs retail flows alongside KMeans clustering | `analytics:{symbol}:vpin`<br>`analytics:{symbol}:gex`<br>`analytics:{symbol}:institutional_flow` / `retail_flow`<br>`analytics:{symbol}:flow_clusters` |
+| **Signal Engine** | • Score multi-factor DTE opportunities using live option chains<br>• Detect MOC auction imbalances<br>• Enforce contract-level deduplication | `signals:pending:{symbol}`<br>`signals:execution:{symbol}`<br>`signals:emitted:{fingerprint}` |
 | **Execution** | • Place bracket orders on fills<br>• Manage trailing stop adjustments<br>• Sync positions with IBKR in real-time | `positions:open:{account}:{conId}`<br>`orders:pending:{orderId}`<br>`execution:fills:{symbol}` |
 | **Distribution** | • Route signals to tier queues<br>• Enforce 0/60/300s delays<br>• Track delivery metrics | `distribution:premium:queue`<br>`distribution:basic:queue`<br>`distribution:metrics` |
 
@@ -66,6 +66,7 @@ redis-cli hlen market:SPY:book          # Should show depth levels
 # Verify analytics
 redis-cli hget analytics:SPY:vpin value # Should show toxicity score
 redis-cli hget analytics:SPY:gex total  # Should show gamma exposure
+redis-cli hget analytics:SPY:institutional_flow value  # Institutional notional ratio
 
 # Monitor signals
 redis-cli llen signals:pending:SPY      # Pending signal count
@@ -127,6 +128,7 @@ python -m src.signal_generator      # Signals only
 | Failed Orders | `orders:failed:count` | > 5 per hour |
 | Signal Blocks (reasoned) | `metrics:signals:blocked_by_reason` hash | Any reason spiking > baseline |
 | Strategy Veto Counts | `metrics:signals:blocked_by_veto` hash | >5 vetoes in 5 min for same code |
+| Institutional Flow Drift | `analytics:{symbol}:institutional_flow` | Value <0.2 or >0.8 during RTH |
 | Exposure/Live Locks | `metrics:signals:blocked:exposure` counter & `signals:live:*` keys | Counter growth without matching acks |
 | Execution Acks | `signals:acknowledged` pubsub / `signals:ack:*` keys | Missing ack for > 10s after emit |
 | API Rate Limit | `monitoring:alpha_vantage:metrics` | tokens < 10 |

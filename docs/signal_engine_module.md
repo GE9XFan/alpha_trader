@@ -39,10 +39,10 @@ analytics:{symbol}:*  ──┐
 4. Per-symbol throttling is enforced via `min_refresh_s`; stale or schema-incomplete features trigger metrics increments (`metrics:signals:blocked:stale_features`, `metrics:signals:blocked:no_features`).
 
 ## Feature Ingestion Pipeline
-- `default_feature_reader` batches Redis fetches for market ticks, bars, VPIN, OBI, GEX/DEX, dealer flows, toxicity, flow clusters, and more. Missing payloads degrade gracefully to neutral defaults.
+- `default_feature_reader` batches Redis fetches for market ticks, bars, VPIN, OBI, GEX/DEX, dealer flows, toxicity, flow clusters, participant flow splits, and the normalized options chain. When the Alpha Vantage payload only exposes `by_contract`, the reader now hydrates the list directly so every strategy receives canonical strike/expiry/greek data without duplicating storage.
 - Freshness is validated using the embedded timestamp/age; breaches feed the veto metrics.
-- Toxicity payloads now contain: raw and adjusted scores, aggressor ratios, large-trade ratios, institutional score, spread-cross ratios, derived venue mix, and confidence estimation. The adjusted score is preferred for downstream scoring.
-- New feature fields surfaced to strategies include `toxicity_adjusted`, `aggressor_ratio`, `large_trade_ratio`, `institutional_score`, `venue_mix`, along with existing dealer-flow metrics.
+- Toxicity payloads now contain: raw and adjusted scores, aggressor ratios, large-trade ratios, institutional score, spread-cross ratios, derived venue mix, and confidence estimation. Complementary participant heuristics are persisted at `analytics:{symbol}:institutional_flow` / `analytics:{symbol}:retail_flow`; the reader surfaces their `value` ratios while preserving the raw payload for diagnostics.
+- New feature fields surfaced to strategies include `toxicity_adjusted`, `aggressor_ratio`, `large_trade_ratio`, `institutional_flow`, `retail_flow`, `gamma_pin_proximity`, `gamma_pull_dir`, dealer-flow notional/z-scores, and the fully normalized `options_chain` list.
 
 ## Strategy Stack
 ### 0DTE
@@ -64,7 +64,7 @@ analytics:{symbol}:*  ──┐
 - Selects contracts with hysteresis to avoid churn and uses dedicated audit keys.
 
 ### Contract Selection & Hysteresis
-- `DTEStrategies.select_contract` and `MOCStrategy.select_contract` normalise expiry/right/strike, refine from option chains when available, and persist last-used contracts via `signals:last_contract:*` to avoid thrashing unless roll criteria are met.
+- `DTEStrategies.select_contract` and `MOCStrategy.select_contract` normalise expiry/right/strike, refine directly from the hydrated option chain provided by the feature reader, and persist last-used contracts via `signals:last_contract:*` to avoid thrashing unless roll criteria are met.
 
 ## Deduplication & Emission Guardrails
 - `contract_fingerprint` canonicalises strike, expiry, right, multiplier, and exchange to prevent floating-point drift (`660` vs `660.00`).

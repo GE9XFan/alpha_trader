@@ -284,7 +284,7 @@ class SignalGenerator:
     ) -> None:
         """Process a validated signal by selecting a contract and emitting it atomically."""
 
-        options_chain = features.get('options_chain') if strategy_name == 'moc' else None
+        options_chain = features.get('options_chain')
         contract = await self.select_contract(symbol, strategy_name, side, features.get('price', 0), options_chain)
         contract_fp = contract_fingerprint(symbol, strategy_name, side, contract)
 
@@ -789,9 +789,14 @@ async def default_feature_reader(redis_conn: aioredis.Redis, symbol: str) -> Dic
 
     options_chain_value = _decode(options_chain_raw)
     if isinstance(options_chain_value, dict):
-        options_chain = options_chain_value.get('contracts') or []
+        by_contract = options_chain_value.get('by_contract')
+        if isinstance(by_contract, dict):
+            options_chain = [c for c in by_contract.values() if isinstance(c, dict)]
+        else:
+            contracts_list = options_chain_value.get('contracts') or options_chain_value.get('raw') or []
+            options_chain = [c for c in contracts_list if isinstance(c, dict)]
     elif isinstance(options_chain_value, list):
-        options_chain = options_chain_value
+        options_chain = [c for c in options_chain_value if isinstance(c, dict)]
     else:
         options_chain = []
 
