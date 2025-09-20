@@ -41,13 +41,24 @@ import uuid
 import re
 import logging
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 import redis.asyncio as aioredis
-from ib_insync import IB, Stock, Option, MarketOrder, LimitOrder, StopOrder, Order, ExecutionFilter, util
+from ib_insync import (
+    IB,
+    Stock,
+    Option,
+    MarketOrder,
+    LimitOrder,
+    StopOrder,
+    Order,
+    ExecutionFilter,
+    util,
+)
 
 from signal_deduplication import contract_fingerprint
 from src.option_utils import normalize_expiry
 from src.stop_engine import StopEngine, StopState
+from src.kelly_sizer import KellySizer
 from logging_utils import get_logger
 
 
@@ -101,6 +112,9 @@ class ExecutionManager:
         self.stop_orders: Dict[str, Any] = {}  # position_id -> stop trade/order
         self.target_orders: Dict[str, List[Any]] = {}  # position_id -> list of target trades
         self.active_trades: Dict[int, Dict[str, Any]] = {}  # order_id -> {'trade': trade, 'signal': signal}
+        self.bracket_registry: Dict[int, Dict[str, Any]] = {}
+        self.position_brackets: Dict[str, Dict[str, Any]] = {}
+        self._order_watchers: Dict[int, asyncio.Task] = {}
 
         # Connection state
         self.connected = False
@@ -112,6 +126,47 @@ class ExecutionManager:
         # Tracking for manual fills to detect missing execution events
         self._manual_fill_positions: Set[str] = set()
         self._missing_manual_fill_alerted: Set[str] = set()
+
+        # Live account / P&L telemetry
+        self.account_state: Dict[str, Any] = {
+            'account': None,
+            'net_liquidation': 0.0,
+            'buying_power': 0.0,
+            'excess_liquidity': 0.0,
+            'total_cash_value': 0.0,
+        }
+        self.pnl_state: Dict[str, float] = {
+            'daily': 0.0,
+            'realized': 0.0,
+            'unrealized': 0.0,
+        }
+        self._pnl_req_id: Optional[int] = None
+        self._pnl_single_req_ids: Set[int] = set()
+        self._pnl_single_handles: Dict[int, int] = {}
+
+        # Kelly sizing helper
+        self.kelly_sizer = KellySizer(redis_conn, config)
+
+        # Market data cache for trailing logic
+        self.position_tickers: Dict[str, Any] = {}
+        self._price_cache: Dict[str, float] = {}
+
+        # Background tasks
+        self._monitor_task: Optional[asyncio.Task] = None
+        self._events_registered = False
+
+    async def _scan_keys(self, pattern: str, *, count: int = 200) -> List[str]:
+        """Return all keys matching *pattern* using non-blocking SCAN."""
+        cursor = 0
+        results: List[str] = []
+        while True:
+            cursor, batch = await self.redis.scan(cursor=cursor, match=pattern, count=count)
+            if batch:
+                # aioredis returns str when decode_responses=True
+                results.extend(batch)
+            if cursor == 0:
+                break
+        return results
 
     @staticmethod
     def _normalize_strategy(strategy: Optional[str]) -> str:
@@ -225,6 +280,16 @@ class ExecutionManager:
             return None
 
         return price
+
+    @staticmethod
+    def _safe_float(value: Any) -> float:
+        try:
+            result = float(value or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+        if math.isnan(result) or math.isinf(result):
+            return 0.0
+        return result
 
     def _create_position_snapshot_from_ib(
         self,
@@ -570,6 +635,288 @@ class ExecutionManager:
                 extra={'position_id': position_id, 'error': str(exc), 'symbol': symbol}
             )
 
+    async def _publish_realized_metrics(self, amount: float) -> None:
+        """Update realized PnL aggregates when we recognize ``amount``."""
+
+        if not amount:
+            return
+
+        try:
+            await self.redis.incrbyfloat('execution:pnl:realized:delta', amount)
+            await self.redis.incrbyfloat('execution:pnl:daily_delta', amount)
+        except Exception as exc:
+            self.logger.error(
+                "realized_metrics_update_failed",
+                extra={"action": "realized_metrics", "amount": amount, "error": str(exc)},
+            )
+            raise
+
+    async def _register_realized_event(
+        self,
+        position: Dict[str, Any],
+        realized_delta: float,
+    ) -> None:
+        """Accumulate realized PnL on ``position`` and publish metrics."""
+
+        if realized_delta in (None, 0):
+            return
+
+        prior_total = float(position.get('realized_pnl') or 0.0)
+        new_total = prior_total + float(realized_delta)
+        position['realized_pnl'] = new_total
+
+        posted_total = float(position.get('realized_posted', 0.0) or 0.0)
+        unposted_total = float(position.get('realized_unposted', 0.0) or 0.0)
+
+        try:
+            await self._publish_realized_metrics(float(realized_delta))
+        except Exception:
+            position['realized_unposted'] = unposted_total + float(realized_delta)
+        else:
+            position['realized_posted'] = posted_total + float(realized_delta)
+            # Clear any previously unposted balance that we just recognised
+            remaining_unposted = unposted_total - float(realized_delta)
+            position['realized_unposted'] = remaining_unposted if remaining_unposted > 0 else 0.0
+
+    def _build_pending_signal_stub(self, order_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Reconstruct a minimal signal payload for pending orders after restarts."""
+
+        return {
+            'id': order_data.get('signal_id'),
+            'symbol': order_data.get('symbol'),
+            'strategy': order_data.get('strategy'),
+            'side': order_data.get('side'),
+            'contract': order_data.get('contract'),
+            'position_size': order_data.get('position_notional'),
+            'targets': order_data.get('targets') or [],
+            'stop': order_data.get('stop_loss'),
+            'confidence': order_data.get('confidence'),
+        }
+
+    async def _load_pending_orders_from_redis(self) -> None:
+        """Warm ``self.pending_orders`` from persisted Redis snapshots."""
+
+        keys = await self._scan_keys('orders:pending:*')
+        for key in keys:
+            payload = await self.redis.get(key)
+            if not payload:
+                continue
+            try:
+                record = json.loads(payload)
+            except json.JSONDecodeError:
+                self.logger.error(
+                    "pending_order_load_failed",
+                    extra={"action": "load_pending_order", "key": key},
+                )
+                continue
+
+            order_identifier = record.get('order_id') or record.get('orderId')
+            if order_identifier in (None, ''):
+                continue
+
+            try:
+                order_id = int(order_identifier)
+            except (TypeError, ValueError):
+                continue
+
+            record['order_id'] = order_id
+            record.setdefault('placed_at', time.time())
+            self.pending_orders[order_id] = record
+
+    async def _hydrate_open_orders(self) -> None:
+        """Reconcile IB open orders with local caches after (re)connect."""
+
+        if not self.ib.isConnected():
+            return
+
+        try:
+            await self.ib.reqOpenOrdersAsync()
+        except Exception as exc:
+            self.logger.warning(
+                "open_orders_hydration_failed",
+                extra={"action": "hydrate_open_orders", "error": str(exc)},
+            )
+            return
+
+        trade_lookup: Dict[int, Any] = {}
+        for trade in self.ib.trades():
+            order = getattr(trade, 'order', None)
+            if not order or order.orderId is None:
+                continue
+            trade_lookup[order.orderId] = trade
+
+        # Rebuild pending order watchers and registry
+        for order_id, order_data in list(self.pending_orders.items()):
+            stub = self._build_pending_signal_stub(order_data)
+            order_data.setdefault('signal', stub)
+            trade = trade_lookup.get(order_id)
+
+            if trade:
+                self.active_trades[order_id] = {'trade': trade, 'signal': stub}
+                if order_id not in self._order_watchers:
+                    watcher = asyncio.create_task(self.monitor_order(trade, stub))
+                    self._order_watchers[order_id] = watcher
+                    watcher.add_done_callback(
+                        lambda task, oid=order_id: self._order_watchers.pop(oid, None)
+                    )
+            else:
+                self.logger.debug(
+                    "pending_order_trade_missing",
+                    extra={"action": "hydrate_pending_order", "order_id": order_id},
+                )
+
+            stop_id = order_data.get('stop_order_id')
+            target_ids = order_data.get('target_order_ids') or []
+            stop_trade = trade_lookup.get(int(stop_id)) if stop_id not in (None, '') else None
+            if stop_trade and getattr(stop_trade, 'isDone', lambda: True)():
+                stop_trade = None
+
+            target_trades = []
+            for target_id in target_ids:
+                try:
+                    target_int = int(target_id)
+                except (TypeError, ValueError):
+                    continue
+                trade_obj = trade_lookup.get(target_int)
+                if trade_obj and not getattr(trade_obj, 'isDone', lambda: True)():
+                    target_trades.append(trade_obj)
+
+            self.bracket_registry[order_id] = {
+                'parent_trade': trade,
+                'stop_trade': stop_trade,
+                'target_trades': target_trades,
+                'stop_order_id': stop_id,
+                'target_order_ids': target_ids,
+                'stop_engine_state': order_data.get('stop_engine_state'),
+                'plan_records': order_data.get('stop_engine_plan', []),
+                'initial_stop': order_data.get('stop_loss'),
+                'symbol': order_data.get('symbol'),
+                'side': order_data.get('side'),
+                'strategy': self._normalize_strategy(order_data.get('strategy')),
+                'contract': order_data.get('contract'),
+                'quantity': int(self._safe_float(order_data.get('size'))),
+                'entry_reference': order_data.get('entry_target'),
+                'basis_price': order_data.get('entry_target'),
+                'oca_group': order_data.get('oca_group'),
+            }
+
+        # Rehydrate protection orders for open positions
+        position_keys = await self._scan_keys('positions:open:*')
+        for key in position_keys:
+            payload = await self.redis.get(key)
+            if not payload:
+                continue
+            try:
+                position = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+
+            position_id = position.get('id')
+            if not position_id:
+                continue
+
+            stop_id = position.get('stop_order_id')
+            target_ids = position.get('target_order_ids') or []
+
+            stop_trade = None
+            if stop_id not in (None, ''):
+                try:
+                    stop_trade = trade_lookup.get(int(stop_id))
+                except (TypeError, ValueError):
+                    stop_trade = None
+            if stop_trade and getattr(stop_trade, 'isDone', lambda: True)():
+                stop_trade = None
+
+            target_trades = []
+            for target_id in target_ids:
+                try:
+                    target_int = int(target_id)
+                except (TypeError, ValueError):
+                    continue
+                trade_obj = trade_lookup.get(target_int)
+                if trade_obj and not getattr(trade_obj, 'isDone', lambda: True)():
+                    target_trades.append(trade_obj)
+
+            if stop_trade:
+                self.stop_orders[position_id] = stop_trade
+            else:
+                self.stop_orders.pop(position_id, None)
+
+            if target_trades:
+                self.target_orders[position_id] = target_trades
+            else:
+                self.target_orders.pop(position_id, None)
+
+            bracket_entry = {
+                'parent_trade': None,
+                'stop_trade': stop_trade,
+                'target_trades': target_trades,
+                'stop_order_id': stop_id,
+                'target_order_ids': target_ids,
+                'stop_engine_state': position.get('stop_engine_state'),
+                'plan_records': position.get('stop_engine_plan', []),
+                'initial_stop': position.get('stop_loss'),
+                'symbol': position.get('symbol'),
+                'side': position.get('side'),
+                'strategy': self._normalize_strategy(position.get('strategy')),
+                'contract': position.get('contract'),
+                'quantity': int(self._safe_float(position.get('quantity'))),
+                'entry_reference': position.get('basis_price') or position.get('entry_price'),
+                'basis_price': position.get('basis_price') or position.get('entry_price'),
+                'oca_group': position.get('oca_group'),
+            }
+            self.position_brackets[position_id] = bracket_entry
+
+            await self._ensure_position_protection(position, trade_lookup)
+
+    async def _ensure_position_protection(
+        self,
+        position: Dict[str, Any],
+        trade_lookup: Optional[Dict[int, Any]] = None,
+    ) -> None:
+        """Ensure ``position`` has an active protective bracket."""
+
+        position_id = position.get('id')
+        if not position_id:
+            return
+
+        quantity = self._safe_float(position.get('quantity'))
+        if quantity <= 0:
+            return
+
+        stop_trade = self.stop_orders.get(position_id)
+        if not stop_trade:
+            stop_id = position.get('stop_order_id')
+            if trade_lookup and stop_id not in (None, ''):
+                try:
+                    stop_trade = trade_lookup.get(int(stop_id))
+                except (TypeError, ValueError):
+                    stop_trade = None
+            if stop_trade and getattr(stop_trade, 'isDone', lambda: True)():
+                stop_trade = None
+
+        if stop_trade:
+            # Cache refresh for active stop orders
+            self.stop_orders[position_id] = stop_trade
+            return
+
+        if not self.ib.isConnected():
+            return
+
+        try:
+            position_copy = dict(position)
+            await self._rebuild_bracket(position_copy)
+        except Exception as exc:
+            self.logger.warning(
+                "position_protection_rebuild_failed",
+                extra={
+                    "action": "rebuild_bracket",
+                    "position_id": position_id,
+                    "symbol": position.get('symbol'),
+                    "error": str(exc),
+                },
+            )
+
     async def _prime_execution_stream(self) -> None:
         """Ensure IBKR sends execution events for manual trades."""
 
@@ -588,6 +935,768 @@ class ExecutionManager:
                 "execution_stream_prime_failed",
                 extra={"action": "prime_executions", "error": str(exc)},
             )
+
+    def _register_event_streams(self) -> None:
+        """Register IB event callbacks once per connection."""
+
+        if self._events_registered:
+            return
+
+        self.ib.accountSummaryEvent += self._on_account_summary
+        self.ib.pnlEvent += self._on_pnl_update
+        self.ib.pnlSingleEvent += self._on_pnl_single_update
+        self.ib.positionEvent += self._on_position_event
+        self._events_registered = True
+
+    async def _subscribe_account_summary(self, account_code: str) -> None:
+        """Subscribe to ongoing account summary updates."""
+        try:
+            await self.ib.reqAccountSummaryAsync()
+        except Exception as exc:
+            self.logger.warning(
+                "account_summary_subscription_failed",
+                extra={"action": "account_summary", "error": str(exc)},
+            )
+
+    async def _subscribe_pnl_streams(self, account_code: str) -> None:
+        """Subscribe to account-level P&L streams."""
+        try:
+            pnl = self.ib.reqPnL(account_code, '')
+            self._pnl_req_id = getattr(pnl, 'reqId', None)
+        except Exception as exc:
+            self.logger.warning(
+                "pnl_subscription_failed",
+                extra={"action": "pnl", "error": str(exc)},
+            )
+
+    def _on_account_summary(self, account: str, tag: str, value: str, currency: str) -> None:
+        """Process account summary events and propagate to Redis."""
+        tag = tag or ''
+        value_float = self._safe_float(value)
+        if tag == 'NetLiquidation':
+            self.account_state['net_liquidation'] = value_float
+            asyncio.create_task(self.redis.set('account:value', value))
+        elif tag == 'BuyingPower':
+            self.account_state['buying_power'] = value_float
+            asyncio.create_task(self.redis.set('account:buying_power', value))
+        elif tag == 'ExcessLiquidity':
+            self.account_state['excess_liquidity'] = value_float
+        elif tag == 'TotalCashValue':
+            self.account_state['total_cash_value'] = value_float
+
+        if account and not self.account_state.get('account'):
+            self.account_state['account'] = account
+
+    def _on_pnl_update(self, req_id: int, daily_pnl: float, unrealized_pnl: float, realized_pnl: float) -> None:
+        """Handle aggregate P&L updates."""
+        self.pnl_state.update(
+            {
+                'daily': daily_pnl or 0.0,
+                'unrealized': unrealized_pnl or 0.0,
+                'realized': realized_pnl or 0.0,
+            }
+        )
+
+        async def _update_redis():
+            await self.redis.set('risk:daily_pnl', f"{self.pnl_state['daily']:.2f}")
+            await self.redis.set('positions:pnl:unrealized', f"{self.pnl_state['unrealized']:.2f}")
+            await self.redis.set('positions:pnl:realized:total', f"{self.pnl_state['realized']:.2f}")
+
+        asyncio.create_task(_update_redis())
+
+    def _on_pnl_single_update(self, pnl_single) -> None:
+        """Update Redis with contract-level PnL snapshots."""
+        try:
+            symbol = getattr(pnl_single, 'symbol', None)
+            unrealized = getattr(pnl_single, 'unrealizedPnl', None)
+            realized = getattr(pnl_single, 'realizedPnl', None)
+            con_id = getattr(pnl_single, 'conId', None)
+        except Exception:
+            return
+
+        if not symbol:
+            return
+
+        async def _update_redis():
+            key = f'positions:pnl:by_symbol:{symbol}'
+            payload = {
+                'unrealized': unrealized,
+                'realized': realized,
+                'updated_at': datetime.utcnow().isoformat(),
+            }
+            await self.redis.set(key, json.dumps(payload))
+
+        asyncio.create_task(_update_redis())
+
+    def _ensure_pnl_single_subscription(self, account: Optional[str], con_id: Optional[int]) -> None:
+        if not account or con_id in (None, ''):
+            return
+        try:
+            con_id_int = int(con_id)
+        except (TypeError, ValueError):
+            return
+
+        if con_id_int in self._pnl_single_handles:
+            return
+
+        try:
+            pnl_single = self.ib.reqPnLSingle(account, '', con_id_int)
+        except Exception as exc:
+            self.logger.debug(
+                "pnl_single_subscription_failed",
+                extra={"action": "pnl_single", "account": account, "con_id": con_id_int, "error": str(exc)},
+            )
+            return
+
+        req_id = getattr(pnl_single, 'reqId', None)
+        if req_id is not None:
+            self._pnl_single_handles[con_id_int] = req_id
+
+    def _cancel_pnl_single_subscription(self, con_id: Optional[int]) -> None:
+        if con_id in (None, ''):
+            return
+        try:
+            con_id_int = int(con_id)
+        except (TypeError, ValueError):
+            return
+
+        req_id = self._pnl_single_handles.pop(con_id_int, None)
+        if req_id is None:
+            return
+        try:
+            self.ib.cancelPnLSingle(req_id)
+        except Exception as exc:
+            self.logger.debug(
+                "pnl_single_cancel_failed",
+                extra={"action": "pnl_single_cancel", "con_id": con_id_int, "error": str(exc)},
+            )
+
+    def _on_position_event(self, account: str, contract: Any, position: float, avg_cost: float) -> None:
+        """Synchronize Redis with live IB position updates."""
+        if contract is None or not contract.conId:
+            return
+
+        symbol = getattr(contract, 'symbol', None)
+        if not symbol:
+            return
+
+        position_id = f"{account}:{contract.conId}"
+        snapshot = self._create_position_snapshot_from_ib(
+            position_id,
+            contract,
+            position,
+            avg_cost,
+            account,
+        )
+
+        async def _update():
+            redis_key = f'positions:open:{symbol}:{position_id}'
+            await self.redis.set(redis_key, json.dumps(snapshot))
+            await self.redis.sadd(f'positions:by_symbol:{symbol}', position_id)
+
+        asyncio.create_task(_update())
+
+        if abs(position) > 0:
+            self._ensure_pnl_single_subscription(account, contract.conId)
+        else:
+            self._cancel_pnl_single_subscription(contract.conId)
+
+    def _ensure_monitor_loop(self) -> None:
+        """Spawn trailing stop monitor loop if not already running."""
+        if self._monitor_task and not self._monitor_task.done():
+            return
+        self._monitor_task = asyncio.create_task(self._trailing_monitor_loop())
+
+    async def _trailing_monitor_loop(self) -> None:
+        while True:
+            try:
+                await self._evaluate_trailing_stops()
+            except Exception as exc:
+                self.logger.error(
+                    "trailing_monitor_error",
+                    extra={"action": "trailing_monitor", "error": str(exc)},
+                )
+            await asyncio.sleep(2.0)
+
+    async def _evaluate_trailing_stops(self) -> None:
+        position_keys = await self._scan_keys('positions:open:*')
+        for key in position_keys:
+            payload = await self.redis.get(key)
+            if not payload:
+                continue
+            try:
+                position = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+
+            if str(position.get('status', 'OPEN')).upper() != 'OPEN':
+                continue
+
+            quantity = self._safe_float(position.get('quantity'))
+            if quantity <= 0:
+                continue
+
+            symbol = position.get('symbol')
+            if not symbol:
+                continue
+
+            contract_info = position.get('contract') or {}
+            await self._ensure_market_data_subscription(symbol, contract_info)
+
+            current_price = self._get_market_price(symbol, position)
+            if current_price is None:
+                continue
+
+            entry_price = self._safe_float(position.get('entry_price'))
+            if entry_price <= 0:
+                continue
+
+            side = (position.get('side') or '').upper()
+            contract_type = contract_info.get('type') or contract_info.get('secType') or 'stock'
+            state = StopState.from_dict(position.get('stop_engine_state'))
+            current_stop = position.get('stop_loss')
+            current_stop = self._safe_float(current_stop) if current_stop is not None else None
+
+            decision = self.stop_engine.evaluate(
+                contract_type,
+                side,
+                entry_price,
+                current_price,
+                current_stop=current_stop,
+                state=state,
+            )
+
+            if decision is None:
+                continue
+
+            if not decision.should_update or decision.stop_price is None:
+                continue
+
+            success = await self._update_trailing_stop(position, decision.stop_price, decision.state)
+            if not success:
+                continue
+
+            position['stop_loss'] = decision.stop_price
+            position['stop_engine_state'] = decision.state.to_dict()
+            position['stop_engine_plan'] = position.get('stop_engine_plan', [])
+            position['last_update'] = time.time()
+            position['current_price'] = current_price
+
+            await self.redis.set(key, json.dumps(position))
+
+    async def _ensure_market_data_subscription(self, symbol: str, contract_info: Dict[str, Any]) -> None:
+        if symbol in self.position_tickers:
+            return
+
+        if not self.ib.isConnected():
+            return
+
+        try:
+            contract = await self.create_ib_contract({**contract_info, 'symbol': symbol})
+        except Exception:
+            contract = None
+        if not contract:
+            return
+
+        try:
+            ticker = self.ib.reqMktData(contract, '', False, False)
+            self.position_tickers[symbol] = ticker
+        except Exception as exc:
+            self.logger.debug(f"Failed to subscribe market data for {symbol}: {exc}")
+
+    def _get_market_price(self, symbol: str, position: Dict[str, Any]) -> Optional[float]:
+        ticker = self.position_tickers.get(symbol)
+        price: Optional[float] = None
+        if ticker is not None:
+            for attr in ('last', 'midpoint', 'marketPrice', 'close'):
+                candidate = getattr(ticker, attr, None)
+                if candidate:
+                    price = float(candidate)
+                    break
+            if not price:
+                bid = getattr(ticker, 'bid', None)
+                ask = getattr(ticker, 'ask', None)
+                if bid and ask:
+                    price = (float(bid) + float(ask)) / 2
+
+        if price:
+            self._price_cache[symbol] = price
+            return price
+
+        cached = self._price_cache.get(symbol)
+        if cached:
+            return cached
+
+        try:
+            return float(position.get('current_price') or 0.0) or None
+        except (TypeError, ValueError):
+            return None
+
+    def _drop_market_data_subscription(self, symbol: str) -> None:
+        ticker = self.position_tickers.pop(symbol, None)
+        if ticker is not None:
+            try:
+                self.ib.cancelMktData(ticker)
+            except Exception:
+                pass
+        self._price_cache.pop(symbol, None)
+
+    async def _maybe_release_market_data(self, symbol: Optional[str]) -> None:
+        if not symbol:
+            return
+        try:
+            open_count = await self.redis.scard(f'positions:by_symbol:{symbol}')
+        except Exception:
+            open_count = 0
+        if open_count and open_count > 0:
+            return
+
+        for pending in self.pending_orders.values():
+            if isinstance(pending, dict) and pending.get('symbol') == symbol:
+                return
+
+        self._drop_market_data_subscription(symbol)
+
+    async def _update_trailing_stop(
+        self,
+        position: Dict[str, Any],
+        stop_price: float,
+        state: StopState,
+    ) -> bool:
+        position_id = position.get('id')
+        symbol = position.get('symbol')
+        if not position_id or not symbol:
+            return False
+
+        stop_trade = self.stop_orders.get(position_id)
+        if not stop_trade:
+            return False
+
+        close_action = 'SELL' if (position.get('side') or '').upper() == 'LONG' else 'BUY'
+        quantity = int(round(self._safe_float(position.get('quantity'))))
+        if quantity <= 0:
+            return False
+
+        contract_info = position.get('contract') or {}
+        try:
+            ib_contract = await self.create_ib_contract({**contract_info, 'symbol': symbol})
+        except Exception:
+            ib_contract = None
+        if not ib_contract:
+            return False
+
+        existing_order = getattr(stop_trade, 'order', None)
+        if existing_order is None or existing_order.orderId is None:
+            return False
+
+        order_id = existing_order.orderId
+        stop_price = round(float(stop_price), 4)
+
+        if state.last_stop_type == 'TRAIL_PERCENT':
+            order = Order()
+            order.orderType = 'TRAIL'
+            order.trailingPercent = round(state.last_stop_value or 0.0, 6)
+            order.trailStopPrice = stop_price
+        else:
+            order = StopOrder(close_action, quantity, stop_price)
+
+        order.action = close_action
+        order.totalQuantity = quantity
+        order.orderId = order_id
+        order.parentId = getattr(existing_order, 'parentId', None)
+        order.ocaGroup = position.get('oca_group')
+        order.ocaType = getattr(existing_order, 'ocaType', 1)
+        order.tif = 'GTC'
+        order.outsideRth = getattr(existing_order, 'outsideRth', True)
+        order.transmit = True
+
+        try:
+            updated_trade = self.ib.placeOrder(ib_contract, order)
+            self.stop_orders[position_id] = updated_trade
+            bracket = self.position_brackets.get(position_id)
+            if bracket is not None:
+                bracket['stop_trade'] = updated_trade
+                bracket['stop_order_id'] = getattr(updated_trade.order, 'orderId', order_id)
+                bracket['stop_engine_state'] = state.to_dict()
+                bracket['initial_stop'] = stop_price
+                bracket['quantity'] = quantity
+            position['stop_order_id'] = getattr(updated_trade.order, 'orderId', order_id)
+            position['stop_engine_state'] = state.to_dict()
+            return True
+        except Exception as exc:
+            self.logger.warning(
+                "trailing_stop_update_failed",
+                extra={
+                    "action": "stop_update",
+                    "position_id": position_id,
+                    "symbol": symbol,
+                    "error": str(exc),
+                },
+            )
+            return False
+
+    def _build_protection_plan(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        quantity: int,
+        entry_price: float,
+        contract_info: Dict[str, Any],
+        strategy_code: str,
+        signal_targets: Optional[List[float]],
+        state_override: Optional[StopState] = None,
+    ) -> Tuple[float, StopState, List[Dict[str, Any]], str]:
+        instrument_type = contract_info.get('type') or contract_info.get('secType') or 'default'
+        state = state_override if state_override else StopState.from_dict(None)
+
+        stop_price, state = self.stop_engine.initial_stop(
+            instrument_type,
+            side,
+            entry_price,
+            state=state,
+        )
+
+        allocations = self.stop_engine.plan_targets(
+            instrument_type,
+            side,
+            entry_price,
+            int(quantity),
+            filled_targets=state.filled_targets,
+        )
+
+        plan_records: List[Dict[str, Any]] = []
+        if allocations:
+            for alloc in allocations:
+                plan_records.append(
+                    {
+                        'profit_pct': alloc.profit_pct,
+                        'price': round(float(alloc.price), 4),
+                        'fraction': alloc.fraction,
+                        'quantity': int(alloc.quantity),
+                        'status': 'pending',
+                        'order_id': None,
+                    }
+                )
+        else:
+            raw_targets = [
+                round(float(target), 4)
+                for target in (signal_targets or [])
+                if self._safe_float(target) > 0
+            ]
+
+            if raw_targets and quantity > 0:
+                target_count = len(raw_targets)
+                base = quantity // target_count
+                remainder = quantity % target_count
+                allocations = [base] * target_count
+                for idx in range(remainder):
+                    allocations[idx] += 1
+
+                for price, qty in zip(raw_targets, allocations):
+                    if qty <= 0:
+                        continue
+                    plan_records.append(
+                        {
+                            'profit_pct': None,
+                            'price': price,
+                            'fraction': qty / max(quantity, 1),
+                            'quantity': qty,
+                            'status': 'pending',
+                            'order_id': None,
+                        }
+                    )
+
+            if not plan_records:
+                fallback_raw = self.stop_engine.target_price(side, entry_price, 30.0)
+                fallback_rounded = self.stop_engine.quantize_price(
+                    instrument_type,
+                    side,
+                    fallback_raw,
+                )
+                plan_records.append(
+                    {
+                        'profit_pct': 30.0,
+                        'price': round(float(fallback_rounded), 4),
+                        'fraction': 1.0,
+                        'quantity': int(quantity),
+                        'status': 'pending',
+                        'order_id': None,
+                    }
+                )
+
+        base_group = f"BRK_{symbol}_{strategy_code or 'GEN'}"
+        sanitized_group = re.sub(r'[^A-Za-z0-9_]+', '_', base_group)
+        oca_group = f"{sanitized_group[:58]}_{int(time.time())}"
+
+        return stop_price, state, plan_records, oca_group
+
+    async def _submit_bracket(
+        self,
+        *,
+        ib_contract: Any,
+        action: str,
+        order_size: int,
+        order_type: str,
+        limit_price: Optional[float],
+        stop_price: float,
+        stop_state: StopState,
+        plan_records: List[Dict[str, Any]],
+        oca_group: str,
+    ) -> Dict[str, Any]:
+        parent_order: Order
+        if order_type == 'MARKET':
+            parent_order = MarketOrder(action, order_size)
+        else:
+            parent_order = LimitOrder(action, order_size, limit_price)
+        parent_order.transmit = False
+        parent_order.outsideRth = True
+
+        parent_trade = self.ib.placeOrder(ib_contract, parent_order)
+        parent_id = getattr(parent_trade.order, 'orderId', None)
+        if parent_id is None:
+            raise RuntimeError('Parent order ID not allocated by IBKR')
+
+        close_action = 'SELL' if action == 'BUY' else 'BUY'
+        target_trades: List[Any] = []
+        target_order_ids: List[int] = []
+
+        for plan in plan_records:
+            qty = int(plan.get('quantity') or 0)
+            price = float(plan.get('price') or 0)
+            if qty <= 0 or price <= 0:
+                continue
+
+            limit_order = LimitOrder(close_action, qty, price)
+            limit_order.parentId = parent_id
+            limit_order.ocaGroup = oca_group
+            limit_order.ocaType = 1
+            limit_order.tif = 'GTC'
+            limit_order.transmit = False
+            trade = self.ib.placeOrder(ib_contract, limit_order)
+            target_trades.append(trade)
+            plan['order_id'] = getattr(trade.order, 'orderId', None)
+            plan['status'] = 'working'
+            if trade.order.orderId is not None:
+                target_order_ids.append(trade.order.orderId)
+
+        stop_price = round(float(stop_price), 4)
+        if stop_state.last_stop_type == 'TRAIL_PERCENT':
+            stop_order = Order()
+            stop_order.orderType = 'TRAIL'
+            stop_order.trailingPercent = round(stop_state.last_stop_value or 0.0, 6)
+            stop_order.trailStopPrice = stop_price
+        else:
+            stop_order = StopOrder(close_action, order_size, stop_price)
+
+        stop_order.parentId = parent_id
+        stop_order.ocaGroup = oca_group
+        stop_order.ocaType = 1
+        stop_order.tif = 'GTC'
+        stop_order.outsideRth = True
+        stop_order.transmit = True
+
+        stop_trade = self.ib.placeOrder(ib_contract, stop_order)
+        stop_order_id = getattr(stop_trade.order, 'orderId', None)
+
+        return {
+            'parent_trade': parent_trade,
+            'stop_trade': stop_trade,
+            'target_trades': target_trades,
+            'parent_order_id': parent_id,
+            'stop_order_id': stop_order_id,
+            'target_order_ids': target_order_ids,
+            'plan_records': plan_records,
+            'stop_state': stop_state.to_dict(),
+            'initial_stop': stop_price,
+            'oca_group': oca_group,
+        }
+
+    async def _rebuild_bracket(self, position: Dict[str, Any]) -> None:
+        """Recreate protective stop/target orders for an open position."""
+
+        symbol = position.get('symbol')
+        position_id = position.get('id')
+        if not symbol or not position_id:
+            return
+
+        quantity = int(round(self._safe_float(position.get('quantity'))))
+        if quantity <= 0:
+            return
+
+        if not self.ib.isConnected():
+            return
+
+        contract_info = dict(position.get('contract') or {})
+        contract_info['symbol'] = symbol
+
+        ib_contract = await self.create_ib_contract(contract_info)
+        if not ib_contract:
+            self.logger.warning(f"Unable to rebuild bracket for {symbol} – contract lookup failed")
+            return
+
+        previous_bracket = self.position_brackets.get(position_id)
+        previous_stop_trade = self.stop_orders.get(position_id)
+        previous_target_trades = list(self.target_orders.get(position_id, []))
+        previous_stop_order_id = position.get('stop_order_id')
+        previous_target_order_ids = list(position.get('target_order_ids') or [])
+
+        entry_price = self._safe_float(position.get('basis_price'))
+        if entry_price <= 0:
+            entry_price = self._safe_float(position.get('last_fill_price'))
+        if entry_price <= 0:
+            entry_price = self._safe_float(position.get('entry_price'))
+        if entry_price <= 0:
+            entry_price = self._safe_float(position.get('current_price')) or 1.0
+
+        strategy_code = self._normalize_strategy(position.get('strategy'))
+        side = (position.get('side') or '').upper()
+        existing_state = StopState.from_dict(position.get('stop_engine_state'))
+
+        stop_price, state, plan_records, oca_group = self._build_protection_plan(
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            entry_price=entry_price,
+            contract_info=contract_info,
+            strategy_code=strategy_code,
+            signal_targets=position.get('targets', []),
+            state_override=existing_state,
+        )
+
+        # Ensure total allocation does not exceed available quantity
+        allocated = sum(int(plan.get('quantity') or 0) for plan in plan_records)
+        if allocated > quantity:
+            excess = allocated - quantity
+            for plan in reversed(plan_records):
+                qty = int(plan.get('quantity') or 0)
+                if qty <= 0:
+                    continue
+                deduction = min(qty, excess)
+                plan['quantity'] = qty - deduction
+                excess -= deduction
+                if plan['quantity'] <= 0:
+                    plan['status'] = 'skipped'
+                if excess <= 0:
+                    break
+            plan_records = [plan for plan in plan_records if int(plan.get('quantity') or 0) > 0]
+
+        close_action = 'SELL' if side == 'LONG' else 'BUY'
+
+        target_trades: List[Any] = []
+        target_order_ids: List[int] = []
+
+        try:
+            for plan in plan_records:
+                qty = int(plan.get('quantity') or 0)
+                price = float(plan.get('price') or 0)
+                if qty <= 0 or price <= 0:
+                    continue
+                limit_order = LimitOrder(close_action, qty, price)
+                limit_order.ocaGroup = oca_group
+                limit_order.ocaType = 1
+                limit_order.tif = 'GTC'
+                limit_order.outsideRth = True
+                limit_order.transmit = False
+                trade = self.ib.placeOrder(ib_contract, limit_order)
+                plan['order_id'] = getattr(trade.order, 'orderId', None)
+                plan['status'] = 'working'
+                target_trades.append(trade)
+                if plan['order_id'] is not None:
+                    target_order_ids.append(plan['order_id'])
+
+            rounded_stop = round(float(stop_price), 4)
+            if state.last_stop_type == 'TRAIL_PERCENT':
+                stop_order = Order()
+                stop_order.orderType = 'TRAIL'
+                stop_order.trailingPercent = round(state.last_stop_value or 0.0, 6)
+                stop_order.trailStopPrice = rounded_stop
+            else:
+                stop_order = StopOrder(close_action, quantity, rounded_stop)
+
+            stop_order.ocaGroup = oca_group
+            stop_order.ocaType = 1
+            stop_order.tif = 'GTC'
+            stop_order.outsideRth = True
+            stop_order.transmit = True
+
+            stop_trade = self.ib.placeOrder(ib_contract, stop_order)
+            stop_order_id = getattr(stop_trade.order, 'orderId', None)
+        except Exception as exc:
+            for trade in target_trades:
+                await self._cancel_trade_safe(trade, context=f"{position_id} rebuild_target")
+            locals_stop_trade = locals().get('stop_trade')
+            if locals_stop_trade:
+                await self._cancel_trade_safe(locals_stop_trade, context=f"{position_id} rebuild_stop")
+            self.logger.warning(
+                "protective_orders_rebuild_failed",
+                extra={
+                    "action": "rebuild_bracket",
+                    "symbol": symbol,
+                    "position_id": position_id,
+                    "error": str(exc),
+                },
+            )
+            raise
+
+        self.stop_orders[position_id] = stop_trade
+        if target_trades:
+            self.target_orders[position_id] = target_trades
+        else:
+            self.target_orders.pop(position_id, None)
+
+        position['stop_order_id'] = stop_order_id
+        position['target_order_ids'] = target_order_ids
+        position['oca_group'] = oca_group
+        position['stop_loss'] = rounded_stop
+        position['stop_engine_state'] = state.to_dict()
+        position['stop_engine_plan'] = plan_records
+        position['targets'] = [plan.get('price') for plan in plan_records]
+        position['last_update'] = time.time()
+
+        await self.redis.set(f'positions:open:{symbol}:{position_id}', json.dumps(position))
+
+        self.position_brackets[position_id] = {
+            'parent_trade': None,
+            'stop_trade': stop_trade,
+            'target_trades': target_trades,
+            'stop_order_id': stop_order_id,
+            'target_order_ids': target_order_ids,
+            'stop_engine_state': state.to_dict(),
+            'plan_records': plan_records,
+            'initial_stop': rounded_stop,
+            'symbol': symbol,
+            'side': side,
+            'strategy': strategy_code,
+            'contract': contract_info,
+            'quantity': quantity,
+            'entry_reference': entry_price,
+            'oca_group': oca_group,
+            'basis_price': entry_price,
+        }
+
+        if previous_stop_trade or previous_target_trades or previous_stop_order_id or previous_target_order_ids:
+            await self._retire_previous_bracket(
+                position_id,
+                stop_trade=previous_stop_trade,
+                target_trades=previous_target_trades,
+                stop_order_id=previous_stop_order_id,
+                target_order_ids=previous_target_order_ids,
+            )
+
+        self.logger.info(
+            "protective_orders_rebuilt",
+            extra={
+                "action": "rebuild_bracket",
+                "symbol": symbol,
+                "position_id": position_id,
+                "quantity": quantity,
+                "stop_price": rounded_stop,
+                "targets": position['targets'],
+            },
+        )
+
+
 
     @staticmethod
     def _parse_datetime(value: Any) -> Optional[datetime]:
@@ -780,6 +1889,7 @@ class ExecutionManager:
         position['target_order_ids'] = []
         position['oca_group'] = None
         position['stop_engine_plan'] = []
+        self.position_brackets.pop(position_id, None)
 
     async def _cancel_trade_safe(self, trade, *, context: str = "") -> None:
         """Cancel an IB trade object if it is still active."""
@@ -877,6 +1987,7 @@ class ExecutionManager:
             return
 
         await self._cancel_bracket_orders(position)
+        self.position_brackets.pop(position_id, None)
 
         position['quantity'] = 0
         position['status'] = 'CLOSED'
@@ -885,13 +1996,11 @@ class ExecutionManager:
         position['close_reason'] = reason
         position['stop_engine_plan'] = []
 
-        prior_realized = float(position.get('realized_pnl') or 0.0)
+        total_realized = float(position.get('realized_pnl') or 0.0)
         delta = float(realized_pnl_delta or 0.0)
-        unposted = float(position.pop('realized_unposted', 0.0) or 0.0)
-        realized_total = prior_realized
-        if realized_total == 0.0 and (unposted or delta):
-            realized_total = unposted if unposted else delta
-        position['realized_pnl'] = realized_total
+        if total_realized == 0.0 and delta:
+            total_realized = delta
+            position['realized_pnl'] = total_realized
         position['commission'] = float(position.get('commission') or 0.0)
 
         redis_key = f'positions:open:{symbol}:{position_id}'
@@ -899,16 +2008,41 @@ class ExecutionManager:
         removed = await self.redis.srem(f'positions:by_symbol:{symbol}', position_id)
         if removed:
             await self._decrement_position_count(symbol, removed)
+            remaining = await self.redis.scard(f'positions:by_symbol:{symbol}')
+            if remaining == 0:
+                self._drop_market_data_subscription(symbol)
 
         closed_key = f'positions:closed:{datetime.utcnow().strftime("%Y%m%d")}:{position_id}'
         snapshot = dict(position)
-        snapshot['realized_pnl'] = round(realized_total, 2)
+        total_realized = float(position.get('realized_pnl') or 0.0)
+        snapshot['realized_pnl'] = round(total_realized, 2)
         snapshot['commission'] = round(position['commission'], 2)
         await self.redis.setex(closed_key, 604800, json.dumps(snapshot))
+        ts_now = time.time()
+        await self.redis.zadd('positions:closed:index', {closed_key: ts_now})
+        lookback_seconds = getattr(self.kelly_sizer, 'lookback_seconds', self.kelly_sizer.lookback_days * 86400)
+        await self.redis.zremrangebyscore('positions:closed:index', 0, ts_now - (lookback_seconds * 2))
+        self._cancel_pnl_single_subscription(position.get('ib_con_id'))
 
         await self.redis.incr('positions:closed:total')
-        await self.redis.incrbyfloat('positions:pnl:realized:total', realized_total)
-        await self.redis.incrbyfloat('risk:daily_pnl', realized_total if unposted else delta)
+
+        posted_total = float(position.get('realized_posted', 0.0) or 0.0)
+        prior_unposted = float(position.pop('realized_unposted', 0.0) or 0.0)
+        amount_to_publish = total_realized - posted_total
+        if abs(amount_to_publish) < 1e-6 and prior_unposted:
+            amount_to_publish = prior_unposted
+
+        if abs(amount_to_publish) > 1e-6:
+            try:
+                await self._publish_realized_metrics(amount_to_publish)
+            except Exception:
+                position['realized_unposted'] = prior_unposted + amount_to_publish
+            else:
+                position['realized_posted'] = posted_total + amount_to_publish
+                position['realized_unposted'] = 0.0
+        else:
+            position['realized_posted'] = posted_total
+            position['realized_unposted'] = max(prior_unposted, 0.0)
 
         self.logger.info(
             "position_closed",
@@ -923,6 +2057,7 @@ class ExecutionManager:
         )
 
         await self._publish_exit_distribution(position, exit_price, closed_quantity, reason)
+        await self.kelly_sizer.invalidate()
 
 
     async def _handle_target_fill(
@@ -950,7 +2085,11 @@ class ExecutionManager:
             filled_units = int(round(filled_qty))
             remaining_qty = max(current_qty - filled_units, 0)
             position['quantity'] = remaining_qty
-            position['realized_pnl'] = position.get('realized_pnl', 0.0) + realized_pnl
+
+            await self._register_realized_event(position, realized_pnl)
+
+            if commission:
+                position['commission'] = float(position.get('commission', 0.0) or 0.0) + commission
 
             plan_records = position.get('stop_engine_plan', []) or []
             matched_stage = None
@@ -977,6 +2116,8 @@ class ExecutionManager:
                     'reason': 'TARGET',
                     'timestamp': datetime.utcnow().isoformat(),
                     'multiplier': multiplier,
+                    'realized': realized_pnl,
+                    'commission': commission,
                 }
             )
 
@@ -1013,7 +2154,7 @@ class ExecutionManager:
                 return
 
             # Rebuild protective orders for the remaining size
-            await self.place_stop_loss(position)
+            await self._rebuild_bracket(position)
 
             lifecycle_details = {
                 'executed_at': datetime.utcnow().isoformat(),
@@ -1111,11 +2252,24 @@ class ExecutionManager:
                 )
 
         realized_total = float(position.get('realized_pnl', 0.0) or 0.0)
-        position.pop('realized_unposted', None)
         position['commission'] = float(position.get('commission') or 0.0)
-        if realized_total:
-            await self.redis.incrbyfloat('positions:pnl:realized:total', realized_total)
-            await self.redis.incrbyfloat('risk:daily_pnl', realized_total)
+        posted_total = float(position.get('realized_posted', 0.0) or 0.0)
+        prior_unposted = float(position.pop('realized_unposted', 0.0) or 0.0)
+        amount_to_publish = realized_total - posted_total
+        if abs(amount_to_publish) < 1e-6 and prior_unposted:
+            amount_to_publish = prior_unposted
+
+        if abs(amount_to_publish) > 1e-6:
+            try:
+                await self._publish_realized_metrics(amount_to_publish)
+            except Exception:
+                position['realized_unposted'] = prior_unposted + amount_to_publish
+            else:
+                position['realized_posted'] = posted_total + amount_to_publish
+                position['realized_unposted'] = 0.0
+        else:
+            position['realized_posted'] = posted_total
+            position['realized_unposted'] = max(prior_unposted, 0.0)
 
         closed_quantity = (
             closed_quantity_override
@@ -1166,8 +2320,14 @@ class ExecutionManager:
         # Connect to IBKR
         await self.connect_ibkr()
 
+        # Rehydrate cached state before processing loop
+        await self._load_pending_orders_from_redis()
+
         # Ensure Redis state reflects live IB positions
         await self.reconcile_positions()
+
+        # Hydrate open orders and protection orders now that Redis is current
+        await self._hydrate_open_orders()
 
         # Set up event handlers (ib_insync specific events)
         self.ib.orderStatusEvent += self.on_order_status
@@ -1176,6 +2336,7 @@ class ExecutionManager:
 
         # Start position sync task (runs every 30 seconds)
         asyncio.create_task(self.position_sync_loop())
+        self._ensure_monitor_loop()
 
         while True:
             try:
@@ -1234,13 +2395,30 @@ class ExecutionManager:
                         extra={"action": "connect", "status": "connected"}
                     )
 
+                    # Register telemetry handlers once connected
+                    self._register_event_streams()
+
                     # Get account info (ib_insync doesn't have async version)
                     account_values = self.ib.accountValues()
+                    account_code = None
                     for av in account_values:
                         if av.tag == 'NetLiquidation':
                             await self.redis.set('account:value', av.value)
+                            self.account_state['net_liquidation'] = self._safe_float(av.value)
                         elif av.tag == 'BuyingPower':
                             await self.redis.set('account:buying_power', av.value)
+                            self.account_state['buying_power'] = self._safe_float(av.value)
+                        elif av.tag == 'ExcessLiquidity':
+                            self.account_state['excess_liquidity'] = self._safe_float(av.value)
+                        elif av.tag == 'TotalCashValue':
+                            self.account_state['total_cash_value'] = self._safe_float(av.value)
+                        if av.account and not account_code:
+                            account_code = av.account
+
+                    if account_code:
+                        self.account_state['account'] = account_code
+                        await self._subscribe_account_summary(account_code)
+                        await self._subscribe_pnl_streams(account_code)
 
                     await self.redis.set('execution:connection:status', 'connected')
                     await self._prime_execution_stream()
@@ -1263,11 +2441,11 @@ class ExecutionManager:
             try:
                 await asyncio.sleep(30)  # Run every 30 seconds
 
-                raw_redis_keys = await self.redis.keys('positions:open:*')
+                raw_redis_keys = await self._scan_keys('positions:open:*')
                 redis_positions: Dict[str, Dict[str, Any]] = {}
 
                 for raw_key in raw_redis_keys:
-                    key = raw_key.decode('utf-8') if isinstance(raw_key, bytes) else raw_key
+                    key = raw_key
                     position_data = await self.redis.get(key)
                     if not position_data:
                         continue
@@ -1345,6 +2523,7 @@ class ExecutionManager:
                             existing=position,
                         )
                         await self.redis.set(redis_key, json.dumps(updated_snapshot))
+                        await self._ensure_position_protection(updated_snapshot)
                         processed_ib_ids.add(position_id)
                         continue
 
@@ -1378,6 +2557,7 @@ class ExecutionManager:
                             redis_positions.pop(redis_key, None)
 
                         redis_positions[dest_key] = destination
+                        await self._ensure_position_protection(destination)
                         processed_ib_ids.add(ib_match_id)
                         continue
 
@@ -1412,6 +2592,7 @@ class ExecutionManager:
                     added = await self.redis.sadd(f'positions:by_symbol:{symbol}', ib_id)
                     if added:
                         await self._increment_position_count(added)
+                    await self._ensure_position_protection(snapshot)
 
                     self.logger.info(
                         "execution_position_added",
@@ -1475,6 +2656,7 @@ class ExecutionManager:
                         "position_id": position_id,
                     },
                 )
+                self._ensure_pnl_single_subscription(account, contract.conId)
             except Exception as snapshot_error:  # pragma: no cover - defensive per-position
                 self.logger.error(
                     f"Failed to reconcile position for {getattr(contract, 'symbol', 'UNKNOWN')}: {snapshot_error}"
@@ -1490,8 +2672,8 @@ class ExecutionManager:
 
         for symbol in symbols:
             # Check position limits
-            existing_positions = await self.redis.keys(f'positions:open:{symbol}:*')
-            if len(existing_positions) >= self.max_per_symbol:
+            existing_positions = await self.redis.scard(f'positions:by_symbol:{symbol}')
+            if existing_positions and existing_positions >= self.max_per_symbol:
                 continue
 
             # Get pending signal (handle bytes or string)
@@ -1511,11 +2693,24 @@ class ExecutionManager:
                 age_ms = time.time() * 1000 - signal.get('ts', 0)
                 if age_ms > 5000:
                     self.logger.warning(f"Signal too old: {age_ms}ms for {symbol}")
+                    await self._acknowledge_signal(
+                        signal,
+                        status='STALE',
+                        reason=f'stale_signal_{int(age_ms)}ms',
+                        broadcast=True,
+                    )
                     continue
 
                 # Check risk approval
                 if await self.passes_risk_checks(signal):
                     await self.execute_signal(signal)
+                else:
+                    await self._acknowledge_signal(
+                        signal,
+                        status='RISK_REJECTED',
+                        reason='risk_checks_failed',
+                        broadcast=True,
+                    )
 
             except json.JSONDecodeError as e:
                 self.logger.error(f"Invalid signal JSON: {e}")
@@ -1527,6 +2722,8 @@ class ExecutionManager:
         status: str,
         filled: float = 0.0,
         avg_price: Optional[float] = None,
+        reason: Optional[str] = None,
+        broadcast: bool = False,
     ) -> None:
         """Publish execution acknowledgement and release signal live-lock."""
 
@@ -1565,17 +2762,34 @@ class ExecutionManager:
             'avg_price': float(avg_price) if avg_price is not None else None,
             'timestamp': time.time(),
         }
+        if reason:
+            ack_payload['reason'] = reason
 
-        try:
-            await self.redis.setex(
-                f'signals:ack:{signal_id}',
-                86400,
-                json.dumps(ack_payload),
+        if signal_id:
+            try:
+                await self.redis.setex(
+                    f'signals:ack:{signal_id}',
+                    86400,
+                    json.dumps(ack_payload),
+                )
+                await self.redis.publish('signals:acknowledged', json.dumps(ack_payload))
+                await self.redis.incr('metrics:signals:acks')
+            except Exception as exc:  # pragma: no cover
+                self.logger.error(f"Failed to publish signal ack: {exc}")
+        else:
+            self.logger.debug(
+                "signal_ack_missing_id",
+                extra={'action': 'signal_ack', 'symbol': symbol, 'contract_fp': contract_fp},
             )
-            await self.redis.publish('signals:acknowledged', json.dumps(ack_payload))
-            await self.redis.incr('metrics:signals:acks')
-        except Exception as exc:  # pragma: no cover
-            self.logger.error(f"Failed to publish signal ack: {exc}")
+
+        if broadcast:
+            await self._publish_signal_status(
+                signal,
+                status=status,
+                reason=reason,
+                filled=filled,
+                avg_price=avg_price,
+            )
 
     async def _get_risk_manager(self) -> Optional["RiskManager"]:
         """Return the shared RiskManager instance, creating it if needed."""
@@ -1636,9 +2850,9 @@ class ExecutionManager:
                 return False
 
             # Check total position count
-            open_positions = await self.redis.keys('positions:open:*')
-            if len(open_positions) >= self.max_positions:
-                self.logger.warning(f"Max positions limit reached: {len(open_positions)}/{self.max_positions}")
+            open_positions = self._safe_float(await self.redis.get('positions:count') or 0.0)
+            if open_positions >= self.max_positions:
+                self.logger.warning(f"Max positions limit reached: {int(open_positions)}/{self.max_positions}")
                 return False
 
             return True
@@ -1675,16 +2889,34 @@ class ExecutionManager:
             ib_contract = await self.create_ib_contract(contract_info)
             if not ib_contract:
                 self.logger.error(f"Failed to create contract for {symbol}")
+                await self._acknowledge_signal(
+                    signal,
+                    status='REJECTED',
+                    reason='contract_lookup_failed',
+                    broadcast=True,
+                )
+                await self._maybe_release_market_data(symbol)
                 return
 
-            # Get current market data
-            ticker = self.ib.reqMktData(ib_contract, '', False, False)
-            await asyncio.sleep(0.5)  # Wait for data
+            # Get current market data (reuse existing subscription when possible)
+            await self._ensure_market_data_subscription(symbol, contract_info)
+            ticker = self.position_tickers.get(symbol)
+            if ticker is None:
+                ticker = self.ib.reqMktData(ib_contract, '', False, False)
+                self.position_tickers[symbol] = ticker
+            await asyncio.sleep(0.3)  # Allow snapshot to populate
 
             # Calculate order size
             order_size = await self.calculate_order_size(signal, ticker)
             if order_size == 0:
                 self.logger.warning(f"Order size is 0 for {symbol}")
+                await self._acknowledge_signal(
+                    signal,
+                    status='REJECTED',
+                    reason='sizing_zero',
+                    broadcast=True,
+                )
+                await self._maybe_release_market_data(symbol)
                 return
 
             # Re-run notional-based risk gate now that we know the exposure
@@ -1698,6 +2930,13 @@ class ExecutionManager:
                         "position_notional": position_notional,
                     },
                 )
+                await self._acknowledge_signal(
+                    signal,
+                    status='RISK_REJECTED',
+                    reason='risk_checks_failed_post_sizing',
+                    broadcast=True,
+                )
+                await self._maybe_release_market_data(symbol)
                 return
 
             # Determine order type and price
@@ -1706,31 +2945,25 @@ class ExecutionManager:
             side_upper = (side or '').upper()
 
             if contract_type in option_types:
-                # Directional options trades are opened with long premium (buy puts/calls)
-                action = 'BUY'
+                action = 'BUY' if side_upper == 'LONG' else 'SELL'
             else:
                 action = 'BUY' if side_upper == 'LONG' else 'SELL'
 
-            if confidence > 85 and strategy_code != '0DTE':  # Never use market for 0DTE
-                # Market order for high confidence (except 0DTE)
-                order = MarketOrder(action, order_size)
+            limit_price = None
+            order_type = 'MARKET'
+            selected_price = None
+
+            if confidence > 85 and strategy_code != '0DTE':
                 order_type = 'MARKET'
             else:
-                # Limit order
-                limit_price = None
                 bid = self._safe_price(getattr(ticker, 'bid', None))
                 ask = self._safe_price(getattr(ticker, 'ask', None))
-
                 if bid is not None and ask is not None:
-                    spread = max(ask - bid, 0)
+                    spread = max(ask - bid, 0.0)
                     if confidence >= 70:
                         limit_price = (bid + ask) / 2
                     else:
-                        if action == 'BUY':
-                            limit_price = bid + spread * 0.33
-                        else:
-                            limit_price = ask - spread * 0.33
-
+                        limit_price = bid + spread * 0.33 if action == 'BUY' else ask - spread * 0.33
                 if limit_price is None:
                     for candidate in (
                         self._safe_price(getattr(ticker, 'last', None)),
@@ -1742,8 +2975,9 @@ class ExecutionManager:
 
                 if limit_price is not None:
                     limit_price = round(limit_price, 2)
-
-                if limit_price is None:
+                    order_type = 'LIMIT'
+                    selected_price = limit_price
+                else:
                     self.logger.warning(
                         "Falling back to market order due to missing price",
                         extra={
@@ -1752,15 +2986,56 @@ class ExecutionManager:
                             "strategy": strategy_code,
                         },
                     )
-                    order = MarketOrder(action, order_size)
                     order_type = 'MARKET'
-                else:
-                    order = LimitOrder(action, order_size, limit_price)
-                    order_type = 'LIMIT'
 
-            # Place order
-            trade = self.ib.placeOrder(ib_contract, order)
-            order_id = trade.order.orderId
+            if selected_price is None:
+                selected_price = self._safe_price(getattr(ticker, 'last', None))
+            if selected_price is None:
+                selected_price = self._safe_price(getattr(ticker, 'midpoint', None))
+            if selected_price is None:
+                selected_price = self._safe_price(signal.get('entry'))
+            if selected_price is None:
+                self.logger.warning(
+                    "Aborting execution due to missing market data",
+                    extra={
+                        "action": "execute_signal",
+                        "symbol": symbol,
+                        "reason": "no_market_data",
+                    },
+                )
+                await self._acknowledge_signal(
+                    signal,
+                    status='NO_MARKET_DATA',
+                    reason='price_unavailable',
+                    broadcast=True,
+                )
+                await self._maybe_release_market_data(symbol)
+                return
+
+            stop_price, stop_state, plan_records, oca_group = self._build_protection_plan(
+                symbol=symbol,
+                side=side_upper,
+                quantity=order_size,
+                entry_price=float(selected_price),
+                contract_info=contract_info,
+                strategy_code=strategy_code,
+                signal_targets=signal.get('targets'),
+            )
+
+            bracket = await self._submit_bracket(
+                ib_contract=ib_contract,
+                action=action,
+                order_size=order_size,
+                order_type=order_type,
+                limit_price=limit_price,
+                stop_price=stop_price,
+                stop_state=stop_state,
+                plan_records=plan_records,
+                oca_group=oca_group,
+            )
+
+            trade = bracket['parent_trade']
+            order_id = bracket['parent_order_id']
 
             # Store pending order in Redis
             order_data = {
@@ -1776,8 +3051,11 @@ class ExecutionManager:
                 'confidence': confidence,
                 'strategy': strategy_code or strategy,
                 'entry_target': signal.get('entry'),
-                'stop_loss': signal.get('stop'),
-                'targets': signal.get('targets', []),
+                'stop_loss': stop_price,
+                'targets': [plan.get('price') for plan in plan_records],
+                'stop_order_id': bracket.get('stop_order_id'),
+                'target_order_ids': bracket.get('target_order_ids'),
+                'oca_group': oca_group,
                 'placed_at': time.time(),
                 'status': 'PENDING',
                 'signal': signal,
@@ -1790,11 +3068,27 @@ class ExecutionManager:
             # Track trade for reconciliation/updates
             self.active_trades[order_id] = {'trade': trade, 'signal': signal}
 
-            try:
-                # Monitor order
-                await self.monitor_order(trade, signal)
-            finally:
-                self.active_trades.pop(order_id, None)
+            self.bracket_registry[order_id] = {
+                'parent_trade': trade,
+                'stop_trade': bracket['stop_trade'],
+                'target_trades': bracket['target_trades'],
+                'stop_order_id': bracket.get('stop_order_id'),
+                'target_order_ids': bracket.get('target_order_ids'),
+                'stop_engine_state': bracket['stop_state'],
+                'plan_records': plan_records,
+                'initial_stop': stop_price,
+                'symbol': symbol,
+                'side': side_upper,
+                'strategy': strategy_code,
+                'contract': contract_info,
+                'quantity': order_size,
+                'entry_reference': selected_price,
+                'basis_price': selected_price,
+            }
+
+            watcher = asyncio.create_task(self.monitor_order(trade, signal))
+            self._order_watchers[order_id] = watcher
+            watcher.add_done_callback(lambda _: self._order_watchers.pop(order_id, None))
 
             self.logger.info(
                 "execution_order_placed",
@@ -1811,6 +3105,19 @@ class ExecutionManager:
         except Exception as e:
             self.logger.error(f"Error executing signal: {e}")
             await self.redis.incr('execution:errors:total')
+            order_id = locals().get('order_id')
+            if order_id is not None:
+                await self._cancel_order_id_safe(order_id, context='execute_signal_exception')
+                await self.redis.delete(f'orders:pending:{order_id}')
+                self.pending_orders.pop(order_id, None)
+                self.bracket_registry.pop(order_id, None)
+            await self._acknowledge_signal(
+                signal,
+                status='ERROR',
+                reason='execute_signal_exception',
+                broadcast=True,
+            )
+            await self._maybe_release_market_data(signal.get('symbol') if signal else None)
 
     async def create_ib_contract(self, signal_contract: dict):
         """
@@ -1933,99 +3240,107 @@ class ExecutionManager:
             Order size (contracts or shares)
         """
         try:
-            # Get account value and buying power
-            buying_power = float(await self.redis.get('account:buying_power') or 100000)
-            account_value = float(await self.redis.get('account:value') or 100000)
+            account_value = self.account_state.get('net_liquidation') or self._safe_float(
+                await self.redis.get('account:value')
+            )
+            buying_power = self.account_state.get('buying_power') or self._safe_float(
+                await self.redis.get('account:buying_power')
+            )
 
-            # Get risk multiplier if set by risk manager
-            risk_multiplier = float(await self.redis.get('risk:position_size_multiplier') or 1.0)
-
-            confidence = signal.get('confidence', 60) / 100.0
-            strategy = signal.get('strategy')
-            strategy_code = self._normalize_strategy(strategy)
+            confidence = float(signal.get('confidence', 60))
+            strategy_code = self._normalize_strategy(signal.get('strategy'))
             contract_payload = signal.get('contract', {})
-            raw_type = contract_payload.get('type') or 'option'
-            contract_type = str(raw_type).strip().lower()
+            raw_type = str(contract_payload.get('type') or contract_payload.get('secType') or 'option')
+            contract_type = raw_type.strip().lower()
 
-            # Base position size: 2-5% of account based on confidence
-            base_position_size = account_value * (0.02 + 0.03 * confidence) * risk_multiplier
+            notional, stats = await self.kelly_sizer.suggest_notional(
+                strategy=strategy_code,
+                confidence=confidence,
+                account_value=account_value or 0.0,
+                buying_power=buying_power or 0.0,
+            )
 
-            # Cap at 25% of buying power
-            max_position_size = buying_power * 0.25
-            position_size = min(base_position_size, max_position_size)
-            signal['position_size'] = round(position_size, 2)
+            if notional <= 0:
+                notional = max(1000.0, account_value * 0.01)
+
+            option_price: Optional[float] = None
+            stock_price: Optional[float] = None
+            if ticker:
+                bid = self._safe_price(getattr(ticker, 'bid', None))
+                ask = self._safe_price(getattr(ticker, 'ask', None))
+                last = self._safe_price(getattr(ticker, 'last', None))
+                mid = None
+                if bid is not None and ask is not None:
+                    mid = (bid + ask) / 2
+
+                midpoint = self._safe_price(getattr(ticker, 'midpoint', None)) or mid
+
+                if midpoint is not None:
+                    option_price = midpoint
+                    stock_price = midpoint
+
+                if last is not None:
+                    option_price = option_price or last
+                    stock_price = stock_price or last
+
+            entry_hint = self._safe_price(signal.get('entry'))
+            if option_price is None:
+                option_price = entry_hint if entry_hint is not None else 1.0
+            if stock_price is None:
+                stock_price = entry_hint if entry_hint is not None else 50.0
+
+            signal.setdefault('sizing_stats', {})
 
             if contract_type in {'option', 'options', 'opt'}:
-                # For options, calculate number of contracts
-                # Use mid price or last price
-                if ticker.bid and ticker.ask:
-                    option_price = (ticker.bid + ticker.ask) / 2
-                elif ticker.last:
-                    option_price = ticker.last
+                multiplier = 100.0
+                contracts = int(max(1, notional / max(option_price * multiplier, 1)))
+                if strategy_code == '0DTE':
+                    contracts = min(contracts, self.max_0dte_contracts)
                 else:
-                    # Fallback to estimated price from signal
-                    option_price = signal.get('entry', 1.0)
-
-                if option_price > 0:
-                    # Calculate contracts (each contract = 100 shares)
-                    contracts = int(position_size / (option_price * 100))
-
-                    # Apply strategy-specific limits
-                    if strategy_code == '0DTE':
-                        max_contracts = min(self.max_0dte_contracts, 50)
-                    else:
-                        max_contracts = min(self.max_other_contracts, 100)
-
-                    # Apply confidence-based scaling
-                    if confidence < 0.7:
-                        max_contracts = int(max_contracts * 0.5)
-                    elif confidence < 0.85:
-                        max_contracts = int(max_contracts * 0.75)
-
-                    # Minimum 1 contract, maximum based on strategy
-                    order_size = max(1, min(contracts, max_contracts))
-                    signal['order_size'] = order_size
-                    return order_size
-                else:
-                    signal['order_size'] = 1
-                    return 1  # Default to 1 contract
+                    contracts = min(contracts, self.max_other_contracts)
+                signal['order_size'] = max(1, contracts)
+                position_notional = signal['order_size'] * option_price * multiplier
+                signal['position_size'] = round(position_notional, 2)
+                signal['sizing_stats'] = {
+                    'win_rate': stats.win_rate,
+                    'payoff_ratio': stats.payoff_ratio,
+                    'kelly_fraction': stats.kelly_fraction,
+                    'sample_size': stats.sample_size,
+                    'suggested_notional': notional,
+                }
+                return signal['order_size']
 
             elif contract_type in {'stock', 'equity'}:
-                # For stocks, calculate number of shares
-                if ticker.last:
-                    stock_price = ticker.last
-                elif ticker.bid and ticker.ask:
-                    stock_price = (ticker.bid + ticker.ask) / 2
-                else:
-                    stock_price = signal.get('entry', 100)
+                shares = int(max(1, notional / max(stock_price, 1)))
+                signal['order_size'] = max(1, shares)
+                position_notional = signal['order_size'] * stock_price
+                signal['position_size'] = round(position_notional, 2)
+                signal['sizing_stats'] = {
+                    'win_rate': stats.win_rate,
+                    'payoff_ratio': stats.payoff_ratio,
+                    'kelly_fraction': stats.kelly_fraction,
+                    'sample_size': stats.sample_size,
+                    'suggested_notional': notional,
+                }
+                return signal['order_size']
 
-                if stock_price > 0:
-                    shares = int(position_size / stock_price)
-                    # Round to nearest 100 for better liquidity
-                    shares = max(100, (shares // 100) * 100)
-                    signal['order_size'] = shares
-                    return shares
-                else:
-                    signal['order_size'] = 100
-                    return 100  # Default to 100 shares
             else:
                 self.logger.warning(
                     "Unknown contract type '%s'; defaulting to option sizing", raw_type
                 )
-                if ticker.bid and ticker.ask:
-                    option_price = (ticker.bid + ticker.ask) / 2
-                elif ticker.last:
-                    option_price = ticker.last
-                else:
-                    option_price = signal.get('entry', 1.0)
-
-                if option_price > 0:
-                    contracts = int(position_size / (option_price * 100))
-                    order_size = max(1, contracts)
-                    signal['order_size'] = order_size
-                    return order_size
-                signal['order_size'] = 1
-                return 1
+                multiplier = 100.0
+                contracts = int(max(1, notional / max(option_price * multiplier, 1)))
+                signal['order_size'] = max(1, contracts)
+                position_notional = signal['order_size'] * option_price * multiplier
+                signal['position_size'] = round(position_notional, 2)
+                signal['sizing_stats'] = {
+                    'win_rate': stats.win_rate,
+                    'payoff_ratio': stats.payoff_ratio,
+                    'kelly_fraction': stats.kelly_fraction,
+                    'sample_size': stats.sample_size,
+                    'suggested_notional': notional,
+                }
+                return signal['order_size']
 
         except Exception as e:
             self.logger.error(f"Error calculating order size: {e}")
@@ -2139,6 +3454,47 @@ class ExecutionManager:
         except Exception as exc:  # pragma: no cover - defensive logging
             self.logger.error(f"Failed to enqueue distribution payload: {exc}")
 
+    async def _publish_signal_status(
+        self,
+        signal: Optional[Dict[str, Any]],
+        *,
+        status: str,
+        reason: Optional[str] = None,
+        filled: float = 0.0,
+        avg_price: Optional[float] = None,
+    ) -> None:
+        """Emit a lightweight lifecycle event for non-fill outcomes."""
+        if not signal:
+            return
+
+        if not self.config.get('modules', {}).get('signals', {}).get('enabled', False):
+            return
+
+        try:
+            payload = {
+                'id': signal.get('id'),
+                'symbol': signal.get('symbol'),
+                'strategy': self._normalize_strategy(signal.get('strategy')),
+                'side': signal.get('side'),
+                'action_type': 'EXECUTION_STATUS',
+                'ts': int(time.time() * 1000),
+                'contract': signal.get('contract'),
+                'status': status,
+                'reason': reason,
+            }
+            execution_snapshot = {
+                'status': status,
+                'filled_quantity': filled,
+                'avg_fill_price': float(avg_price) if avg_price is not None else None,
+                'executed_at': datetime.utcnow().isoformat(),
+                'reason': reason,
+            }
+            payload['execution'] = {k: v for k, v in execution_snapshot.items() if v is not None}
+            payload = {k: v for k, v in payload.items() if v is not None}
+            await self.redis.lpush('signals:distribution:pending', json.dumps(payload))
+        except Exception as exc:  # pragma: no cover - defensive
+            self.logger.error(f"Failed to publish signal status: {exc}")
+
     async def _escalate_timeout(self, order_id: int, trade, signal: dict, filled: float, timeout_seconds: int) -> None:
         """Alert and cancel an order that exceeded its monitoring window."""
         symbol = signal.get('symbol')
@@ -2171,7 +3527,10 @@ class ExecutionManager:
         if order_id in self.pending_orders:
             del self.pending_orders[order_id]
 
+        self.bracket_registry.pop(order_id, None)
+
         await self.handle_order_rejection(trade.order, 'Timeout', order_snapshot)
+        await self._maybe_release_market_data(symbol)
 
     async def monitor_order(self, trade, signal: dict):
         """
@@ -2181,39 +3540,57 @@ class ExecutionManager:
         base_timeout = 60 if trade.order.orderType == 'LMT' else 30
         start_time = time.time()
 
-        while True:
-            await asyncio.sleep(0.2)
+        try:
+            while True:
+                await asyncio.sleep(0.2)
 
-            snapshot = await self._sync_trade_state(order_id, trade, signal)
-            status = snapshot['status']
-            filled = snapshot['filled']
-            remaining = snapshot['remaining']
+                snapshot = await self._sync_trade_state(order_id, trade, signal)
+                status = snapshot['status']
+                filled = snapshot['filled']
 
-            if status == 'Filled':
-                await self.handle_fill(trade, signal)
-                break
+                if status == 'Filled':
+                    await self.handle_fill(trade, signal)
+                    break
 
-            if status in {'Cancelled', 'ApiCancelled'}:
-                self.logger.warning(f"Order {order_id} cancelled ({status})")
-                await self.redis.delete(f'orders:pending:{order_id}')
-                if order_id in self.pending_orders:
-                    del self.pending_orders[order_id]
-                await self._acknowledge_signal(
-                    signal,
-                    status=status.upper(),
-                    filled=snapshot.get('filled', 0),
-                    avg_price=snapshot.get('avg_price'),
-                )
-                break
+                if status in {'Cancelled', 'ApiCancelled'}:
+                    self.logger.warning(f"Order {order_id} cancelled ({status})")
+                    await self.redis.delete(f'orders:pending:{order_id}')
+                    if order_id in self.pending_orders:
+                        del self.pending_orders[order_id]
+                    self.bracket_registry.pop(order_id, None)
+                    await self._acknowledge_signal(
+                        signal,
+                        status=status.upper(),
+                        filled=snapshot.get('filled', 0),
+                        avg_price=snapshot.get('avg_price'),
+                        reason=status.lower(),
+                        broadcast=True,
+                    )
+                    await self._maybe_release_market_data(signal.get('symbol') if signal else None)
+                    break
 
-            if status in {'Inactive', 'Rejected'}:
-                await self.handle_order_rejection(trade.order, status)
-                break
+                if status in {'Inactive', 'Rejected'}:
+                    self.bracket_registry.pop(order_id, None)
+                    snapshot = self.pending_orders.get(order_id)
+                    await self.handle_order_rejection(trade.order, status, snapshot)
+                    break
 
-            timeout_window = base_timeout * (2 if filled else 1)
-            if time.time() - start_time >= timeout_window:
-                await self._escalate_timeout(order_id, trade, signal, filled, timeout_window)
-                break
+                timeout_window = base_timeout * (2 if filled else 1)
+                if time.time() - start_time >= timeout_window:
+                    await self._escalate_timeout(order_id, trade, signal, filled, timeout_window)
+                    break
+        except Exception as exc:
+            self.logger.error(f"Error monitoring order {order_id}: {exc}")
+            await self._acknowledge_signal(
+                signal,
+                status='ERROR',
+                reason='monitor_exception',
+                broadcast=True,
+            )
+            await self._maybe_release_market_data(signal.get('symbol') if signal else None)
+        finally:
+            self.active_trades.pop(order_id, None)
+            self._order_watchers.pop(order_id, None)
 
     async def handle_fill(self, trade, signal: dict):
         """
@@ -2311,7 +3688,8 @@ class ExecutionManager:
                 position['strategy'] = normalized_strategy
             elif position.get('strategy'):
                 position['strategy'] = self._normalize_strategy(position.get('strategy'))
-            position['entry_time'] = entry_time
+            if not existing_position or not position.get('entry_time'):
+                position['entry_time'] = entry_time
             if signal.get('stop') is not None:
                 position['stop_loss'] = signal.get('stop')
 
@@ -2326,6 +3704,33 @@ class ExecutionManager:
             position['ib_con_id'] = con_id
             if signal.get('position_size') is not None:
                 position['position_notional'] = signal.get('position_size')
+
+            position.setdefault('realized_posted', float(position.get('realized_posted', 0.0) or 0.0))
+            position.setdefault('realized_unposted', float(position.get('realized_unposted', 0.0) or 0.0))
+
+            bracket_plan = self.bracket_registry.pop(order_id, None)
+            if bracket_plan:
+                position['stop_order_id'] = bracket_plan.get('stop_order_id')
+                position['target_order_ids'] = bracket_plan.get('target_order_ids') or []
+                position['oca_group'] = bracket_plan.get('oca_group')
+                position['stop_engine_state'] = bracket_plan.get('stop_engine_state')
+                position['stop_engine_plan'] = bracket_plan.get('plan_records')
+                position['stop_loss'] = bracket_plan.get('initial_stop')
+                position['targets'] = [plan.get('price') for plan in bracket_plan.get('plan_records', [])]
+                basis = bracket_plan.get('basis_price')
+                if basis:
+                    position['basis_price'] = basis
+                else:
+                    position.setdefault('basis_price', position.get('entry_price'))
+                self.stop_orders[position_id] = bracket_plan.get('stop_trade')
+                if bracket_plan.get('target_trades'):
+                    self.target_orders[position_id] = bracket_plan['target_trades']
+                else:
+                    self.target_orders.pop(position_id, None)
+                self.position_brackets[position_id] = bracket_plan
+            else:
+                # Legacy fallback for manual/unsupervised fills
+                await self._rebuild_bracket(position)
 
             # Store position in Redis
             await self.redis.set(redis_key, json.dumps(position))
@@ -2342,8 +3747,7 @@ class ExecutionManager:
             # Calculate and store commission
             await self.redis.incrbyfloat('execution:commission:total', total_commission)
 
-            # Place stop loss order
-            await self.place_stop_loss(position)
+            await self._ensure_market_data_subscription(symbol, contract_payload)
 
             # Clean up pending order
             await self.redis.delete(f'orders:pending:{order_id}')
@@ -2403,197 +3807,10 @@ class ExecutionManager:
 
     async def place_stop_loss(self, position: dict):
         """
-        Place stop loss order for new position.
+        Legacy wrapper that delegates to the unified bracket builder.
         """
         try:
-            # Create IB contract (add symbol to contract info)
-            contract_info = position.get('contract', {})
-            contract_info['symbol'] = position.get('symbol')  # Add symbol to contract dict
-            ib_contract = await self.create_ib_contract(contract_info)
-            if not ib_contract:
-                self.logger.error(f"Failed to create contract for stop loss")
-                return
-
-            # Determine stop and target actions (opposite of entry)
-            side = position.get('side')
-            close_action = 'SELL' if side == 'LONG' else 'BUY'
-
-            quantity = position.get('quantity') or 0
-            if quantity <= 0:
-                self.logger.warning("Cannot place bracket orders without quantity")
-                return
-
-            position_id = position.get('id')
-            symbol = position.get('symbol')
-
-            existing_stop_trade = self.stop_orders.get(position_id)
-            existing_target_trades = self.target_orders.get(position_id, [])
-            existing_stop_id = position.get('stop_order_id')
-            existing_target_ids = list(position.get('target_order_ids') or [])
-
-            entry_price = float(position.get('entry_price') or 0)
-            strategy = position.get('strategy')
-            strategy_code = self._normalize_strategy(strategy)
-
-            instrument_type = contract_info.get('type') or contract_info.get('secType') or 'default'
-            state = StopState.from_dict(position.get('stop_engine_state'))
-
-            stop_price, state = self.stop_engine.initial_stop(
-                instrument_type,
-                side,
-                entry_price,
-                state=state,
-            )
-
-            allocations = self.stop_engine.plan_targets(
-                instrument_type,
-                side,
-                entry_price,
-                int(quantity),
-                filled_targets=state.filled_targets,
-            )
-
-            plan_records: List[Dict[str, Any]] = []
-            if not allocations:
-                raw_targets = position.get('targets', []) or []
-                for target in raw_targets:
-                    try:
-                        plan_records.append(
-                            {
-                                'profit_pct': None,
-                                'price': round(float(target), 4),
-                                'fraction': 1.0,
-                                'quantity': int(quantity),
-                                'status': 'pending',
-                                'order_id': None,
-                            }
-                        )
-                    except (TypeError, ValueError):
-                        continue
-
-                if not plan_records and entry_price:
-                    fallback_raw = self.stop_engine.target_price(side, entry_price, 30.0)
-                    fallback_rounded = self.stop_engine.quantize_price(
-                        instrument_type,
-                        side,
-                        fallback_raw,
-                    )
-                    default_price = round(fallback_rounded, 4)
-                    plan_records.append(
-                        {
-                            'profit_pct': 30.0,
-                            'price': default_price,
-                            'fraction': 1.0,
-                            'quantity': int(quantity),
-                            'status': 'pending',
-                            'order_id': None,
-                        }
-                    )
-            else:
-                for alloc in allocations:
-                    plan_records.append(
-                        {
-                            'profit_pct': alloc.profit_pct,
-                            'price': round(float(alloc.price), 4),
-                            'fraction': alloc.fraction,
-                            'quantity': int(alloc.quantity),
-                            'status': 'pending',
-                            'order_id': None,
-                        }
-                    )
-
-            sanitized_position = re.sub(r'[^A-Za-z0-9]+', '_', str(position_id or 'UNKNOWN'))
-            base_group = position.get('oca_group') or f"OCA_{sanitized_position}"
-            base_group = re.sub(r'[^A-Za-z0-9_]+', '_', base_group)
-            oca_group = f"{base_group}_{int(time.time())}"
-
-            # Create and submit stop order
-            if state.last_stop_type == 'TRAIL_PERCENT':
-                stop_order = Order()
-                stop_order.orderType = 'TRAIL'
-                stop_order.trailingPercent = round(state.last_stop_value or 0.0, 6)
-                stop_order.trailStopPrice = round(stop_price, 4)
-            else:
-                stop_order = StopOrder(close_action, quantity, round(stop_price, 4))
-            stop_order.action = close_action
-            stop_order.totalQuantity = quantity
-            stop_order.ocaGroup = oca_group
-            stop_order.ocaType = 1
-            stop_order.tif = 'GTC'
-            stop_order.outsideRth = True
-            stop_trade = self.ib.placeOrder(ib_contract, stop_order)
-            stop_order_id = stop_trade.order.orderId
-
-            # Create profit-taking orders for each allocation (sequential OCA bucket)
-            target_order_ids: List[int] = []
-            target_trades: List[Any] = []
-            for idx, plan in enumerate(plan_records):
-                alloc_qty = int(plan.get('quantity') or 0)
-                target_price = float(plan.get('price') or 0)
-                if alloc_qty <= 0 or target_price <= 0:
-                    continue
-
-                limit_order = LimitOrder(close_action, alloc_qty, target_price)
-                limit_order.ocaGroup = oca_group
-                limit_order.ocaType = 1
-                limit_order.tif = 'GTC'
-
-                target_trade = self.ib.placeOrder(ib_contract, limit_order)
-                target_trades.append(target_trade)
-                target_order_ids.append(target_trade.order.orderId)
-                plan['order_id'] = target_trade.order.orderId
-                plan['status'] = 'working'
-
-                self.logger.info(
-                    "execution_target_order",
-                    extra={
-                        "action": "target_order",
-                        "position_id": position_id,
-                        "side": close_action,
-                        "quantity": alloc_qty,
-                        "target_price": round(target_price, 4),
-                        "stage_index": idx,
-                    },
-                )
-
-            # Update position with bracket metadata
-            position['stop_order_id'] = stop_order_id
-            position['target_order_ids'] = target_order_ids
-            position['oca_group'] = oca_group
-            position['stop_loss'] = stop_price
-            position['targets'] = [plan['price'] for plan in plan_records]
-            position['stop_engine_state'] = state.to_dict()
-            position['stop_engine_plan'] = plan_records
-
-            await self.redis.set(f'positions:open:{symbol}:{position_id}', json.dumps(position))
-
-            # Track active orders
-            self.stop_orders[position_id] = stop_trade
-            if target_trades:
-                self.target_orders[position_id] = target_trades
-            else:
-                self.target_orders.pop(position_id, None)
-
-            self.logger.info(
-                "execution_stop_order",
-                extra={
-                    "action": "stop_order",
-                    "position_id": position_id,
-                    "side": close_action,
-                    "quantity": quantity,
-                    "stop_price": round(stop_price, 4),
-                },
-            )
-
-            if any((existing_stop_trade, existing_target_trades, existing_stop_id, existing_target_ids)):
-                await self._retire_previous_bracket(
-                    position_id,
-                    stop_trade=existing_stop_trade,
-                    target_trades=existing_target_trades,
-                    stop_order_id=existing_stop_id,
-                    target_order_ids=existing_target_ids,
-                )
-
+            await self._rebuild_bracket(position)
         except Exception as e:
             self.logger.error(f"Error placing stop loss: {e}")
 
@@ -2614,6 +3831,8 @@ class ExecutionManager:
             if order_id is None:
                 self.logger.error(f"Unable to determine order ID for rejection ({reason})")
                 return
+
+            self.bracket_registry.pop(order_id, None)
 
             # Log rejection
             self.logger.error(f"Order {order_id} rejected: {reason}")
@@ -2656,23 +3875,34 @@ class ExecutionManager:
                 cached_signal = self.pending_orders[order_id].get('signal')
                 del self.pending_orders[order_id]
             self.active_trades.pop(order_id, None)
+            watcher = self._order_watchers.pop(order_id, None)
+            if watcher:
+                watcher.cancel()
+
+            symbol = None
+            if cached_signal and isinstance(cached_signal, dict):
+                symbol = cached_signal.get('symbol')
+            if not symbol and isinstance(order_snapshot, dict):
+                symbol = order_snapshot.get('symbol')
+            await self._maybe_release_market_data(symbol)
 
             signal_payload = cached_signal or (
                 (order_snapshot or {}).get('signal')
                 if isinstance(order_snapshot, dict)
                 else None
             )
+            status_payload = (reason or 'REJECTED').upper()
             await self._acknowledge_signal(
                 signal_payload,
-                status=reason.upper(),
+                status=status_payload,
                 filled=(order_snapshot or {}).get('filled', 0) if isinstance(order_snapshot, dict) else 0,
                 avg_price=(order_snapshot or {}).get('avg_fill_price') if isinstance(order_snapshot, dict) else None,
+                reason=(reason or 'rejected').lower(),
+                broadcast=True,
             )
 
         except Exception as e:
             self.logger.error(f"Error handling rejection: {e}")
-
-        pass
 
     async def get_existing_position_symbols(self) -> list:
         """
@@ -2682,16 +3912,9 @@ class ExecutionManager:
             List of symbols with positions
         """
         try:
-            position_keys = await self.redis.keys('positions:open:*')
-            symbols = set()
-
-            for key in position_keys:
-                # Extract symbol from key format: positions:open:{symbol}:{position_id}
-                parts = key.split(':')
-                if len(parts) >= 4:
-                    symbols.add(parts[2])
-
-            return list(symbols)
+            symbol_sets = await self._scan_keys('positions:by_symbol:*')
+            symbols = [key.split(':', 2)[2] for key in symbol_sets if ':' in key]
+            return symbols
 
         except Exception as e:
             self.logger.error(f"Error getting position symbols: {e}")
@@ -2792,9 +4015,10 @@ class ExecutionManager:
                     realized_override = float(realized_val)
 
             # Check if this is a stop or target order by checking all positions
-            position_keys = await self.redis.keys(f'positions:open:{symbol}:*')
+            position_ids = await self.redis.smembers(f'positions:by_symbol:{symbol}')
 
-            for key in position_keys:
+            for position_id in position_ids or []:
+                key = f'positions:open:{symbol}:{position_id}'
                 position_data = await self.redis.get(key)
                 if not position_data:
                     continue
@@ -2805,36 +4029,30 @@ class ExecutionManager:
 
                 # Check if this fill is for a stop or target order
                 if order_id == stop_order_id or order_id in target_order_ids:
-                    multiplier = self._position_multiplier(position)
                     if realized_override is not None:
                         realized_pnl = realized_override
                     else:
+                        multiplier = self._position_multiplier(position)
+                        entry_ref = self._safe_float(position.get('entry_price'))
                         if position.get('side') == 'LONG':
-                            realized_pnl = (fill_price - position.get('entry_price', 0)) * filled_qty * multiplier
+                            realized_pnl = (fill_price - entry_ref) * filled_qty * multiplier
                         else:
-                            realized_pnl = (position.get('entry_price', 0) - fill_price) * filled_qty * multiplier
+                            realized_pnl = (entry_ref - fill_price) * filled_qty * multiplier
                         if commission:
                             realized_pnl -= commission
 
                     reason = 'STOP' if order_id == stop_order_id else 'TARGET'
 
-                    position['commission'] = float(position.get('commission', 0.0) or 0.0) + commission
-                    events = position.setdefault('realized_events', [])
-                    events.append(
-                        {
-                            'type': reason,
-                            'quantity': filled_qty,
-                            'price': fill_price,
-                            'commission': commission,
-                            'realized': realized_pnl,
-                            'timestamp': datetime.utcnow().isoformat(),
-                            'exec_id': getattr(fill.execution, 'execId', None),
-                            'side': getattr(fill.execution, 'side', None),
-                        }
-                    )
-
                     if reason == 'STOP':
-                        await self._finalize_position_close(position, fill_price, realized_pnl, reason, filled_qty)
+                        await self._apply_position_reduction(
+                            position,
+                            filled_qty,
+                            fill_price,
+                            reason,
+                            commission=commission,
+                            realized_override=realized_pnl,
+                            execution=getattr(fill, 'execution', None),
+                        )
                     else:
                         await self._handle_target_fill(
                             position,
@@ -2930,9 +4148,6 @@ class ExecutionManager:
         if new_qty <= 0:
             return
 
-        # Cancel existing protective orders before resizing them
-        await self._cancel_bracket_orders(position)
-
         position['entry_price'] = self._weighted_entry_price(
             current_qty,
             float(position.get('entry_price', fill_price) or fill_price),
@@ -2941,6 +4156,8 @@ class ExecutionManager:
         )
         position['quantity'] = new_qty
         position['current_price'] = fill_price
+        position['last_fill_price'] = fill_price
+        position['basis_price'] = position['entry_price']
         position['last_update'] = time.time()
         if commission:
             position['commission'] = float(position.get('commission', 0.0) or 0.0) + commission
@@ -2963,7 +4180,7 @@ class ExecutionManager:
             json.dumps(position)
         )
 
-        await self._place_bracket_orders(position, quantity=int(new_qty))
+        await self._rebuild_bracket(position)
 
     async def _apply_position_reduction(
         self,
@@ -3001,10 +4218,9 @@ class ExecutionManager:
 
         new_quantity = max(current_qty - closed_qty, 0)
         position['quantity'] = new_quantity
-        prior_realized = float(position.get('realized_pnl') or 0.0)
-        position['realized_pnl'] = prior_realized + realized_delta
-        unposted = float(position.get('realized_unposted', 0.0) or 0.0) + realized_delta
-        position['realized_unposted'] = unposted
+        await self._register_realized_event(position, realized_delta)
+        position['last_fill_price'] = fill_price
+        position['basis_price'] = position.get('entry_price')
         position.setdefault('reductions', []).append(
             {
                 'quantity': closed_qty,
@@ -3013,6 +4229,7 @@ class ExecutionManager:
                 'timestamp': datetime.utcnow().isoformat(),
                 'realized': realized_delta,
                 'commission': commission,
+                'multiplier': multiplier,
             }
         )
         if commission:
@@ -3036,12 +4253,11 @@ class ExecutionManager:
         if new_quantity <= 0:
             await self._finalize_position_close(position, fill_price, realized_delta, reason, closed_qty)
         else:
-            await self._cancel_bracket_orders(position)
             await self.redis.set(
                 f'positions:open:{symbol}:{position_id}',
                 json.dumps(position)
             )
-            await self._place_bracket_orders(position, quantity=int(new_quantity))
+            await self._rebuild_bracket(position)
 
     async def update_fill_metrics(self, fill):
         """
@@ -3096,5 +4312,5 @@ class ExecutionManager:
             else:
                 if time.time() - order_data.get('placed_at', 0) > 300:
                     self.logger.warning(f"Removing stale order {order_id}")
+                    await self.handle_order_rejection(None, 'Timeout', order_data)
                     del self.pending_orders[order_id]
-                    await self.redis.delete(f'orders:pending:{order_id}')

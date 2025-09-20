@@ -10,6 +10,7 @@
 | **5 – Backfills & Monitoring** | ✅ Complete | Replay utilities for analytics history, monitoring scaffolds, regression coverage for replay paths | Replay scripts, monitoring heartbeats in Redis | Update legacy tests, automate replay validation, alerting for stalled jobs |
 | **6 – Execution & Distribution Hardening** | ✅ Complete | Notional-aware sizing, commission normalization, bracket/trailing rebuilds, executed-only distribution, daily P&L reconciliation | `src/execution_manager.py`, `src/position_manager.py`, `src/signal_distributor.py`, `reconcile_daily_pnl.py` | Automated reconciliation checks, expanded risk regression coverage, execution dashboards |
 | **7 – Community Publishing & Automation** | ⚠️ In Planning | Scaffolds for social bots, dashboards, morning automation, reporting wired to config + Redis | `src/discord_bot.py`, `src/telegram_bot.py`, `src/twitter_bot.py`, `src/morning_scanner.py`, `src/report_generator.py` | Implement publishing logic, provision credentials, observability, integration tests |
+| **8 – Execution Router Rewrite** | ⚠️ In Planning | Stage-gated replacement of `ExecutionManager`/`PositionManager` with IBKR-native event-driven router | `docs/execution_router_plan.md`, router scaffolding (TBD) | Phase 0 hotfixes, contract definition, IB-driven dual-run migration |
 
 ## Delivered Implementation Detail
 
@@ -144,3 +145,15 @@
 - **Execution & risk**: `src/execution_manager.py`, `src/position_manager.py`, `src/risk_manager.py`, `src/emergency_manager.py`, `reconcile_daily_pnl.py`
 - **Distribution & comms**: `src/signal_distributor.py`, `src/discord_bot.py`, `src/telegram_bot.py`, `src/twitter_bot.py`, `src/morning_scanner.py`, `src/news_analyzer.py`, `src/report_generator.py`
 - **Documentation**: `docs/ingestion_module.md`, `docs/analytics_module.md`
+
+### Execution Router Rewrite (Phase 8)
+- **Strategy**: Replace the monolithic `ExecutionManager`/`PositionManager` with a stateless execution router that translates sized signals into IBKR-native bracket/adjustable orders and consumes IBKR event streams as the canonical lifecycle feed.
+- **Fulfilment Stages**:
+  1. **Phase 0 – Stabilization**: Ship trailing-stop/action hotfix, contract-aware market data cache, `positions:count` reconciliation, and divergence diagnostics.
+  2. **Phase 1 – Requirements**: Catalogue retained business logic, Redis contracts, and define DTO schemas (`OrderRequest`, lifecycle events, position/pnl snapshots).
+  3. **Phase 2 – Blueprint**: Finalize module boundaries, dependency injection, and sequencing (risk → router → IBKR → downstream).
+  4. **Phase 3 – Implementation**: Build router package, contract builder, bracket/stop orchestration, event bridge, and comprehensive tests (unit + paper integration).
+  5. **Phase 4 – Dual-Run Migration**: Mirror signals in paper, validate parity metrics, and cut over with rollback guard.
+  6. **Phase 5 – Decommission**: Retire legacy managers, migrate consumers, update docs/runbooks.
+  7. **Phase 6 – Hardening**: Add alerting, IB algo support consideration, streaming upgrades.
+- **Artifacts**: `docs/execution_router_plan.md` (detailed schedule, risk register, success criteria), forthcoming router module under `src/execution_router/` (TBD).

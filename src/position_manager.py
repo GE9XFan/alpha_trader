@@ -511,28 +511,13 @@ class PositionManager:
                 # Load all open positions from Redis
                 await self.load_positions()
 
-                # Update P&L every 2 seconds (reduced from 5 for faster stop detection)
+                # Update P&L periodically
                 if current_time - last_pnl_update >= 2:
                     await self.update_all_positions_pnl()
                     last_pnl_update = current_time
 
-                # Check for exit conditions (backup for IBKR stops)
-                await self.check_exit_conditions()
-
-                dirty_ids = await self.refresh_market_prices()
-                if dirty_ids:
-                    await self.manage_trailing_stops(candidate_ids=dirty_ids)
-                else:
-                    await self.manage_trailing_stops()
-
-                await self.enforce_stop_invariants()
-                await self.enforce_expiry_rules()
-
-                # Check targets for scaling
-                await self.check_targets()
-
-                # Handle EOD for 0DTE positions
-                await self.handle_eod_positions()
+                # Publish condensed summary for dashboards / downstream consumers
+                await self.get_position_summary()
 
                 # Update heartbeat
                 await self.redis.setex('health:positions:heartbeat', 15, current_time)
