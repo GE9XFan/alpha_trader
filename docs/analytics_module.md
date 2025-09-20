@@ -11,7 +11,7 @@ Transform raw market structure, options positioning, and volatility telemetry in
 | `src/gex_dex_calculator.py` (`GEXDEXCalculator`) | Derive gamma/delta exposure heatmaps using normalized option chains or legacy greeks keys, record z-scores | `calculate_gex`, `calculate_dex`, `_collect_option_keys`, `_update_metric_statistics` | `analytics:{symbol}:gex`, `analytics:{symbol}:dex`, `options:{symbol}:*`, `market:{symbol}:ticker`, `analytics:{symbol}:{metric}:history` |
 | `src/pattern_analyzer.py` (`PatternAnalyzer`) | Assess flow toxicity, classify institutional vs retail flow, compute order book imbalance, sweep/hidden activity | `analyze_flow_toxicity`, `_compute_participant_flows`, `calculate_order_book_imbalance`, `detect_sweeps`, `detect_hidden_orders` | `analytics:{symbol}:toxicity`, `analytics:{symbol}:institutional_flow`, `analytics:{symbol}:retail_flow`, `analytics:{symbol}:obi`, `analytics:{symbol}:metric:*`, `market:{symbol}:book`, `market:{symbol}:trades`, `analytics:{symbol}:vpin` |
 | `src/dealer_flow_calculator.py` (`DealerFlowCalculator`) | Compute vanna, charm, skew, and hedging elasticity across expiries; maintain historical z-scores | `calculate_dealer_metrics`, `_aggregate_metrics`, `_compute_skew`, `_update_history` | `analytics:{symbol}:vanna`, `analytics:{symbol}:charm`, `analytics:{symbol}:hedging_impact`, `analytics:{symbol}:skew`, `options:{symbol}:chain`, `market:{symbol}:ticker` |
-| `src/flow_clustering.py` (`FlowClusterModel`) | Cluster recent trades into strategy archetypes (momentum/mean-reversion/hedging) and participant mix | `classify_flows`, `_load_trades`, `_cluster`, `_compute_cluster_stats`, `_build_payload` | `analytics:{symbol}:flow_clusters`, `market:{symbol}:trades` |
+| `src/flow_clustering.py` (`FlowClusterModel`) | Cluster recent trades into strategy archetypes (momentum/mean-reversion/hedging) and participant mix with millisecond timestamps normalized to seconds | `classify_flows`, `_load_trades`, `_cluster`, `_compute_cluster_stats`, `_build_payload` | `analytics:{symbol}:flow_clusters`, `market:{symbol}:trades` |
 | `src/volatility_metrics.py` (`VolatilityMetrics`) | Ingest VIX1D from multiple sources with caching/backoff; compute regime, z-score, percentile | `update_vix1d`, `_fetch_vix1d_*`, `_update_history`, `_classify_regime`, `ingest_manual`, `close` | `analytics:vix1d`, `volatility:vix1d:*`, `discovered:*` |
 
 ## Data Flow Overview
@@ -22,7 +22,7 @@ Options chains / Greeks ├─▶ Analytics Engine ─▶ Calculators ─▶ ana
 Volatility feeds ───────┘               │              │
                                        └─▶ Metrics Aggregator ─▶ analytics:portfolio:*
 ```
-The engine coordinates asynchronous calculators and persists their outputs back to Redis. Downstream consumers (signal generator, dashboard, monitoring) read from the analytics keys exclusively, decoupling them from raw market ingestion schemas.
+The engine coordinates asynchronous calculators and persists their outputs back to Redis. Downstream consumers (signal generator, dashboard, monitoring) read from the analytics keys exclusively, decoupling them from raw market ingestion schemas. Flow clustering now executes for the union of all enabled strategy universes, so non-0DTE playbooks (e.g., 14 DTE equities) receive participant-mix telemetry alongside the index set.
 
 ## Analytics Engine
 ### Startup & Scheduling
@@ -74,10 +74,10 @@ The engine coordinates asynchronous calculators and persists their outputs back 
 - Updates rolling history for vanna/charm/skew using pipeline operations and stores metrics with TTL `store_ttls.analytics`.
 
 ### Flow Clustering (`src/flow_clustering.py`)
-- Loads recent trades (`window_trades`, default 150), engineering features (log size, direction, volatility-scaled price change, log notional, sweep flag, log time gap).
+- Loads recent trades (`window_trades`, default 150), engineering features (log size, direction, volatility-scaled price change, log notional, sweep flag, log time gap). Millisecond trade timestamps from IBKR are explicitly normalized to seconds before log scaling so densely printed bursts do not dominate the feature space.
 - Runs KMeans(k=3) with fallback for low-variance samples (assigns all trades to one cluster while keeping centroid arrays consistent).
 - Deterministically maps clusters to `momentum`, `hedging`, `mean_reversion` without reusing indices, and computes participant distribution based on average trade size vs `institutional_size` threshold.
-- Stores payload at `analytics:{symbol}:flow_clusters` with TTL derived from update interval.
+- Stores payload at `analytics:{symbol}:flow_clusters` with TTL derived from update interval and now executes for the full strategy symbol universe (not just the 0DTE set).
 
 ### Flow Toxicity Heuristics (`PatternAnalyzer.analyze_flow_toxicity`)
 - Pulls the latest VPIN value, recent trades (`market:{symbol}:trades`), and top-of-book quotes to rerun a lightweight Lee–Ready classification without relying on venue identifiers.

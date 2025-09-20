@@ -497,16 +497,52 @@ class IBKRIngestion:
         if not ticker_data:
             return
 
+        simple_book: Optional[Dict[str, Any]] = None
+        if symbol not in self.level2_symbols:
+            simple_book = self._build_simple_book(ticker, ticker_data)
+        else:
+            # For symbols with attempted L2 depth, only synthesize a book if every
+            # exchange is currently in fallback mode.
+            has_active_l2 = any(
+                key.startswith(f"{symbol}:") and key not in self.l2_fallback_exchanges
+                for key in self.depth_tickers.keys()
+            )
+            if not has_active_l2:
+                simple_book = self._build_simple_book(ticker, ticker_data)
+
         async with self.redis.pipeline(transaction=False) as pipe:
             await pipe.setex(
                 rkeys.market_ticker_key(symbol),
                 self.ttls['market_data'],
                 json.dumps(ticker_data)
             )
+            if simple_book:
+                await pipe.setex(
+                    rkeys.market_book_key(symbol),
+                    self.ttls['order_book'],
+                    json.dumps(simple_book)
+                )
             await pipe.execute()
 
         self.last_update_times[symbol] = time.time()
-    
+
+    def _build_simple_book(self, ticker, ticker_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        bid = ticker_data.get('bid')
+        ask = ticker_data.get('ask')
+        if bid is None or ask is None:
+            return None
+
+        bid_size = self.processor._safe_int(getattr(ticker, 'bidSize', None)) or 0
+        ask_size = self.processor._safe_int(getattr(ticker, 'askSize', None)) or 0
+
+        timestamp_ms = int(time.time() * 1000)
+        return {
+            'bids': [{'price': bid, 'size': bid_size, 'venue': 'TOB'}],
+            'asks': [{'price': ask, 'size': ask_size, 'venue': 'TOB'}],
+            'timestamp': timestamp_ms,
+            'exchange': 'TOB'
+        }
+
     async def _on_ticker_update_async(self, tickers):
         """Process ticker updates for trades and depth."""
         for ticker in tickers:

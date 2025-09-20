@@ -24,8 +24,8 @@ Traditional retail platforms lack visibility into dealer hedging flows and marke
 
 | Component | Responsibilities | Redis Touchpoints |
 |-----------|------------------|-------------------|
-| **Ingestion** | • Stream IBKR Level 2 depth with venue codes<br>• Aggregate 1-minute bars from 5-second samples<br>• Fetch options chains with full Greeks | `market:{symbol}:book`<br>`market:{symbol}:bars:1min`<br>`options:{symbol}:chain` |
-| **Analytics** | • Calculate VPIN toxicity and order imbalance<br>• Compute GEX/DEX exposure profiles<br>• Segment institutional vs retail flows alongside KMeans clustering | `analytics:{symbol}:vpin`<br>`analytics:{symbol}:gex`<br>`analytics:{symbol}:institutional_flow` / `retail_flow`<br>`analytics:{symbol}:flow_clusters` |
+| **Ingestion** | • Stream IBKR Level 2 depth with venue codes or synthesize TOB fallback books when L2 is unavailable<br>• Aggregate 1-minute bars from 5-second samples<br>• Fetch options chains with full Greeks | `market:{symbol}:book`<br>`market:{symbol}:bars:1min`<br>`options:{symbol}:chain` |
+| **Analytics** | • Calculate VPIN toxicity and order imbalance (fed by either full depth or synthesized books)<br>• Compute GEX/DEX exposure profiles<br>• Segment institutional vs retail flows alongside KMeans clustering across every enabled strategy universe | `analytics:{symbol}:vpin`<br>`analytics:{symbol}:gex`<br>`analytics:{symbol}:institutional_flow` / `retail_flow`<br>`analytics:{symbol}:flow_clusters` |
 | **Signal Engine** | • Score multi-factor DTE opportunities using live option chains<br>• Detect MOC auction imbalances<br>• Enforce contract-level deduplication | `signals:pending:{symbol}`<br>`signals:execution:{symbol}`<br>`signals:emitted:{fingerprint}` |
 | **Execution** | • Place bracket orders on fills<br>• Manage trailing stop adjustments<br>• Sync positions with IBKR in real-time | `positions:open:{account}:{conId}`<br>`orders:pending:{orderId}`<br>`execution:fills:{symbol}` |
 | **Distribution** | • Route signals to tier queues<br>• Enforce 0/60/300s delays<br>• Track delivery metrics | `distribution:premium:queue`<br>`distribution:basic:queue`<br>`distribution:metrics` |

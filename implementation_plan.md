@@ -5,7 +5,7 @@
 |-------|--------|-------------------------|-----------------------|----------------|
 | **1 – Schema & Configuration** | ✅ Complete | Canonical Redis key helpers, unified module toggles, cadence/TTL controls, bootstrap wiring in `main.py` | `redis_keys.py`, `config/config.yaml`, config load path in `main.py` | Expand schema docs, `.env` templates, automated config validation |
 | **2 – Dealer-Flow Analytics** | ✅ Complete | DealerFlowCalculator, metrics aggregation into symbol/sector/portfolio snapshots, hedging elasticity metrics, analytics scheduler | `src/dealer_flow_calculator.py`, `src/analytics_engine.py`, dashboards TTL checks | Regression coverage for edge cases, performance profiling |
-| **3 – Flow Clustering & Volatility Regimes** | ✅ Complete | FlowClusterModel, VolatilityMetrics, VIX1D regime tagging, analytics integration | `src/flow_clustering.py`, `src/volatility_metrics.py`, scheduler logs | Validate clustering on expanded universes, regime calibration tooling |
+| **3 – Flow Clustering & Volatility Regimes** | ✅ Complete | FlowClusterModel, VolatilityMetrics, VIX1D regime tagging, analytics integration | `src/flow_clustering.py`, `src/volatility_metrics.py`, scheduler logs | Backtest clustering quality across equity universes, regime calibration tooling |
 | **4 – Signal Integration & Scoring** | ✅ Complete | Feature reader refresh, 0/1/14DTE + MOC playbooks, exposure-aware dedupe, execution acknowledgements, observability metrics | `src/signal_generator.py`, `src/dte_strategies.py`, `src/moc_strategy.py`, `src/signal_deduplication.py` | Strategy unit/backtest harness, tuning guidance |
 | **5 – Backfills & Monitoring** | ✅ Complete | Replay utilities for analytics history, monitoring scaffolds, regression coverage for replay paths | Replay scripts, monitoring heartbeats in Redis | Update legacy tests, automate replay validation, alerting for stalled jobs |
 | **6 – Execution & Distribution Hardening** | ✅ Complete | Notional-aware sizing, commission normalization, bracket/trailing rebuilds, executed-only distribution, daily P&L reconciliation | `src/execution_manager.py`, `src/position_manager.py`, `src/signal_distributor.py`, `reconcile_daily_pnl.py` | Automated reconciliation checks, expanded risk regression coverage, execution dashboards |
@@ -26,9 +26,10 @@
 - **Documentation**: Architecture, cadences, and Redis touchpoints for analytics are captured in `docs/analytics_module.md` (paired with the ingestion deep dive).
 - **Monitoring**: Heartbeats and state flags updated via `analytics_engine` for operations observability.
 - **Participant flow metrics** (`src/pattern_analyzer.py`): Flow toxicity pipeline now classifies institutional vs retail flow heuristically and stores `analytics:{symbol}:institutional_flow` / `retail_flow` payloads for downstream scoring.
+- **Synthetic order-book fallback** (`src/ibkr_ingestion.py`): When Level 2 depth is unavailable, `_build_simple_book` derives a TOB-based book so order-book imbalance analytics and downstream strategies continue receiving non-neutral payloads for standard symbols.
 
 ### Flow Clustering & Volatility Regimes (Phase 3)
-- **FlowClusterModel** (`src/flow_clustering.py`): Consumes trade prints to categorize flow (momentum, dealer hedging, reversion) using KMeans; publishes distribution histograms.
+- **FlowClusterModel** (`src/flow_clustering.py`): Consumes trade prints to categorize flow (momentum, dealer hedging, reversion) using KMeans; normalizes millisecond timestamps to seconds for stable feature scaling; publishes distribution histograms for the union of all enabled strategy symbols.
 - **VolatilityMetrics** (`src/volatility_metrics.py`): Maintains VIX1D history, computes regimes, and tracks transitions; surfaces regime metadata for signals and dashboards.
 - **Integration**: Analytics engine coordinates cadence, gating within RTH, and merges clustering/regime outputs into the same symbol snapshots consumed by signal scoring.
 

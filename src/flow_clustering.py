@@ -147,10 +147,14 @@ class FlowClusterModel:
 
         features: List[List[float]] = []
         prev_ts = trades[0].timestamp
+        # Timestamps arrive in milliseconds from ingestion; normalize to seconds for
+        # the temporal features below so the log scaling remains well behaved.
+        def _gap_seconds(current_ts: float, previous_ts: float) -> float:
+            return max((current_ts - previous_ts) / 1000.0, 0.0)
         prev_price = trades[0].price
 
         for trade in trades:
-            time_gap = max(trade.timestamp - prev_ts, 0.0)
+            time_gap = _gap_seconds(trade.timestamp, prev_ts)
             price_change = trade.price - prev_price
             volatility_scaled = abs(price_change) / max(prev_price, 1e-6)
 

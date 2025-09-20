@@ -39,10 +39,11 @@ analytics:{symbol}:*  ──┐
 4. Per-symbol throttling is enforced via `min_refresh_s`; stale or schema-incomplete features trigger metrics increments (`metrics:signals:blocked:stale_features`, `metrics:signals:blocked:no_features`).
 
 ## Feature Ingestion Pipeline
-- `default_feature_reader` batches Redis fetches for market ticks, bars, VPIN, OBI, GEX/DEX, dealer flows, toxicity, flow clusters, participant flow splits, and the normalized options chain. When the Alpha Vantage payload only exposes `by_contract`, the reader now hydrates the list directly so every strategy receives canonical strike/expiry/greek data without duplicating storage.
+- `default_feature_reader` batches Redis fetches for market ticks, bars, VPIN, OBI, GEX/DEX, dealer flows, toxicity, flow clusters, participant flow splits, and the normalized options chain. When the Alpha Vantage payload only exposes `by_contract`, the reader now hydrates the list directly so every strategy receives canonical strike/expiry/greek data without duplicating storage. Synthetic top-of-book books published by ingestion ensure OBI values stay live even for symbols without native L2 access, so strategy vetoes no longer oscillate between neutral and stale for the equity universe.
 - Freshness is validated using the embedded timestamp/age; breaches feed the veto metrics.
 - Toxicity payloads now contain: raw and adjusted scores, aggressor ratios, large-trade ratios, institutional score, spread-cross ratios, derived venue mix, and confidence estimation. Complementary participant heuristics are persisted at `analytics:{symbol}:institutional_flow` / `analytics:{symbol}:retail_flow`; the reader surfaces their `value` ratios while preserving the raw payload for diagnostics.
 - New feature fields surfaced to strategies include `toxicity_adjusted`, `aggressor_ratio`, `large_trade_ratio`, `institutional_flow`, `retail_flow`, `gamma_pin_proximity`, `gamma_pull_dir`, dealer-flow notional/z-scores, and the fully normalized `options_chain` list.
+- Flow clustering outputs are refreshed for every symbol participating in any enabled strategy, so `flow_momentum`, `flow_mean_reversion`, and participant split metrics remain populated for the 14 DTE equity universe instead of only the index complex.
 
 ## Strategy Stack
 ### 0DTE

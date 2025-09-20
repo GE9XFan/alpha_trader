@@ -6,7 +6,7 @@ Maintain low-latency, loss-aware ingestion of market structure, options analytic
 ## Component Matrix
 | Module | Responsibilities | Core Loops / Handlers | Redis Touchpoints |
 |--------|------------------|-----------------------|-------------------|
-| `src/ibkr_ingestion.py` (`IBKRIngestion`) | Stream Level 2 depth, trades, and 5-second bars; aggregate 1-minute candles; monitor freshness and connection state | `start`, `_connect_with_retry`, `_on_depth_update_async`, `_on_ticker_update_async`, `_metrics_loop`, `_freshness_check_loop`, `_status_logger_loop` | `market:{symbol}:book`, `market:{symbol}:ticker`, `market:{symbol}:bars:{tf}`, `market:{symbol}:trades`, `monitoring:ibkr:metrics`, `heartbeat:ibkr_ingestion` |
+| `src/ibkr_ingestion.py` (`IBKRIngestion`) | Stream Level 2 depth, synthesize fallback books from TOB when L2 is unavailable, record trades and 5-second bars, aggregate 1-minute candles, monitor freshness and connection state | `start`, `_connect_with_retry`, `_on_depth_update_async`, `_on_ticker_update_async`, `_build_simple_book`, `_metrics_loop`, `_freshness_check_loop`, `_status_logger_loop` | `market:{symbol}:book`, `market:{symbol}:ticker`, `market:{symbol}:bars:{tf}`, `market:{symbol}:trades`, `monitoring:ibkr:metrics`, `heartbeat:ibkr_ingestion` |
 | `src/ibkr_processor.py` (`IBKRDataProcessor`) | Normalize DOM levels, compute aggregated nbbo, prepare trade payloads, record bar buffers | `update_depth_book`, `compute_aggregated_tob`, `prepare_trade_storage`, `build_quote_ticker`, `record_bar` | In-memory caches feeding `IBKRIngestion` Redis writes |
 | `src/av_ingestion.py` (`AlphaVantageIngestion`) | Poll options chains, sentiment feed, and technical indicators with rolling rate limiting and failure circuit breaking | `_update_loop`, `_fetch_with_retry`, `fetch_options_chain`, `fetch_sentiment`, `fetch_technicals`, `_metrics_loop` | `options:{symbol}:*`, `sentiment:{symbol}`, `technicals:{symbol}:{indicator}`, `monitoring:alpha_vantage:metrics`, `heartbeat:alpha_vantage` |
 | `src/av_options.py` (`OptionsProcessor`) | Normalize Alpha Vantage option chains, persist calls/puts/greeks, publish monitoring payloads, trigger callbacks, expose canonical `by_contract` payloads for analytics/signals | `fetch_options_chain`, `_store_options_data`, `_normalize_contract`, `_notify_chain` | `options:{symbol}:calls`, `options:{symbol}:puts`, `options:{symbol}:chain`, `options:{symbol}:{contractId}:greeks`, `monitoring:options:{symbol}` |
@@ -41,12 +41,14 @@ Downstream consumers (analytics engine, signal generator, execution manager, dis
 | `dom` callbacks (per exchange) | `_on_depth_update_async` | Normalizes DOM via `IBKRDataProcessor`, stores per-exchange book + aggregated NBBO |
 | Disconnection | `_on_disconnect` → `_reconnect` | Marks `ibkr:connected=0`, attempts resubscription if `running` |
 | Errors (309/2152/etc.) | `_on_error` | Handles entitlement/L2 limits, toggles fallback to TOB |
+| TOB quote without active L2 | `_on_tob_update_async` → `_build_simple_book` | Synthesizes a single-level book from bid/ask quotes so downstream OBI analytics continue to receive data for standard symbols |
 
 ### Redis Writes
 | Key | Payload | Source Method |
 |-----|---------|---------------|
 | `market:{symbol}:{exchange}:book` | Venue-specific depth snapshot | `_on_depth_update_async` |
 | `market:{symbol}:ticker` | Aggregated bid/ask/last/mid/spread | `_on_depth_update_async`, `_on_tob_update_async`, `_update_trade_data_redis` |
+| `market:{symbol}:book` (TOB fallback) | Synthetic one-level book derived from current bid/ask when L2 depth is unavailable | `_on_tob_update_async` via `_build_simple_book` |
 | `market:{symbol}:trades` | Rolling list (≤1000) of trades with venue/time | `_update_trade_data_redis` |
 | `market:{symbol}:bars:5s` | 5-second raw bars | `_store_raw_bar` |
 | `market:{symbol}:bars:1min` | Aggregated minute candles | `_flush_minute_bar` |

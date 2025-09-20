@@ -535,11 +535,19 @@ class AnalyticsEngine:
         self.update_intervals = {**default_intervals, **configured_intervals}
 
         signals_cfg = config.get('modules', {}).get('signals', {})
-        cluster_symbols = signals_cfg.get('strategies', {}).get('0dte', {}).get('symbols', self.symbols)
-        if isinstance(cluster_symbols, list):
-            self.flow_cluster_symbols = sorted({s for s in cluster_symbols if isinstance(s, str)})
-        else:
-            self.flow_cluster_symbols = list(self.symbols)
+        strategy_cfgs = signals_cfg.get('strategies', {})
+        symbols_from_strategies = set()
+        for strat in strategy_cfgs.values():
+            strat_symbols = strat.get('symbols', [])
+            if isinstance(strat_symbols, list):
+                symbols_from_strategies.update(
+                    s for s in strat_symbols if isinstance(s, str)
+                )
+
+        if not symbols_from_strategies:
+            symbols_from_strategies = set(self.symbols)
+
+        self.flow_cluster_symbols = sorted(symbols_from_strategies)
 
         # Track last update times and error counts
         self.last_updates: Dict[str, float] = defaultdict(float)
